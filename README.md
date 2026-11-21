@@ -32,3 +32,4 @@
 - **UI Framework:** Jetpack Compose (Material 3)
 - **Graphics Engine:** Custom OpenGL ES Shaders & Dual-Resolution Proxy Pipeline
 - **CI/CD:** Automated APK builds via GitHub Actions
+still need a lot of  work to do this just the start 
