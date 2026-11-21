@@ -1,0 +1,37 @@
+<resources>
+    <string name="app_name">ZamLab</string>
+    <string name="cd_zamlab_emblem">ZamLab aperture prism emblem</string>
+    <string name="action_export">Export</string>
+    <string name="action_import_lut">Import LUT / ZIP</string>
+    <string name="action_heal_undo">Undo Stroke</string>
+    <string name="action_heal_redo">Redo Stroke</string>
+    <string name="action_heal_show_mask">Show Mask</string>
+    <string name="action_heal_hide_mask">Hide Mask</string>
+    <string name="action_heal_reset">Reset Heal</string>
+    <string name="action_set_clone_source">Set Source</string>
+    <string name="tab_adjust">Adjust</string>
+    <string name="tab_luts">LUTs</string>
+    <string name="tab_crop">Crop &amp; Rotate</string>
+    <string name="tab_heal">Heal</string>
+    <string name="tab_mask">Masks</string>
+    <string name="action_save_look">+ Save Current Look</string>
+    <string name="cd_photo_canvas">Editable photograph canvas</string>
+    <string name="cd_open_photo">Open photo from device gallery</string>
+    <string name="cd_export_photo">Export full resolution image</string>
+    <string name="cd_compare_before_after">Press to compare original unedited photo</string>
+    <string name="cd_reset_adjustments">Reset all color adjustments and LUT</string>
+    <string name="cd_heal_undo">Undo last heal brush stroke</string>
+    <string name="cd_heal_redo">Redo last heal brush stroke</string>
+    <string name="cd_heal_toggle_mask">Show or hide retouching mask overlay</string>
+    <string name="cd_heal_reset">Reset all heal strokes on this photo</string>
+    <string name="cd_set_clone_source">Pick clean source point for Clone Stamp</string>
+    <string name="cd_undo_history">Undo last edit</string>
+    <string name="cd_redo_history">Redo edit</string>
+    <string name="cd_split_compare">Toggle split-screen before and after comparison</string>
+    <string name="cd_open_profile_menu">Open camera profile selector menu</string>
+    <string name="cd_open_profile_browser">Open visual profile thumbnail browser</string>
+    <string name="cd_wb_dropdown">Select white balance preset</string>
+    <string name="cd_wb_eyedropper">Pick white balance from neutral area on photo</string>
+    <string name="cd_point_color_eyedropper">Pick color directly from photo for Point Color</string>
+    <string name="cd_cancel_eyedropper">Cancel color eyedropper</string>
+</resources>
