@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import androidx.core.graphics.createBitmap
 import com.example.lut.CubeLut
 import com.example.lut.LutSourceFormat
+import com.example.lut.LutType
+import com.example.nativebridge.NativeBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -326,6 +328,7 @@ object ColorGradingEngine {
         val total = width * height
 
         var oobMask: BooleanArray? = null
+        var hasAnyOob = false
         var srcPixelsRef: IntArray? = if (!hasGeomOrCrop) {
             rawPixels
         } else {
@@ -369,6 +372,7 @@ object ColorGradingEngine {
                     }
                     if (isOob) {
                         mask[rowOff + x] = true
+                        hasAnyOob = true
                         resampled[rowOff + x] = 0xFF0B0E14.toInt()
                     } else {
                         resampled[rowOff + x] = sampleBilinear(localRaw, rawW, rawH, su, sv)
@@ -382,23 +386,47 @@ object ColorGradingEngine {
             rawPixels = null
         }
 
-        val onlyGeomOrCrop = hasGeomOrCrop &&
-            !params.hasProfileEdits &&
-            !params.hasLightEdits &&
-            !params.hasColorEdits &&
-            !params.hasEffectsEdits &&
-            !params.hasDetailEdits &&
-            !params.hasOpticsEdits &&
-            !params.hasLensBlurEdits &&
-            !params.hasCalibrationEdits &&
-            !applyLut
+        val activeMasks = params.masks
+            .filter { it.enabled && it.hasAdjustments }
+            .take(MAX_LOCAL_MASKS)
+        val hasActiveMasks = activeMasks.isNotEmpty()
+        val hasNonLutPixelEdits =
+            params.hasProfileEdits ||
+            params.hasLightEdits ||
+            params.hasColorEdits ||
+            params.hasEffectsEdits ||
+            params.hasDetailEdits ||
+            params.hasOpticsEdits ||
+            params.hasLensBlurEdits ||
+            params.hasCalibrationEdits ||
+            hasActiveMasks
 
+        val onlyGeomOrCrop = hasGeomOrCrop && !hasNonLutPixelEdits && !applyLut
         if (onlyGeomOrCrop) {
             val pixelsToWrite = srcPixelsRef!!
             srcPixelsRef = null
             val out = createBitmap(width, height)
             out.setPixels(pixelsToWrite, 0, width, 0, 0, width, height)
             return@coroutineScope out
+        }
+
+        val lutMix = if (applyLut) params.lutIntensity.coerceIn(0f, 1f) else 0f
+        val preferNative3dLut = applyLut &&
+            effectiveLut!!.type == LutType.LUT_3D &&
+            lutMix > 0.001f &&
+            !hasAnyOob &&
+            NativeBridge.isAvailable
+
+        if (!hasNonLutPixelEdits && preferNative3dLut) {
+            val out = createBitmap(width, height)
+            out.setPixels(srcPixelsRef!!, 0, width, 0, 0, width, height)
+            if (tryApplyLut3dNative(out, effectiveLut!!, lutMix)) {
+                srcPixelsRef = null
+                rawPixels = null
+                oobMask = null
+                return@coroutineScope out
+            }
+            if (!out.isRecycled) out.recycle()
         }
 
         val srcPixels = srcPixelsRef!!
@@ -503,7 +531,6 @@ object ColorGradingEngine {
         val minRes = max(1, min(width, height)).toFloat()
         val aspectX = width.toFloat() / minRes
         val aspectY = height.toFloat() / minRes
-        val lutMix = if (applyLut) params.lutIntensity.coerceIn(0f, 1f) else 0f
 
         val activeProfile = CameraProfiles.byId(params.profileId)
         val hasProfile = activeProfile.isCreative && params.profileAmount > 0.001f
@@ -531,10 +558,6 @@ object ColorGradingEngine {
         val cgPivot = (0.5f + (cg.balance / 100f).coerceIn(-1f, 1f) * 0.24f).coerceIn(0.22f, 0.78f)
         val cgHalfW = 0.22f + (0.60f - 0.22f) * cgBlend
 
-        val activeMasks = params.masks
-            .filter { it.enabled && it.hasAdjustments }
-            .take(MAX_LOCAL_MASKS)
-        val hasActiveMasks = activeMasks.isNotEmpty()
         val outputAspect = width.toFloat() / height.coerceAtLeast(1).toFloat()
 
         val workerCount = if (total > 80_000) 4 else 1
@@ -1267,8 +1290,8 @@ object ColorGradingEngine {
                             b = (b + gDelta).coerceIn(0f, 1f)
                         }
 
-                        // 13. Custom .cube 3D/1D LUT + Intensity Mix
-                        if (effectiveLut != null && lutMix > 0f) {
+                        // 13. Custom .cube 3D/1D LUT + Intensity Mix (inline fallback if native LUT pass is skipped)
+                        if (effectiveLut != null && lutMix > 0f && !preferNative3dLut) {
                             effectiveLut.sample(r, g, b, lutOut)
                             r += (lutOut[0] - r) * lutMix
                             g += (lutOut[1] - g) * lutMix
@@ -1290,7 +1313,65 @@ object ColorGradingEngine {
 
         val out = createBitmap(width, height)
         out.setPixels(dstPixels, 0, width, 0, 0, width, height)
+        if (preferNative3dLut && effectiveLut != null && lutMix > 0f) {
+            if (!tryApplyLut3dNative(out, effectiveLut, lutMix)) {
+                applyLutKotlinOnBitmap(out, effectiveLut, lutMix)
+            }
+        }
         out
+    }
+
+    private fun tryApplyLut3dNative(
+        bitmap: Bitmap,
+        lut: CubeLut,
+        intensity: Float
+    ): Boolean {
+        if (!NativeBridge.isAvailable) return false
+        if (lut.type != LutType.LUT_3D || lut.size !in 2..65) return false
+        if (bitmap.isRecycled || bitmap.config != Bitmap.Config.ARGB_8888) return false
+        return try {
+            NativeBridge.applyLut3dNative(
+                bitmap = bitmap,
+                lutTable = lut.table,
+                lutSize = lut.size,
+                domainMin = lut.domainMin,
+                domainMax = lut.domainMax,
+                intensity = intensity
+            )
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun applyLutKotlinOnBitmap(
+        bitmap: Bitmap,
+        lut: CubeLut,
+        intensity: Float
+    ) {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
+        val mix = intensity.coerceIn(0f, 1f)
+        if (mix <= 0.0005f) return
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        val lutOut = FloatArray(3)
+        for (i in pixels.indices) {
+            val px = pixels[i]
+            val a = px and 0xFF000000.toInt()
+            val rIn = ((px ushr 16) and 0xFF) * (1f / 255f)
+            val gIn = ((px ushr 8) and 0xFF) * (1f / 255f)
+            val bIn = (px and 0xFF) * (1f / 255f)
+            lut.sample(rIn, gIn, bIn, lutOut)
+            val r = rIn + (lutOut[0] - rIn) * mix
+            val g = gIn + (lutOut[1] - gIn) * mix
+            val b = bIn + (lutOut[2] - bIn) * mix
+            val ri = (r * 255f + 0.5f).toInt().coerceIn(0, 255)
+            val gi = (g * 255f + 0.5f).toInt().coerceIn(0, 255)
+            val bi = (b * 255f + 0.5f).toInt().coerceIn(0, 255)
+            pixels[i] = a or (ri shl 16) or (gi shl 8) or bi
+        }
+        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
     }
 
     private fun sampleBilinear(pixels: IntArray, w: Int, h: Int, u: Float, v: Float): Int {
@@ -1526,6 +1607,52 @@ object ColorGradingEngine {
 
     private fun computeHistogram(bitmap: Bitmap): HistogramData {
         if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return emptyHistogram()
+        if (NativeBridge.isAvailable && bitmap.config == Bitmap.Config.ARGB_8888) {
+            val nativeHist = try {
+                NativeBridge.computeHistogramNative(bitmap)
+            } catch (_: Throwable) {
+                null
+            }
+            if (nativeHist != null) {
+                reduceNativeHistogram(nativeHist)?.let { return it }
+            }
+        }
+        return computeHistogramKotlin(bitmap)
+    }
+
+    internal fun reduceNativeHistogram(rawHist: IntArray): HistogramData? {
+        if (rawHist.size < 1024) return null
+        val lBins = IntArray(HIST_BINS)
+        val rBins = IntArray(HIST_BINS)
+        val gBins = IntArray(HIST_BINS)
+        val bBins = IntArray(HIST_BINS)
+
+        for (v in 0 until 256) {
+            val bin = (v * (HIST_BINS - 1)) / 255
+            rBins[bin] += max(0, rawHist[v])
+            gBins[bin] += max(0, rawHist[256 + v])
+            bBins[bin] += max(0, rawHist[512 + v])
+            lBins[bin] += max(0, rawHist[768 + v])
+        }
+
+        var maxVal = 1
+        for (bin in 0 until HIST_BINS) {
+            if (lBins[bin] > maxVal) maxVal = lBins[bin]
+            if (rBins[bin] > maxVal) maxVal = rBins[bin]
+            if (gBins[bin] > maxVal) maxVal = gBins[bin]
+            if (bBins[bin] > maxVal) maxVal = bBins[bin]
+        }
+
+        val norm = maxVal.toFloat()
+        return HistogramData(
+            luma = FloatArray(HIST_BINS) { lBins[it] / norm },
+            red = FloatArray(HIST_BINS) { rBins[it] / norm },
+            green = FloatArray(HIST_BINS) { gBins[it] / norm },
+            blue = FloatArray(HIST_BINS) { bBins[it] / norm }
+        )
+    }
+
+    private fun computeHistogramKotlin(bitmap: Bitmap): HistogramData {
         val w = bitmap.width
         val h = bitmap.height
         val total = w * h
