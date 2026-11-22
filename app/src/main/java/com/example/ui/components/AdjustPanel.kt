@@ -97,17 +97,23 @@ import com.example.editor.ToneCurvePoint
 import com.example.editor.WhiteBalancePreset
 import com.example.ui.theme.StudioActiveOffWhite
 import com.example.ui.theme.StudioAmber
+import com.example.ui.theme.StudioAmberPillFill
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioBorderSubtle
+import com.example.ui.theme.StudioCinemaAmber
+import com.example.ui.theme.StudioCoolWhite
 import com.example.ui.theme.StudioGlassHairline
 import com.example.ui.theme.StudioGlassHighlight
 import com.example.ui.theme.StudioGlassSurface
 import com.example.ui.theme.StudioLuxuryGold
+import com.example.ui.theme.StudioMutedSlate
 import com.example.ui.theme.StudioObsidian
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import com.example.ui.theme.StudioTileBorder
+import com.example.ui.theme.StudioTileSurface
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.abs
@@ -123,26 +129,26 @@ internal enum class FocusSliderTool(
     val tileTag: String,
     val shortLabel: String = label
 ) {
-    EXPOSURE("Exposure", Icons.Default.Brightness6, -2f..2f, 0.05f, "slider_exposure", "tool_exposure"),
-    CONTRAST("Contrast", Icons.Default.Contrast, -100f..100f, 1f, "slider_contrast", "tool_contrast"),
-    HIGHLIGHTS("Highlights", Icons.Default.Flare, -100f..100f, 1f, "slider_highlights", "tool_highlights"),
-    SHADOWS("Shadows", Icons.Default.Tonality, -100f..100f, 1f, "slider_shadows", "tool_shadows"),
-    WHITES("Whites", Icons.Default.WbSunny, -100f..100f, 1f, "slider_whites", "tool_whites"),
-    BLACKS("Blacks", Icons.Default.Contrast, -100f..100f, 1f, "slider_blacks", "tool_blacks"),
-    TEMP("Temp", Icons.Default.Thermostat, -100f..100f, 1f, "slider_temperature", "tool_temp"),
-    TINT("Tint", Icons.Default.Tune, -100f..100f, 1f, "slider_tint", "tool_tint"),
-    VIBRANCE("Vibrance", Icons.Default.InvertColors, -100f..100f, 1f, "slider_vibrance", "tool_vibrance"),
-    SATURATION("Saturation", Icons.Default.Palette, -100f..100f, 1f, "slider_saturation", "tool_saturation"),
-    TEXTURE("Texture", Icons.Default.Texture, -100f..100f, 1f, "slider_texture", "tool_texture"),
-    CLARITY("Clarity", Icons.Default.Details, -100f..100f, 1f, "slider_clarity", "tool_clarity"),
-    DEHAZE("Dehaze", Icons.Default.BlurOn, -100f..100f, 1f, "slider_dehaze", "tool_dehaze"),
-    VIGNETTE("Vignette", Icons.Default.Vignette, -100f..100f, 1f, "slider_vignette", "tool_vignette"),
-    SHARPEN("Sharpen", Icons.Default.CenterFocusStrong, 0f..150f, 1f, "slider_sharpening", "tool_sharpen"),
-    GRAIN("Grain", Icons.Default.Grain, 0f..100f, 1f, "slider_grain", "tool_grain"),
-    HALATION("Halation", Icons.Default.WbTwilight, 0f..100f, 1f, "slider_halation", "tool_halation"),
-    BLOOM("Bloom", Icons.Default.BlurCircular, 0f..100f, 1f, "slider_bloom", "tool_bloom"),
-    CHROMATIC_ABERRATION("Chromatic Aberration", Icons.Default.FilterTiltShift, -50f..50f, 1f, "slider_chromatic_aberration", "tool_chromatic_aberration", "Chroma"),
-    ANAMORPHIC_STREAK("Anamorphic Streak", Icons.Default.BlurLinear, 0f..100f, 1f, "slider_anamorphic_streak", "tool_anamorphic_streak", "Streak")
+    EXPOSURE("Exposure", StudioIcons.Exposure, -2f..2f, 0.05f, "slider_exposure", "tool_exposure"),
+    CONTRAST("Contrast", StudioIcons.Contrast, -100f..100f, 1f, "slider_contrast", "tool_contrast"),
+    HIGHLIGHTS("Highlights", StudioIcons.Highlights, -100f..100f, 1f, "slider_highlights", "tool_highlights"),
+    SHADOWS("Shadows", StudioIcons.Shadows, -100f..100f, 1f, "slider_shadows", "tool_shadows"),
+    WHITES("Whites", StudioIcons.Whites, -100f..100f, 1f, "slider_whites", "tool_whites"),
+    BLACKS("Blacks", StudioIcons.Blacks, -100f..100f, 1f, "slider_blacks", "tool_blacks"),
+    TEMP("Temp", StudioIcons.Temp, -100f..100f, 1f, "slider_temperature", "tool_temp"),
+    TINT("Tint", StudioIcons.Tint, -100f..100f, 1f, "slider_tint", "tool_tint"),
+    VIBRANCE("Vibrance", StudioIcons.Vibrance, -100f..100f, 1f, "slider_vibrance", "tool_vibrance"),
+    SATURATION("Saturation", StudioIcons.Saturation, -100f..100f, 1f, "slider_saturation", "tool_saturation"),
+    TEXTURE("Texture", StudioIcons.Texture, -100f..100f, 1f, "slider_texture", "tool_texture"),
+    CLARITY("Clarity", StudioIcons.Clarity, -100f..100f, 1f, "slider_clarity", "tool_clarity"),
+    DEHAZE("Dehaze", StudioIcons.Dehaze, -100f..100f, 1f, "slider_dehaze", "tool_dehaze"),
+    VIGNETTE("Vignette", StudioIcons.Vignette, -100f..100f, 1f, "slider_vignette", "tool_vignette"),
+    SHARPEN("Sharpen", StudioIcons.Sharpen, 0f..150f, 1f, "slider_sharpening", "tool_sharpen"),
+    GRAIN("Grain", StudioIcons.Grain, 0f..100f, 1f, "slider_grain", "tool_grain"),
+    HALATION("Halation", StudioIcons.Halation, 0f..100f, 1f, "slider_halation", "tool_halation"),
+    BLOOM("Bloom", StudioIcons.Bloom, 0f..100f, 1f, "slider_bloom", "tool_bloom"),
+    CHROMATIC_ABERRATION("Chromatic Aberration", StudioIcons.ChromaticAberration, -50f..50f, 1f, "slider_chromatic_aberration", "tool_chromatic_aberration", "Chroma"),
+    ANAMORPHIC_STREAK("Anamorphic Streak", StudioIcons.AnamorphicStreak, 0f..100f, 1f, "slider_anamorphic_streak", "tool_anamorphic_streak", "Streak")
 }
 
 private sealed interface StripEntry {
@@ -309,7 +315,7 @@ fun AdjustPanel(
                     StripEntry.Auto -> {
                         FocusToolTile(
                             label = "Auto",
-                            icon = Icons.Default.AutoAwesome,
+                            icon = StudioIcons.AutoTone,
                             selected = autoPulseActive,
                             hasActiveEdit = false,
                             testTag = "adjust_auto_button",
@@ -349,14 +355,14 @@ fun AdjustPanel(
                                 .padding(horizontal = 2.dp)
                                 .width(1.dp)
                                 .height(34.dp)
-                                .background(Color.White.copy(alpha = 0.10f))
+                                .background(StudioGlassHairline)
                         )
                     }
 
                     StripEntry.BlackAndWhite -> {
                         FocusToolTile(
                             label = "B&W",
-                            icon = Icons.Default.FilterBAndW,
+                            icon = StudioIcons.BlackAndWhite,
                             selected = params.isGrayscale,
                             hasActiveEdit = params.isGrayscale,
                             testTag = "adjust_bw_button",
@@ -367,7 +373,7 @@ fun AdjustPanel(
                     StripEntry.Curve -> {
                         FocusToolTile(
                             label = "Curve",
-                            icon = Icons.AutoMirrored.Filled.ShowChart,
+                            icon = StudioIcons.ToneCurve,
                             selected = showCurveSheet,
                             hasActiveEdit = !params.toneCurve.isDefault,
                             testTag = "subpanel_curve",
@@ -381,7 +387,7 @@ fun AdjustPanel(
                             !params.colorGrading.isDefault
                         FocusToolTile(
                             label = "HSL",
-                            icon = Icons.Default.Palette,
+                            icon = StudioIcons.Saturation,
                             selected = showHslSheet,
                             hasActiveEdit = hasAdvancedColor,
                             testTag = "tool_hsl_mixer",
@@ -392,7 +398,7 @@ fun AdjustPanel(
                     StripEntry.Profile -> {
                         FocusToolTile(
                             label = "Profile",
-                            icon = Icons.Default.Camera,
+                            icon = StudioIcons.Profile,
                             selected = false,
                             hasActiveEdit = params.hasProfileEdits,
                             testTag = "tool_profile",
@@ -560,23 +566,20 @@ private fun FocusToolTile(
     onDoubleTapReset: (() -> Unit)? = null
 ) {
     val containerColor by animateColorAsState(
-        targetValue = if (selected) StudioGlassHighlight else StudioGlassSurface,
+        targetValue = if (selected) StudioAmberPillFill else StudioTileSurface,
         animationSpec = tween(durationMillis = 150),
         label = "tool_tile_bg"
     )
     val borderColor by animateColorAsState(
-        targetValue = when {
-            selected -> StudioActiveOffWhite.copy(alpha = 0.28f)
-            else -> StudioGlassHairline
-        },
+        targetValue = if (selected) StudioCinemaAmber else StudioTileBorder,
         animationSpec = tween(durationMillis = 150),
         label = "tool_tile_border"
     )
     val contentTint by animateColorAsState(
         targetValue = when {
-            selected -> StudioActiveOffWhite
-            hasActiveEdit -> StudioActiveOffWhite.copy(alpha = 0.86f)
-            else -> StudioTextSecondary
+            selected -> StudioCinemaAmber
+            hasActiveEdit -> StudioCoolWhite
+            else -> StudioMutedSlate
         },
         animationSpec = tween(durationMillis = 150),
         label = "tool_tile_tint"
@@ -622,12 +625,12 @@ private fun FocusToolTile(
             overflow = TextOverflow.Ellipsis
         )
         Box(modifier = Modifier.height(4.dp))
-        // Subtle warm-gold indicator dot under any modified tool (reserves height so icons stay aligned)
+        // Subtle cinema-amber indicator dot under any modified tool (reserves height so icons stay aligned)
         Box(
             modifier = Modifier
                 .size(4.dp)
                 .clip(CircleShape)
-                .background(if (hasActiveEdit) StudioLuxuryGold else Color.Transparent)
+                .background(if (hasActiveEdit) StudioCinemaAmber else Color.Transparent)
         )
     }
 }

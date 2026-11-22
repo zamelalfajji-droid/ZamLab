@@ -140,12 +140,20 @@ import com.example.ui.components.MaskPanel
 import com.example.ui.components.PhotoViewport
 import com.example.ui.components.ProfileBrowserSheet
 import com.example.ui.components.ProfileMenuSheet
+import com.example.ui.components.StudioIcons
 import com.example.ui.theme.StudioActiveOffWhite
+import com.example.ui.theme.StudioAmberPillFill
 import com.example.ui.theme.StudioBackground
+import com.example.ui.theme.StudioCharcoal
+import com.example.ui.theme.StudioCinemaAmber
+import com.example.ui.theme.StudioCoolWhite
 import com.example.ui.theme.StudioGlassHairline
 import com.example.ui.theme.StudioGlassHighlight
 import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioGraphite
+import com.example.ui.theme.StudioHairline
 import com.example.ui.theme.StudioLuxuryGold
+import com.example.ui.theme.StudioMutedSlate
 import com.example.ui.theme.StudioObsidian
 import com.example.ui.theme.StudioSuccessGreen
 import com.example.ui.theme.StudioSurfaceElevated
@@ -813,9 +821,9 @@ private fun ImmersiveCanvasStage(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.BarChart,
+                            imageVector = StudioIcons.HistogramBars,
                             contentDescription = stringResource(R.string.cd_toggle_histogram),
-                            tint = if (uiState.showHistogram) StudioActiveOffWhite else StudioTextSecondary,
+                            tint = if (uiState.showHistogram) StudioCinemaAmber else StudioMutedSlate,
                             modifier = Modifier.size(18.dp)
                         )
                         if (uiState.showHistogram) {
@@ -825,7 +833,7 @@ private fun ImmersiveCanvasStage(
                                     .padding(bottom = 5.dp)
                                     .size(3.5.dp)
                                     .clip(CircleShape)
-                                    .background(StudioLuxuryGold)
+                                    .background(StudioCinemaAmber)
                             )
                         }
                     }
@@ -945,21 +953,21 @@ private fun TopFloatingGlassHeader(
                                 .testTag("open_photo_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.AddPhotoAlternate,
+                                imageVector = StudioIcons.OpenPhoto,
                                 contentDescription = stringResource(R.string.cd_open_photo),
-                                tint = StudioActiveOffWhite,
+                                tint = StudioCoolWhite,
                                 modifier = Modifier.size(19.dp)
                             )
                         }
                     }
                 }
 
-        // Center Smoked-Glass Pill: Undo | Redo | Hold-to-Compare Before/After
+        // Center Elevated Graphite Pill: Undo | Redo | Hold-to-Compare Before/After
         Surface(
             shape = RoundedCornerShape(50),
-            color = StudioGlassSurface,
+            color = StudioGraphite,
             shadowElevation = 6.dp,
-            modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+            modifier = Modifier.border(1.dp, StudioHairline, RoundedCornerShape(50))
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
@@ -970,9 +978,9 @@ private fun TopFloatingGlassHeader(
                         .testTag("undo_button")
                 ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Undo,
+                        imageVector = StudioIcons.Undo,
                         contentDescription = stringResource(R.string.cd_undo_history),
-                        tint = if (canUndo) StudioActiveOffWhite else StudioTextMuted.copy(alpha = 0.5f),
+                        tint = if (canUndo) StudioCoolWhite else StudioTextMuted.copy(alpha = 0.5f),
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -981,7 +989,7 @@ private fun TopFloatingGlassHeader(
                     modifier = Modifier
                         .width(1.dp)
                         .height(16.dp)
-                        .background(StudioGlassHairline)
+                        .background(StudioHairline)
                 )
 
                 IconButton(
@@ -992,9 +1000,9 @@ private fun TopFloatingGlassHeader(
                         .testTag("redo_button")
                 ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Redo,
+                        imageVector = StudioIcons.Redo,
                         contentDescription = stringResource(R.string.cd_redo_history),
-                        tint = if (canRedo) StudioActiveOffWhite else StudioTextMuted.copy(alpha = 0.5f),
+                        tint = if (canRedo) StudioCoolWhite else StudioTextMuted.copy(alpha = 0.5f),
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -1003,7 +1011,7 @@ private fun TopFloatingGlassHeader(
                     modifier = Modifier
                         .width(1.dp)
                         .height(16.dp)
-                        .background(StudioGlassHairline)
+                        .background(StudioHairline)
                 )
 
                 // Compact Before/After hold-to-compare toggle (hold = Original, tap = Split)
@@ -1011,7 +1019,7 @@ private fun TopFloatingGlassHeader(
                     modifier = Modifier
                         .size(48.dp)
                         .clip(CircleShape)
-                        .background(if (compareActive) StudioGlassHighlight else Color.Transparent)
+                        .background(if (compareActive) StudioAmberPillFill else Color.Transparent)
                         .pointerInput(Unit) {
                             awaitEachGesture {
                                 awaitFirstDown(requireUnconsumed = false)
@@ -1039,9 +1047,9 @@ private fun TopFloatingGlassHeader(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Compare,
+                        imageVector = StudioIcons.SplitCompare,
                         contentDescription = stringResource(R.string.cd_compare_before_after),
-                        tint = if (compareActive) StudioActiveOffWhite else StudioTextSecondary,
+                        tint = if (compareActive) StudioCinemaAmber else StudioMutedSlate,
                         modifier = Modifier.size(18.dp)
                     )
                     if (compareActive) {
@@ -1051,32 +1059,32 @@ private fun TopFloatingGlassHeader(
                                 .padding(bottom = 7.dp)
                                 .size(3.5.dp)
                                 .clip(CircleShape)
-                                .background(StudioLuxuryGold)
+                                .background(StudioCinemaAmber)
                         )
                     }
                 }
             }
         }
 
-        // Right Clean Off-White Export Pill
+        // Right Warm Cinema Amber Export Pill (#F5A623 fill with #121316 text & icon)
         Button(
             onClick = onOpenExport,
             enabled = canExport,
             colors = ButtonDefaults.buttonColors(
-                containerColor = StudioActiveOffWhite,
-                contentColor = StudioObsidian,
-                disabledContainerColor = StudioActiveOffWhite.copy(alpha = 0.25f),
-                disabledContentColor = StudioObsidian.copy(alpha = 0.6f)
+                containerColor = StudioCinemaAmber,
+                contentColor = StudioCharcoal,
+                disabledContainerColor = StudioCinemaAmber.copy(alpha = 0.28f),
+                disabledContentColor = StudioCharcoal.copy(alpha = 0.6f)
             ),
             shape = RoundedCornerShape(50),
-            contentPadding = PaddingValues(horizontal = 11.dp, vertical = 0.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             modifier = Modifier
                 .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                 .height(48.dp)
                 .testTag("export_button")
         ) {
             Icon(
-                imageVector = Icons.Default.Download,
+                imageVector = StudioIcons.ExportArrow,
                 contentDescription = stringResource(R.string.cd_export_photo),
                 modifier = Modifier.size(15.dp)
             )
@@ -1084,7 +1092,7 @@ private fun TopFloatingGlassHeader(
             Text(
                 text = stringResource(R.string.action_export),
                 style = MaterialTheme.typography.labelMedium.copy(
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Bold,
                     letterSpacing = 0.2.sp
                 ),
                 maxLines = 1,
@@ -1215,7 +1223,7 @@ private fun CornerUtilityPill(
             )
 
             CornerPillIconButton(
-                icon = Icons.Default.RestartAlt,
+                icon = StudioIcons.ResetArc,
                 contentDescription = stringResource(R.string.cd_reset_adjustments),
                 active = false,
                 showGoldDot = false,
@@ -1428,10 +1436,10 @@ private fun FloatingCapsuleNavDock(
 
     Surface(
         shape = capsuleShape,
-        color = StudioGlassSurface,
+        color = StudioGraphite,
         shadowElevation = 10.dp,
         modifier = modifier
-            .border(1.dp, StudioGlassHairline, capsuleShape)
+            .border(1.dp, StudioHairline, capsuleShape)
             .testTag("floating_capsule_nav")
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
@@ -1457,8 +1465,8 @@ private fun FloatingCapsuleNavDock(
                 }
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_adjust),
-                    selectedIcon = Icons.Filled.Tune,
-                    unselectedIcon = Icons.Outlined.Tune,
+                    selectedIcon = StudioIcons.TabAdjust,
+                    unselectedIcon = StudioIcons.TabAdjust,
                     selected = uiState.activeTab == StudioTab.ADJUST,
                     hasEdits = hasAdjustEdits,
                     testTag = "tab_adjust",
@@ -1467,8 +1475,8 @@ private fun FloatingCapsuleNavDock(
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_all),
-                    selectedIcon = Icons.AutoMirrored.Filled.ViewList,
-                    unselectedIcon = Icons.AutoMirrored.Outlined.ViewList,
+                    selectedIcon = StudioIcons.TabAll,
+                    unselectedIcon = StudioIcons.TabAll,
                     selected = uiState.activeTab == StudioTab.ALL,
                     hasEdits = hasAdjustEdits,
                     testTag = "tab_all",
@@ -1477,8 +1485,8 @@ private fun FloatingCapsuleNavDock(
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_luts),
-                    selectedIcon = Icons.Filled.FilterVintage,
-                    unselectedIcon = Icons.Outlined.FilterVintage,
+                    selectedIcon = StudioIcons.TabLuts,
+                    unselectedIcon = StudioIcons.TabLuts,
                     selected = uiState.activeTab == StudioTab.LUTS,
                     hasEdits = hasLutEdits,
                     testTag = "tab_luts",
@@ -1487,8 +1495,8 @@ private fun FloatingCapsuleNavDock(
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_ai),
-                    selectedIcon = Icons.Filled.AutoAwesome,
-                    unselectedIcon = Icons.Outlined.AutoAwesome,
+                    selectedIcon = StudioIcons.TabAi,
+                    unselectedIcon = StudioIcons.TabAi,
                     selected = uiState.activeTab == StudioTab.AI,
                     hasEdits = hasAiReady,
                     testTag = "tab_ai",
@@ -1497,8 +1505,8 @@ private fun FloatingCapsuleNavDock(
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_crop),
-                    selectedIcon = Icons.Filled.CropRotate,
-                    unselectedIcon = Icons.Outlined.CropRotate,
+                    selectedIcon = StudioIcons.TabCrop,
+                    unselectedIcon = StudioIcons.TabCrop,
                     selected = uiState.activeTab == StudioTab.CROP,
                     hasEdits = hasCropEdits,
                     testTag = "tab_crop",
@@ -1507,8 +1515,8 @@ private fun FloatingCapsuleNavDock(
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_heal),
-                    selectedIcon = Icons.Filled.Healing,
-                    unselectedIcon = Icons.Outlined.Healing,
+                    selectedIcon = StudioIcons.TabHeal,
+                    unselectedIcon = StudioIcons.TabHeal,
                     selected = uiState.activeTab == StudioTab.HEAL,
                     hasEdits = hasHealEdits,
                     testTag = "tab_heal",
@@ -1517,8 +1525,8 @@ private fun FloatingCapsuleNavDock(
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_mask),
-                    selectedIcon = Icons.Filled.Gradient,
-                    unselectedIcon = Icons.Outlined.Gradient,
+                    selectedIcon = StudioIcons.TabMasks,
+                    unselectedIcon = StudioIcons.TabMasks,
                     selected = uiState.activeTab == StudioTab.MASK,
                     hasEdits = hasMaskEdits,
                     testTag = "tab_mask",
@@ -1542,17 +1550,17 @@ private fun CapsuleNavTabItem(
     modifier: Modifier = Modifier
 ) {
     val bgColor by animateColorAsState(
-        targetValue = if (selected) StudioGlassHighlight else Color.Transparent,
+        targetValue = if (selected) StudioAmberPillFill else Color.Transparent,
         animationSpec = tween(durationMillis = 150),
         label = "capsule_tab_bg"
     )
     val borderColor by animateColorAsState(
-        targetValue = if (selected) StudioActiveOffWhite.copy(alpha = 0.16f) else Color.Transparent,
+        targetValue = if (selected) StudioCinemaAmber else Color.Transparent,
         animationSpec = tween(durationMillis = 150),
         label = "capsule_tab_border"
     )
     val contentColor by animateColorAsState(
-        targetValue = if (selected) StudioActiveOffWhite else StudioTextSecondary,
+        targetValue = if (selected) StudioCinemaAmber else StudioMutedSlate,
         animationSpec = tween(durationMillis = 150),
         label = "capsule_tab_tint"
     )
@@ -1600,7 +1608,7 @@ private fun CapsuleNavTabItem(
                     .padding(top = 5.dp, end = 6.dp)
                     .size(4.dp)
                     .clip(CircleShape)
-                    .background(StudioLuxuryGold)
+                    .background(StudioCinemaAmber)
             )
         }
     }

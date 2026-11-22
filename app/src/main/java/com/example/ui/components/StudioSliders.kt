@@ -65,10 +65,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.ui.theme.StudioActiveOffWhite
+import com.example.ui.theme.StudioAmberPillFill
 import com.example.ui.theme.StudioBackground
+import com.example.ui.theme.StudioCinemaAmber
+import com.example.ui.theme.StudioCoolWhite
 import com.example.ui.theme.StudioGlassHairline
 import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioGraphite
+import com.example.ui.theme.StudioHairline
 import com.example.ui.theme.StudioLuxuryGold
+import com.example.ui.theme.StudioMutedSlate
 import com.example.ui.theme.StudioSurfaceHighest
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
@@ -463,17 +469,23 @@ internal fun RulerPrecisionSlider(
         }
     }
 
+    val isPillHighlighted = isModified || isActivelyDragging
+    val pillBgColor by animateColorAsState(
+        targetValue = if (isPillHighlighted) StudioAmberPillFill else StudioGraphite,
+        animationSpec = tween(durationMillis = 140),
+        label = "ruler_pill_bg"
+    )
     val pillBorderColor by animateColorAsState(
         targetValue = when {
-            isActivelyDragging -> StudioActiveOffWhite.copy(alpha = 0.34f)
-            isModified -> StudioLuxuryGold.copy(alpha = 0.36f)
-            else -> StudioGlassHairline
+            isActivelyDragging -> StudioCinemaAmber
+            isModified -> StudioCinemaAmber.copy(alpha = 0.78f)
+            else -> StudioHairline
         },
         animationSpec = tween(durationMillis = 140),
         label = "ruler_pill_border"
     )
     val trayBorderColor by animateColorAsState(
-        targetValue = if (isActivelyDragging) StudioActiveOffWhite.copy(alpha = 0.24f) else StudioGlassHairline,
+        targetValue = if (isActivelyDragging) StudioCinemaAmber.copy(alpha = 0.65f) else StudioHairline,
         animationSpec = tween(durationMillis = 140),
         label = "ruler_tray_border"
     )
@@ -511,7 +523,7 @@ internal fun RulerPrecisionSlider(
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
-                        tint = if (isModified || isActivelyDragging) StudioActiveOffWhite else StudioTextSecondary,
+                        tint = if (isModified || isActivelyDragging) StudioCoolWhite else StudioMutedSlate,
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
@@ -520,7 +532,7 @@ internal fun RulerPrecisionSlider(
                             fontWeight = FontWeight.Medium,
                             letterSpacing = 0.2.sp
                         ),
-                        color = if (isModified || isActivelyDragging) StudioActiveOffWhite else StudioTextSecondary,
+                        color = if (isModified || isActivelyDragging) StudioCoolWhite else StudioMutedSlate,
                         maxLines = 1,
                         softWrap = false,
                         overflow = TextOverflow.Ellipsis
@@ -531,7 +543,7 @@ internal fun RulerPrecisionSlider(
             // Crisp monospace value pill centered directly above the fixed needle — double-tap smoothly resets
             Surface(
                 shape = RoundedCornerShape(50),
-                color = StudioGlassSurface,
+                color = pillBgColor,
                 modifier = Modifier
                     .padding(horizontal = 4.dp)
                     .border(1.dp, pillBorderColor, RoundedCornerShape(50))
@@ -547,12 +559,12 @@ internal fun RulerPrecisionSlider(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (isModified) {
+                    if (isModified || isActivelyDragging) {
                         Box(
                             modifier = Modifier
                                 .size(5.dp)
                                 .clip(CircleShape)
-                                .background(StudioLuxuryGold)
+                                .background(StudioCinemaAmber)
                         )
                     }
                     Text(
@@ -563,7 +575,7 @@ internal fun RulerPrecisionSlider(
                             fontSize = 12.sp,
                             fontFeatureSettings = "tnum"
                         ),
-                        color = if (isModified || isActivelyDragging) StudioActiveOffWhite else StudioTextSecondary,
+                        color = if (isModified || isActivelyDragging) StudioCoolWhite else StudioMutedSlate,
                         maxLines = 1,
                         softWrap = false
                     )
@@ -587,13 +599,13 @@ internal fun RulerPrecisionSlider(
             }
         }
 
-        // Wide frosted-glass scrolling tick-mark ruler under a fixed center needle
+        // Wide Elevated Dark Graphite scrolling tick-mark ruler under a fixed Cinema Amber center needle
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(StudioGlassSurface)
+                .background(StudioGraphite)
                 .border(1.dp, trayBorderColor, RoundedCornerShape(14.dp))
                 .semantics {
                     progressBarRangeInfo = ProgressBarRangeInfo(
@@ -778,7 +790,7 @@ internal fun RulerPrecisionSlider(
                     val barEnd = maxOf(clampedZeroX, centerX)
                     val barH = 2.5.dp.toPx()
                     drawRoundRect(
-                        color = StudioActiveOffWhite.copy(alpha = 0.24f),
+                        color = StudioCinemaAmber.copy(alpha = 0.36f),
                         topLeft = Offset(barStart, cy - barH * 0.5f),
                         size = Size((barEnd - barStart).coerceAtLeast(1f), barH),
                         cornerRadius = CornerRadius(barH * 0.5f, barH * 0.5f)
@@ -797,7 +809,7 @@ internal fun RulerPrecisionSlider(
                     val x = centerX + (tickVal - value) * pxPerUnit
                     if (x < -4f || x > w + 4f) continue
 
-                    // Edge attenuation so ticks fade cleanly into the frosted glass corners
+                    // Edge attenuation so ticks fade cleanly into the graphite bezel edges
                     val distRatio = (abs(x - centerX) / (w * 0.5f)).coerceIn(0f, 1f)
                     val edgeAlpha = (1f - distRatio * distRatio * 0.82f).coerceIn(0.12f, 1f)
 
@@ -815,12 +827,12 @@ internal fun RulerPrecisionSlider(
                         else -> 5.dp.toPx()
                     }
                     val baseColor = when {
-                        isZeroTick && isModified -> StudioLuxuryGold
-                        isZeroTick -> StudioActiveOffWhite.copy(alpha = 0.78f)
-                        isInActiveSpan -> StudioActiveOffWhite.copy(alpha = if (isMajor) 0.90f else 0.55f)
-                        isMajor -> Color.White.copy(alpha = 0.36f)
-                        isMid -> Color.White.copy(alpha = 0.24f)
-                        else -> Color.White.copy(alpha = 0.14f)
+                        isZeroTick && isModified -> StudioCinemaAmber
+                        isZeroTick -> StudioCoolWhite.copy(alpha = 0.78f)
+                        isInActiveSpan -> StudioCinemaAmber.copy(alpha = if (isMajor) 0.92f else 0.58f)
+                        isMajor -> StudioCoolWhite.copy(alpha = 0.34f)
+                        isMid -> StudioCoolWhite.copy(alpha = 0.22f)
+                        else -> StudioMutedSlate.copy(alpha = 0.22f)
                     }
                     drawLine(
                         color = baseColor.copy(alpha = baseColor.alpha * edgeAlpha),
@@ -831,11 +843,11 @@ internal fun RulerPrecisionSlider(
                     )
                 }
 
-                // Subtle frosted edge vignette fade left & right
+                // Subtle edge vignette fade left & right matching graphite tray
                 val fadeW = 28.dp.toPx()
                 drawRect(
                     brush = Brush.horizontalGradient(
-                        colors = listOf(StudioGlassSurface, Color.Transparent),
+                        colors = listOf(StudioGraphite, Color.Transparent),
                         startX = 0f,
                         endX = fadeW
                     ),
@@ -844,7 +856,7 @@ internal fun RulerPrecisionSlider(
                 )
                 drawRect(
                     brush = Brush.horizontalGradient(
-                        colors = listOf(Color.Transparent, StudioGlassSurface),
+                        colors = listOf(Color.Transparent, StudioGraphite),
                         startX = w - fadeW,
                         endX = w
                     ),
@@ -852,28 +864,26 @@ internal fun RulerPrecisionSlider(
                     size = Size(fadeW, h)
                 )
 
-                // Fixed crisp off-white center needle (with subtle warm gold tip when modified)
+                // Fixed Warm Cinema Amber center needle / tick indicator
                 val needleHalfH = if (isActivelyDragging) 17.dp.toPx() else 15.dp.toPx()
                 val needleW = if (isActivelyDragging) 2.8.dp.toPx() else 2.2.dp.toPx()
                 drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.48f),
+                    color = Color.Black.copy(alpha = 0.52f),
                     topLeft = Offset(centerX - needleW * 0.5f - 1.dp.toPx(), cy - needleHalfH - 1.dp.toPx()),
                     size = Size(needleW + 2.dp.toPx(), needleHalfH * 2f + 2.dp.toPx()),
                     cornerRadius = CornerRadius(needleW, needleW)
                 )
                 drawRoundRect(
-                    color = StudioActiveOffWhite,
+                    color = StudioCinemaAmber,
                     topLeft = Offset(centerX - needleW * 0.5f, cy - needleHalfH),
                     size = Size(needleW, needleHalfH * 2f),
                     cornerRadius = CornerRadius(needleW, needleW)
                 )
-                if (isModified || isActivelyDragging) {
-                    drawCircle(
-                        color = StudioLuxuryGold,
-                        radius = 2.4.dp.toPx(),
-                        center = Offset(centerX, cy - needleHalfH - 1.5.dp.toPx())
-                    )
-                }
+                drawCircle(
+                    color = StudioCinemaAmber,
+                    radius = if (isModified || isActivelyDragging) 2.5.dp.toPx() else 1.8.dp.toPx(),
+                    center = Offset(centerX, cy - needleHalfH - 1.5.dp.toPx())
+                )
             }
         }
     }

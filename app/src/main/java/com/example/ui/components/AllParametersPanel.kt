@@ -88,10 +88,17 @@ import com.example.editor.ToneCurveChannel
 import com.example.editor.ToneCurveData
 import com.example.editor.WhiteBalancePreset
 import com.example.ui.theme.StudioActiveOffWhite
+import com.example.ui.theme.StudioAmberPillFill
+import com.example.ui.theme.StudioCharcoal
+import com.example.ui.theme.StudioCinemaAmber
+import com.example.ui.theme.StudioCoolWhite
 import com.example.ui.theme.StudioGlassHairline
 import com.example.ui.theme.StudioGlassHighlight
 import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioGraphite
+import com.example.ui.theme.StudioHairline
 import com.example.ui.theme.StudioLuxuryGold
+import com.example.ui.theme.StudioMutedSlate
 import com.example.ui.theme.StudioObsidian
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioTextMuted
@@ -360,9 +367,9 @@ fun AllParametersPanel(
                         modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.BookmarkAdd,
+                            imageVector = StudioIcons.SaveRecipe,
                             contentDescription = stringResource(R.string.cd_save_recipe),
-                            tint = StudioLuxuryGold,
+                            tint = StudioCinemaAmber,
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
@@ -372,7 +379,7 @@ fun AllParametersPanel(
                                 fontWeight = FontWeight.SemiBold,
                                 letterSpacing = 0.1.sp
                             ),
-                            color = StudioActiveOffWhite,
+                            color = StudioCoolWhite,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -462,7 +469,7 @@ fun AllParametersPanel(
                     if (selectedFilter == AllFilterChip.ALL || selectedFilter == AllFilterChip.LIGHT) {
                         FrostedStudioSection(
                             title = "Light",
-                            icon = Icons.Default.Brightness6,
+                            icon = StudioIcons.Exposure,
                             isExpanded = isSingleGroup || isLightExpanded,
                             collapsible = !isSingleGroup,
                             hasEdits = hasLightSlidersModified,
@@ -514,9 +521,9 @@ fun AllParametersPanel(
                                             modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
                                         ) {
                                             Icon(
-                                                imageVector = Icons.Default.AutoAwesome,
+                                                imageVector = StudioIcons.AutoTone,
                                                 contentDescription = "Auto Tone",
-                                                tint = StudioLuxuryGold,
+                                                tint = StudioCinemaAmber,
                                                 modifier = Modifier.size(14.dp)
                                             )
                                             Text(
@@ -524,7 +531,7 @@ fun AllParametersPanel(
                                                 style = MaterialTheme.typography.labelSmall.copy(
                                                     fontWeight = FontWeight.SemiBold
                                                 ),
-                                                color = StudioActiveOffWhite,
+                                                color = StudioCoolWhite,
                                                 maxLines = 1,
                                                 softWrap = false
                                             )
@@ -565,7 +572,7 @@ fun AllParametersPanel(
                     if (selectedFilter == AllFilterChip.ALL || selectedFilter == AllFilterChip.COLOR) {
                         FrostedStudioSection(
                             title = "Color",
-                            icon = Icons.Default.Palette,
+                            icon = StudioIcons.Saturation,
                             isExpanded = isSingleGroup || isColorExpanded,
                             collapsible = !isSingleGroup,
                             hasEdits = hasColorSectionModified,
@@ -731,7 +738,7 @@ fun AllParametersPanel(
                     if (selectedFilter == AllFilterChip.ALL || selectedFilter == AllFilterChip.CURVE) {
                         FrostedStudioSection(
                             title = "Tone Curve",
-                            icon = Icons.AutoMirrored.Filled.ShowChart,
+                            icon = StudioIcons.ToneCurve,
                             isExpanded = isSingleGroup || isCurveExpanded,
                             collapsible = !isSingleGroup,
                             hasEdits = hasCurveModified,
@@ -768,7 +775,7 @@ fun AllParametersPanel(
                     if (selectedFilter == AllFilterChip.ALL || selectedFilter == AllFilterChip.EFFECTS) {
                         FrostedStudioSection(
                             title = "Effects & Detail",
-                            icon = Icons.Default.Texture,
+                            icon = StudioIcons.Texture,
                             isExpanded = isSingleGroup || isEffectsExpanded,
                             collapsible = !isSingleGroup,
                             hasEdits = hasEffectsOrDetailModified,
@@ -838,21 +845,21 @@ private fun AllFilterPill(
     onClick: () -> Unit
 ) {
     val bgColor by animateColorAsState(
-        targetValue = if (selected) StudioActiveOffWhite else StudioObsidian.copy(alpha = 0.68f),
+        targetValue = if (selected) StudioAmberPillFill else StudioGraphite,
         animationSpec = tween(durationMillis = 140),
         label = "filter_pill_bg"
     )
     val borderColor by animateColorAsState(
         targetValue = when {
-            selected -> StudioActiveOffWhite
-            showGoldDot -> StudioLuxuryGold.copy(alpha = 0.34f)
-            else -> StudioGlassHairline
+            selected -> StudioCinemaAmber
+            showGoldDot -> StudioCinemaAmber.copy(alpha = 0.42f)
+            else -> StudioHairline
         },
         animationSpec = tween(durationMillis = 140),
         label = "filter_pill_border"
     )
     val textColor by animateColorAsState(
-        targetValue = if (selected) StudioObsidian else StudioActiveOffWhite.copy(alpha = 0.88f),
+        targetValue = if (selected) StudioCinemaAmber else StudioMutedSlate,
         animationSpec = tween(durationMillis = 140),
         label = "filter_pill_text"
     )
@@ -893,7 +900,7 @@ private fun AllFilterPill(
                         modifier = Modifier
                             .size(4.5.dp)
                             .clip(CircleShape)
-                            .background(if (selected) StudioObsidian.copy(alpha = 0.75f) else StudioLuxuryGold)
+                            .background(StudioCinemaAmber)
                     )
                 }
             }
@@ -2039,11 +2046,17 @@ private fun ClassicPrecisionSliderRow(
             Surface(
                 shape = RoundedCornerShape(6.dp),
                 color = if (isModified) {
-                    StudioLuxuryGold.copy(alpha = 0.14f)
+                    StudioAmberPillFill
                 } else {
-                    StudioObsidian.copy(alpha = 0.65f)
+                    StudioGraphite
                 },
-                modifier = Modifier.testTag("all_${tool.testTag}_value")
+                modifier = Modifier
+                    .border(
+                        width = 1.dp,
+                        color = if (isModified) StudioCinemaAmber.copy(alpha = 0.65f) else StudioHairline,
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .testTag("all_${tool.testTag}_value")
             ) {
                 Text(
                     text = formatted,
@@ -2052,7 +2065,7 @@ private fun ClassicPrecisionSliderRow(
                         fontWeight = FontWeight.SemiBold,
                         fontFeatureSettings = "tnum"
                     ),
-                    color = if (isModified) StudioLuxuryGold else StudioTextMuted,
+                    color = if (isModified) StudioCoolWhite else StudioMutedSlate,
                     maxLines = 1,
                     softWrap = false,
                     modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
@@ -2064,7 +2077,7 @@ private fun ClassicPrecisionSliderRow(
             value = value,
             valueRange = tool.valueRange,
             step = tool.step,
-            accentColor = if (isModified) StudioActiveOffWhite else StudioTextSecondary,
+            accentColor = if (isModified) StudioCinemaAmber else StudioMutedSlate,
             gradientColors = gradientForTool(tool),
             compact = true,
             testTag = "all_${tool.testTag}",
