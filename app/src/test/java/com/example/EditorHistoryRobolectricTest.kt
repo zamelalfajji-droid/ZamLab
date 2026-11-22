@@ -671,7 +671,7 @@ class EditorHistoryRobolectricTest {
             android.Manifest.permission.INTERNET in requestedPermissions
         )
         assertEquals(
-            listOf(StudioTab.ADJUST, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
+            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
             StudioTab.entries
         )
     }
@@ -1208,9 +1208,9 @@ class EditorHistoryRobolectricTest {
 
     @Test
     fun `Crop and Rotate tab placement, aspect presets, transforms, auto straighten, perspective constrain, and export work cleanly`() = runTest(testDispatcher) {
-        // 1. StudioTab order puts Crop & Rotate directly next to LUTs, followed by Heal
+        // 1. StudioTab order puts Adjust, All, LUTs, Crop & Rotate, Heal, and Masks
         assertEquals(
-            listOf(StudioTab.ADJUST, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
+            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
             StudioTab.entries
         )
         assertEquals(

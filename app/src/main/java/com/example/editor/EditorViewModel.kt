@@ -276,8 +276,6 @@ class EditorViewModel(
     private val photoLoadRequestSeq = AtomicLong(0L)
     private val hasExternalOrUserPhoto = AtomicBoolean(false)
     private val maskIdCounter = AtomicLong(0L)
-    private val touchSwipeSeq = AtomicLong(0L)
-    private var touchSwipeTouchLocked = false
     private var touchSwipeZone: TouchToneZone = TouchToneZone.MIDTONES
     private var touchSwipeStartVal: Float = 0f
     private var touchSwipeStartSat: Float = 0f
@@ -1884,12 +1882,44 @@ class EditorViewModel(
     fun onTouchAdjustSwipeStart(viewportNx: Float, viewportNy: Float) {
         val state = _uiState.value
         if (!state.isTouchAdjustEnabled) return
-        val swipeToken = touchSwipeSeq.incrementAndGet()
-        touchSwipeTouchLocked = false
-        touchSwipeZone = TouchToneZone.MIDTONES
-        touchSwipeStartVal = state.gradingParams.exposure
+        val sampleSource = (histSourceBitmap.value ?: state.previewIdleBitmap ?: fullSourceBitmap.value)
+            ?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
+        val luma = if (sampleSource == null) {
+            0.5f
+        } else {
+            val u = viewportNx.coerceIn(0f, 1f)
+            val v = viewportNy.coerceIn(0f, 1f)
+            val mapped = GeometryMath.mapOutputUvToSourceUv(
+                u = u,
+                v = v,
+                srcW = sampleSource.width,
+                srcH = sampleSource.height,
+                crop = state.gradingParams.crop,
+                applyCrop = state.activeTab != StudioTab.CROP
+            ) ?: (u to v)
+            val px = (mapped.first.coerceIn(0f, 1f) * (sampleSource.width - 1)).toInt()
+                .coerceIn(0, sampleSource.width - 1)
+            val py = (mapped.second.coerceIn(0f, 1f) * (sampleSource.height - 1)).toInt()
+                .coerceIn(0, sampleSource.height - 1)
+            val c = sampleSource.getPixel(px, py)
+            val r = ((c ushr 16) and 0xFF) / 255f
+            val g = ((c ushr 8) and 0xFF) / 255f
+            val b = (c and 0xFF) / 255f
+            (0.2126f * r + 0.7152f * g + 0.0722f * b).coerceIn(0f, 1f)
+        }
+        val zone = when {
+            luma < 0.36f -> TouchToneZone.SHADOWS
+            luma > 0.66f -> TouchToneZone.HIGHLIGHTS
+            else -> TouchToneZone.MIDTONES
+        }
+        touchSwipeZone = zone
+        touchSwipeStartVal = when (zone) {
+            TouchToneZone.SHADOWS -> state.gradingParams.shadows
+            TouchToneZone.MIDTONES -> state.gradingParams.exposure
+            TouchToneZone.HIGHLIGHTS -> state.gradingParams.highlights
+        }
         touchSwipeStartSat = state.gradingParams.saturation
-        touchSwipeSnapshot = captureCurrentSnapshot("Touch Tone")
+        touchSwipeSnapshot = captureCurrentSnapshot("Touch ${zone.label}")
         isDraggingFlow.value = true
         _uiState.update {
             it.copy(
@@ -1897,56 +1927,11 @@ class EditorViewModel(
                 isTouchAdjustSwiping = true
             )
         }
-
-        val sampleSource = (histSourceBitmap.value ?: state.previewIdleBitmap ?: fullSourceBitmap.value)
-            ?.takeIf { !it.isRecycled } ?: return
-        viewModelScope.launch {
-            val luma = withContext(Dispatchers.Default) {
-                if (sampleSource.isRecycled || sampleSource.width <= 0 || sampleSource.height <= 0) {
-                    0.5f
-                } else {
-                    val mapped = GeometryMath.mapOutputUvToSourceUv(
-                        u = viewportNx.coerceIn(0f, 1f),
-                        v = viewportNy.coerceIn(0f, 1f),
-                        srcW = sampleSource.width,
-                        srcH = sampleSource.height,
-                        crop = state.gradingParams.crop,
-                        applyCrop = state.activeTab != StudioTab.CROP
-                    ) ?: (viewportNx.coerceIn(0f, 1f) to viewportNy.coerceIn(0f, 1f))
-                    val px = (mapped.first.coerceIn(0f, 1f) * (sampleSource.width - 1)).toInt()
-                        .coerceIn(0, sampleSource.width - 1)
-                    val py = (mapped.second.coerceIn(0f, 1f) * (sampleSource.height - 1)).toInt()
-                        .coerceIn(0, sampleSource.height - 1)
-                    val c = sampleSource.getPixel(px, py)
-                    val r = ((c ushr 16) and 0xFF) / 255f
-                    val g = ((c ushr 8) and 0xFF) / 255f
-                    val b = (c and 0xFF) / 255f
-                    (0.2126f * r + 0.7152f * g + 0.0722f * b).coerceIn(0f, 1f)
-                }
-            }
-            if (touchSwipeSeq.get() != swipeToken || touchSwipeTouchLocked || touchSwipeSnapshot == null) {
-                return@launch
-            }
-            val zone = when {
-                luma < 0.36f -> TouchToneZone.SHADOWS
-                luma > 0.66f -> TouchToneZone.HIGHLIGHTS
-                else -> TouchToneZone.MIDTONES
-            }
-            val baseParams = touchSwipeSnapshot?.gradingParams ?: state.gradingParams
-            touchSwipeZone = zone
-            touchSwipeStartVal = when (zone) {
-                TouchToneZone.SHADOWS -> baseParams.shadows
-                TouchToneZone.MIDTONES -> baseParams.exposure
-                TouchToneZone.HIGHLIGHTS -> baseParams.highlights
-            }
-            touchSwipeSnapshot = touchSwipeSnapshot?.copy(label = "Touch ${zone.label}")
-        }
     }
 
     fun onTouchAdjustSwipeUpdate(isVertical: Boolean, totalFraction: Float) {
         val state = _uiState.value
         if (!state.isTouchAdjustEnabled || touchSwipeSnapshot == null) return
-        touchSwipeTouchLocked = true
 
         val (updated, label, valueText) = if (isVertical) {
             when (touchSwipeZone) {
@@ -2011,8 +1996,6 @@ class EditorViewModel(
     }
 
     fun onTouchAdjustSwipeEnd(commit: Boolean) {
-        touchSwipeSeq.incrementAndGet()
-        touchSwipeTouchLocked = false
         val baseline = touchSwipeSnapshot
         touchSwipeSnapshot = null
         isDraggingFlow.value = false

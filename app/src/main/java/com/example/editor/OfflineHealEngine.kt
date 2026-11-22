@@ -64,14 +64,21 @@ object OfflineHealEngine {
         }
         return when (stroke.mode) {
             HealMode.SPOT_HEAL -> {
-                val out = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
-                val radiusPx = (stroke.radiusNorm * maxOf(out.width, out.height)).toInt().coerceAtLeast(2)
-                for ((nx, ny) in stroke.points) {
-                    val cx = (nx * out.width).toInt().coerceIn(0, out.width - 1)
-                    val cy = (ny * out.height).toInt().coerceIn(0, out.height - 1)
-                    NativeBridge.healSpotNative(out, cx, cy, radiusPx)
+                if (NativeBridge.isAvailable) {
+                    val out = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
+                    try {
+                        val radiusPx = (stroke.radiusNorm * maxOf(out.width, out.height)).toInt().coerceAtLeast(2)
+                        for ((nx, ny) in stroke.points) {
+                            val cx = (nx * out.width).toInt().coerceIn(0, out.width - 1)
+                            val cy = (ny * out.height).toInt().coerceIn(0, out.height - 1)
+                            NativeBridge.healSpotNative(out, cx, cy, radiusPx)
+                        }
+                        return out
+                    } catch (_: UnsatisfiedLinkError) {
+                        if (!out.isRecycled) out.recycle()
+                    }
                 }
-                out
+                LocalInpaintingEngine.inpaint(sourceBitmap, listOf(stroke))
             }
 
             HealMode.CLONE_STAMP -> applyCloneStamp(sourceBitmap, stroke)

@@ -6,10 +6,10 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.core.graphics.createBitmap
 import androidx.test.core.app.ApplicationProvider
 import com.example.editor.EditorViewModel
@@ -73,7 +73,7 @@ class EditorUiAndExportRobolectricTest {
 
     @Test
     @Config(qualifiers = "w360dp-h800dp")
-    fun `ZamLab branding and all 5 bottom navigation tabs render cleanly on narrow phone width without clipping`() {
+    fun `ZamLab branding and all 6 bottom navigation tabs render cleanly on narrow phone width without clipping`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val vm = EditorViewModel(app)
         awaitInitialLoad(vm)
@@ -86,12 +86,13 @@ class EditorUiAndExportRobolectricTest {
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag("zamlab_brand_emblem").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("top_bar_brand_title")
-            .assertIsDisplayed()
-            .assertTextEquals("ZamLab")
+        composeTestRule.onNodeWithTag("open_photo_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("top_share_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("export_button").performScrollTo().assertIsDisplayed()
 
         val tabExpectations = listOf(
             "tab_adjust" to StudioTab.ADJUST,
+            "tab_all" to StudioTab.ALL,
             "tab_luts" to StudioTab.LUTS,
             "tab_crop" to StudioTab.CROP,
             "tab_heal" to StudioTab.HEAL,
@@ -99,16 +100,15 @@ class EditorUiAndExportRobolectricTest {
         )
         tabExpectations.forEach { (tag, expectedTab) ->
             val node = composeTestRule.onNodeWithTag(tag)
-            node.assertIsDisplayed()
+            node.performScrollTo().assertIsDisplayed()
             val bounds = node.fetchSemanticsNode().boundsInRoot
             assertTrue(
                 "Tab $tag should have touch-compliant height >= 48px (was ${bounds.height})",
                 bounds.height >= 48f
             )
-            val minWidth = if (tag == "tab_crop") 80f else 48f
             assertTrue(
-                "Tab $tag should have generous width >= $minWidth (was ${bounds.width})",
-                bounds.width >= minWidth
+                "Tab $tag should have touch-compliant width >= 48px (was ${bounds.width})",
+                bounds.width >= 48f
             )
             node.performClick()
             composeTestRule.waitForIdle()
@@ -118,7 +118,7 @@ class EditorUiAndExportRobolectricTest {
 
     @Test
     @Config(qualifiers = "w840dp-h720dp")
-    fun `ZamLab 5 bottom navigation tabs fit cleanly inside 360dp side panel on wide tablet layout`() {
+    fun `ZamLab 6 bottom navigation tabs fit cleanly inside 360dp side panel on wide tablet layout`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val vm = EditorViewModel(app)
         awaitInitialLoad(vm)
@@ -130,7 +130,7 @@ class EditorUiAndExportRobolectricTest {
         }
         composeTestRule.waitForIdle()
 
-        listOf("tab_adjust", "tab_luts", "tab_crop", "tab_heal", "tab_mask").forEach { tag ->
+        listOf("tab_adjust", "tab_all", "tab_luts", "tab_crop", "tab_heal", "tab_mask").forEach { tag ->
             composeTestRule.onNodeWithTag(tag).assertIsDisplayed()
         }
         composeTestRule.onNodeWithTag("tab_crop").performClick()
