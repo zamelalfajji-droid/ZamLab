@@ -13,7 +13,7 @@ import androidx.compose.ui.unit.dp
  * Custom 1.75dp rounded-stroke vector icon suite for ZamLab's Calibrated Darkroom Studio.
  *
  * All icons share a 24x24dp grid with uniform 1.75f stroke width, round line caps,
- * and round joins so top-bar actions, tool strip tiles, and the 7-tab bottom dock
+ * and round joins so top-bar actions, tool strip tiles, and the 6-tab bottom dock
  * feel bold, crisp, and instrument-grade.
  */
 object StudioIcons {
@@ -103,6 +103,28 @@ object StudioIcons {
         }
     }
 
+    /** Folder/document RAW file import icon for SAF non-indexed RAW files */
+    val ImportRawFile: ImageVector by lazy {
+        buildIcon("StudioImportRawFile") {
+            strokePath {
+                // Folder silhouette
+                moveTo(3.5f, 7.2f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 5.3f, 5.4f)
+                lineTo(9.4f, 5.4f)
+                lineTo(11.2f, 7.5f)
+                lineTo(18.7f, 7.5f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 20.5f, 9.3f)
+                lineTo(20.5f, 17.6f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 18.7f, 19.4f)
+                lineTo(5.3f, 19.4f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 3.5f, 17.6f)
+                close()
+                // Crisp camera aperture / RAW dot mark inside folder
+                addCircle(12.0f, 13.4f, 2.4f)
+            }
+        }
+    }
+
     val Undo: ImageVector by lazy {
         buildIcon("StudioUndo", autoMirror = true) {
             strokePath {
@@ -168,6 +190,25 @@ object StudioIcons {
         }
     }
 
+    /** Upward share-out arrow from tray matching the darkroom 1.75dp rounded-stroke set */
+    val SharePhoto: ImageVector by lazy {
+        buildIcon("StudioSharePhoto") {
+            strokePath {
+                moveTo(12.0f, 14.8f)
+                lineTo(12.0f, 4.2f)
+                moveTo(8.2f, 8.0f)
+                lineTo(12.0f, 4.2f)
+                lineTo(15.8f, 8.0f)
+                moveTo(4.5f, 14.8f)
+                lineTo(4.5f, 18.0f)
+                arcTo(1.8f, 1.8f, 0f, false, false, 6.3f, 19.8f)
+                lineTo(17.7f, 19.8f)
+                arcTo(1.8f, 1.8f, 0f, false, false, 19.5f, 18.0f)
+                lineTo(19.5f, 14.8f)
+            }
+        }
+    }
+
     val HistogramBars: ImageVector by lazy {
         buildIcon("StudioHistogramBars") {
             strokePath {
@@ -197,7 +238,7 @@ object StudioIcons {
         }
     }
 
-    // ---- 7-Tab Floating Bottom Capsule Dock ----
+    // ---- 6-Tab Floating Bottom Capsule Dock ----
 
     /** Precision horizontal sliders for Adjust */
     val TabAdjust: ImageVector by lazy {
@@ -255,23 +296,6 @@ object StudioIcons {
                 lineTo(19.8f, 7.5f)
                 moveTo(12.0f, 12.0f)
                 lineTo(12.0f, 21.0f)
-            }
-        }
-    }
-
-    /** Sparkle aperture for AI */
-    val TabAi: ImageVector by lazy {
-        buildIcon("StudioTabAi") {
-            strokePath {
-                // Clean aperture ring
-                addCircle(12.0f, 12.0f, 8.8f)
-                // Central 4-point sparkle star
-                moveTo(12.0f, 6.2f)
-                quadTo(12.8f, 11.2f, 17.8f, 12.0f)
-                quadTo(12.8f, 12.8f, 12.0f, 17.8f)
-                quadTo(11.2f, 12.8f, 6.2f, 12.0f)
-                quadTo(11.2f, 11.2f, 12.0f, 6.2f)
-                close()
             }
         }
     }

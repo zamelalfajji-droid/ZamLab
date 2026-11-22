@@ -5,7 +5,9 @@ import androidx.core.graphics.createBitmap
 import com.example.lut.CubeLut
 import com.example.lut.LutSourceFormat
 import com.example.lut.LutType
+import com.example.lut.XmpPresetParser
 import com.example.nativebridge.NativeBridge
+import java.io.ByteArrayInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -2251,5 +2253,110 @@ object ColorGradingEngine {
         val ab = a + (b - a) * ux
         val cd = c + (d - c) * ux
         return ab + (cd - ab) * uy
+    }
+
+    const val NATIVE_XMP_HEADER_SIZE = 13
+
+    /**
+     * Maps the packed FloatArray emitted by C++17 `NativeBridge.nativeParseXmpPreset(fd)` into
+     * ZamLab's [GradingParams]:
+     * [0]=Exposure2012, [1]=Contrast2012, [2]=Highlights2012, [3]=Shadows2012,
+     * [4]=Whites2012, [5]=Blacks2012, [6]=Temperature, [7]=Tint, [8]=Vibrance,
+     * [9]=Saturation, [10]=Clarity2012, [11]=Dehaze, [12]=ToneCurvePV2012 point count N,
+     * [13..13+2N-1]=(x, y) normalized curve coordinates.
+     */
+    fun decodeNativeXmpToGradingParams(
+        nativeData: FloatArray,
+        baseParams: GradingParams = GradingParams()
+    ): GradingParams {
+        if (nativeData.size < NATIVE_XMP_HEADER_SIZE) return baseParams
+
+        fun safe(idx: Int, lo: Float, hi: Float): Float {
+            val v = nativeData[idx]
+            return if (v.isFinite()) v.coerceIn(lo, hi) else 0f
+        }
+
+        val curveCount = nativeData[12]
+            .takeIf { it.isFinite() }
+            ?.roundToInt()
+            ?.coerceAtLeast(0) ?: 0
+        val availablePairs = ((nativeData.size - NATIVE_XMP_HEADER_SIZE) / 2).coerceAtLeast(0)
+        val count = min(curveCount, availablePairs)
+        val masterCurve = if (count >= 2) {
+            buildList(count) {
+                for (i in 0 until count) {
+                    val x = nativeData[NATIVE_XMP_HEADER_SIZE + i * 2]
+                    val y = nativeData[NATIVE_XMP_HEADER_SIZE + i * 2 + 1]
+                    if (x.isFinite() && y.isFinite()) {
+                        add(ToneCurvePoint(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f)))
+                    }
+                }
+            }.sortedBy { it.x }
+        } else {
+            emptyList()
+        }
+
+        val resolvedCurve = if (masterCurve.size >= 2) {
+            baseParams.toneCurve.copy(master = masterCurve)
+        } else {
+            baseParams.toneCurve
+        }
+
+        return baseParams.copy(
+            exposure = safe(0, -2.0f, 2.0f),
+            contrast = safe(1, -100f, 100f),
+            highlights = safe(2, -100f, 100f),
+            shadows = safe(3, -100f, 100f),
+            whites = safe(4, -100f, 100f),
+            blacks = safe(5, -100f, 100f),
+            temperature = safe(6, -100f, 100f),
+            tint = safe(7, -100f, 100f),
+            vibrance = safe(8, -100f, 100f),
+            saturation = safe(9, -100f, 100f),
+            clarity = safe(10, -100f, 100f),
+            dehaze = safe(11, -100f, 100f),
+            toneCurve = resolvedCurve
+        )
+    }
+
+    /**
+     * Parses a Lightroom/ACR `.xmp` preset via the native C++17 `nativeParseXmpPreset(fd)` parser
+     * when running on-device, with an automatic Kotlin fallback for JVM tests or stream-only inputs.
+     */
+    fun parseXmpPresetToGradingParams(
+        fd: Int? = null,
+        fallbackXmpContent: String? = null,
+        baseParams: GradingParams = GradingParams()
+    ): GradingParams? {
+        if (NativeBridge.isAvailable && fd != null && fd >= 0) {
+            val nativeParsed = try {
+                NativeBridge.nativeParseXmpPreset(fd)
+            } catch (_: Throwable) {
+                null
+            }
+            if (nativeParsed != null && nativeParsed.size >= NATIVE_XMP_HEADER_SIZE) {
+                return decodeNativeXmpToGradingParams(nativeParsed, baseParams)
+            }
+        }
+        val text = fallbackXmpContent?.takeIf { it.isNotBlank() } ?: return null
+        val settings = runCatching {
+            XmpPresetParser.parseXmp(ByteArrayInputStream(text.toByteArray(Charsets.UTF_8)), "XMP Preset")
+        }.getOrNull() ?: return null
+        val fromXmp = GradingParams.fromXmpSettings(settings, baseParams.lutIntensity)
+        return baseParams.copy(
+            exposure = fromXmp.exposure,
+            contrast = fromXmp.contrast,
+            highlights = fromXmp.highlights,
+            shadows = fromXmp.shadows,
+            whites = fromXmp.whites,
+            blacks = fromXmp.blacks,
+            temperature = fromXmp.temperature,
+            tint = fromXmp.tint,
+            vibrance = fromXmp.vibrance,
+            saturation = fromXmp.saturation,
+            clarity = fromXmp.clarity,
+            dehaze = fromXmp.dehaze,
+            toneCurve = fromXmp.toneCurve
+        )
     }
 }

@@ -5,6 +5,7 @@ package com.example.ui
 import android.content.Context
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +44,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -78,14 +81,19 @@ import androidx.compose.material.icons.outlined.Healing
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -129,8 +137,6 @@ import com.example.editor.ImageIoHelper
 import com.example.editor.PhotoFormatInfo
 import com.example.editor.StudioTab
 import com.example.ui.components.AdjustPanel
-import com.example.ui.components.AiCreatePanel
-import com.example.ui.components.AiModelManagerSheet
 import com.example.ui.components.AllParametersPanel
 import com.example.ui.components.CropPanel
 import com.example.ui.components.ExportBottomSheet
@@ -161,6 +167,8 @@ import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import com.example.ui.theme.StudioTileBorder
+import com.example.ui.theme.StudioTileSurface
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -185,25 +193,27 @@ fun EditorScreen(
     var isViewportZoomed by remember { mutableStateOf(false) }
     var pendingSafOptions by remember { mutableStateOf(ExportOptions()) }
 
-    // Multi-format & RAW document picker (DNG, CR2, NEF, ARW, ORF, RW2, RAF, HEIC/HEIF, TIFF, WebP, BMP, PNG, JPG)
+    // Primary photo import: opens Android system photo gallery directly (zero storage permissions)
     val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri ->
+            uri?.let { viewModel.openPhotoFromUri(it) }
+        }
+    )
+
+    // Secondary RAW / File picker via SAF for non-indexed camera RAW formats (.cr2, .nef, .arw, .orf, .rw2, .raf, .dng)
+    val rawFilePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             uri?.let { viewModel.openPhotoFromUri(it) }
         }
     )
 
+    // LUT & .xmp preset picker via SAF using */* so Android does not hide .cube or .xmp files
     val lutPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             uri?.let { viewModel.importCubeLutFromUri(it) }
-        }
-    )
-
-    val aiZipPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-        onResult = { uri ->
-            uri?.let { viewModel.importLocalAiModelZip(it) }
         }
     )
 
@@ -243,43 +253,66 @@ fun EditorScreen(
     )
 
 
+    val shareActionLabel = stringResource(R.string.action_share_upper)
+    val savedGalleryMsg = stringResource(R.string.snackbar_saved_to_gallery)
+    val savedDownloadsMsg = stringResource(R.string.snackbar_saved_to_downloads)
+    val shareChooserTitle = stringResource(R.string.chooser_share_photo)
+
     LaunchedEffect(uiState.statusBannerMessage) {
         val msg = uiState.statusBannerMessage
         if (msg != null) {
-            snackbarHostState.showSnackbar(msg)
+            snackbarHostState.showSnackbar(
+                message = msg,
+                duration = SnackbarDuration.Short
+            )
             viewModel.dismissStatusBanner()
         }
     }
 
-    // Close the export sheet right after export succeeds and auto-hide the confirmation toast after 7 seconds
+    // Lightroom-style instant export feedback: close sheet immediately and show non-blocking Snackbar with SHARE
     LaunchedEffect(uiState.exportConfirmationToast) {
         val exported = uiState.exportConfirmationToast
         if (exported != null) {
             if (showExportSheet) {
                 showExportSheet = false
-                viewModel.dismissExportStatus()
             }
-            delay(7000L.milliseconds)
+            viewModel.dismissExportStatus()
+
+            if (exported.openShareImmediately) {
+                launchShareExportedFile(context, exported, shareChooserTitle)
+            }
+
+            val message = if (exported.format.isDownloadsDestination) {
+                savedDownloadsMsg
+            } else {
+                savedGalleryMsg
+            }
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = shareActionLabel,
+                withDismissAction = false,
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                launchShareExportedFile(context, exported, shareChooserTitle)
+            }
             viewModel.dismissExportConfirmationToast()
         }
     }
 
-    val shareExportedAction: (ExportStatus.Success) -> Unit = { exported ->
-        launchShareExportedFile(context, exported)
+    val openPhotoAction = {
+        photoPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
     }
 
-    val openPhotoAction = {
-        photoPickerLauncher.launch(ImageIoHelper.SUPPORTED_IMPORT_MIME_TYPES)
+    val openRawFileAction = {
+        rawFilePickerLauncher.launch(arrayOf("image/*", "application/octet-stream"))
     }
 
     val importLutAction = {
         lutPickerLauncher.launch(arrayOf("*/*"))
-    }
-
-    LaunchedEffect(uiState.activeTab) {
-        if (uiState.activeTab == StudioTab.AI) {
-            viewModel.refreshAiModelStatus()
-        }
     }
 
     val canReset = !uiState.gradingParams.isDefault ||
@@ -324,6 +357,8 @@ fun EditorScreen(
                         viewModel = viewModel,
                         onZoomChanged = { isViewportZoomed = it },
                         onOpenPhoto = openPhotoAction,
+                        onOpenRawFile = openRawFileAction,
+                        onQuickShare = viewModel::exportAndShareNow,
                         onOpenExport = { showExportSheet = true },
                         modifier = Modifier
                             .weight(1.48f)
@@ -362,6 +397,14 @@ fun EditorScreen(
                         )
                     }
                 }
+
+                StudioDarkroomSnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(bottom = 84.dp)
+                )
             } else {
                 var allPanelFraction by remember { mutableFloatStateOf(0.48f) }
                 var isDraggingAllHandle by remember { mutableStateOf(false) }
@@ -377,24 +420,46 @@ fun EditorScreen(
                 val haptic = LocalHapticFeedback.current
                 val density = LocalDensity.current
 
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .statusBarsPadding()
-                        .navigationBarsPadding()
-                ) {
-                    // Adaptive Split Workspace above the floating bottom navigation capsule
+                Scaffold(
+                    containerColor = StudioCharcoal,
+                    contentWindowInsets = WindowInsets.statusBars,
+                    snackbarHost = {
+                        // Positioned directly above the 68dp floating capsule dock
+                        StudioDarkroomSnackbarHost(hostState = snackbarHostState)
+                    },
+                    bottomBar = {
+                        // Pinned 68dp Floating Frosted-Glass Capsule Navigation Dock
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(StudioCharcoal)
+                                .navigationBarsPadding()
+                                .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            FloatingCapsuleNavDock(
+                                uiState = uiState,
+                                onSelectTab = viewModel::selectTab,
+                                modifier = Modifier
+                                    .widthIn(max = 500.dp)
+                                    .fillMaxWidth()
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) { innerPadding ->
+                    // Dynamic Split Workspace above the pinned 68dp bottom dock
                     BoxWithConstraints(
                         modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
+                            .fillMaxSize()
+                            .padding(innerPadding)
                     ) {
                         val workspaceHeight = maxHeight
                         val workspaceHeightPx = with(density) { workspaceHeight.toPx() }.coerceAtLeast(1f)
                         val isAllTab = uiState.activeTab == StudioTab.ALL
 
                         Column(modifier = Modifier.fillMaxSize()) {
-                            // 1. Immersive Photo Canvas (>=50% height in All, ~68%+ in Adjust)
+                            // 1. Dynamic Photo Viewport Canvas (weight(1f) shrinks smoothly when tool panel opens)
                             ImmersiveCanvasStage(
                                 uiState = uiState,
                                 activeTexture = activeTexture,
@@ -404,6 +469,8 @@ fun EditorScreen(
                                 viewModel = viewModel,
                                 onZoomChanged = { isViewportZoomed = it },
                                 onOpenPhoto = openPhotoAction,
+                                onOpenRawFile = openRawFileAction,
+                                onQuickShare = viewModel::exportAndShareNow,
                                 onOpenExport = { showExportSheet = true },
                                 modifier = Modifier
                                     .weight(1f)
@@ -411,8 +478,11 @@ fun EditorScreen(
                                     .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 4.dp)
                             )
 
-                            // 2. Active Tool Panel (bounded <=50% workspaceHeight so canvas always keeps >=50% height)
-                            val maxToolPanelHeight = (workspaceHeight * 0.50f).coerceAtLeast(156.dp)
+                            // 2. Active Tool Panel (bounded so it never overlaps or hides the pinned bottom dock)
+                            val maxAllPanelHeight = (workspaceHeight * 0.50f).coerceAtLeast(156.dp)
+                            val cappedToolMax = minOf(240.dp, (workspaceHeight * 0.48f).coerceAtLeast(140.dp))
+                            val cappedToolMin = minOf(140.dp, cappedToolMax)
+
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -428,9 +498,9 @@ fun EditorScreen(
                                     )
                             ) {
                                 if (isAllTab) {
-                                    val minAllHeight = minOf(180.dp, maxToolPanelHeight)
+                                    val minAllHeight = minOf(180.dp, maxAllPanelHeight)
                                     val panelHeight = (workspaceHeight * activeAllFraction)
-                                        .coerceIn(minAllHeight, maxToolPanelHeight)
+                                        .coerceIn(minAllHeight, maxAllPanelHeight)
                                     val sheetShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
                                     val dragHandleCd = stringResource(R.string.cd_drag_resize_panel)
 
@@ -469,7 +539,6 @@ fun EditorScreen(
                                                         },
                                                         onDragEnd = {
                                                             isDraggingAllHandle = false
-                                                            // Soft magnetic detent near balanced 48% split
                                                             if (kotlin.math.abs(allPanelFraction - 0.48f) < 0.03f) {
                                                                 allPanelFraction = 0.48f
                                                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -510,27 +579,10 @@ fun EditorScreen(
                                         }
                                     }
                                 } else {
-                                    val toolPanelModifier = when (uiState.activeTab) {
-                                        StudioTab.ADJUST -> Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(max = maxToolPanelHeight)
-                                        StudioTab.AI -> Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(max = maxToolPanelHeight)
-                                            .padding(horizontal = 8.dp)
-                                        StudioTab.CROP -> Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(
-                                                min = minOf(190.dp, maxToolPanelHeight),
-                                                max = minOf(236.dp, maxToolPanelHeight)
-                                            )
-                                        else -> Modifier
-                                            .fillMaxWidth()
-                                            .heightIn(
-                                                min = minOf(168.dp, maxToolPanelHeight),
-                                                max = minOf(216.dp, maxToolPanelHeight)
-                                            )
-                                    }
+                                    // Constrain active tool panel (including LUTs, Adjust, Crop, Heal, Masks) to 140..240dp
+                                    val toolPanelModifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = cappedToolMin, max = cappedToolMax)
 
                                     Box(modifier = toolPanelModifier) {
                                         ActiveToolPanel(
@@ -544,58 +596,7 @@ fun EditorScreen(
                             }
                         }
                     }
-
-                    // 3. Floating Frosted-Glass Capsule Navigation Dock
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        FloatingCapsuleNavDock(
-                            uiState = uiState,
-                            onSelectTab = viewModel::selectTab,
-                            modifier = Modifier
-                                .widthIn(max = 500.dp)
-                                .fillMaxWidth()
-                        )
-                    }
                 }
-            }
-        }
-
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 66.dp, start = 16.dp, end = 16.dp)
-        ) { data ->
-            Snackbar(
-                snackbarData = data,
-                containerColor = StudioSurfaceElevated,
-                contentColor = StudioTextPrimary,
-                shape = RoundedCornerShape(14.dp)
-            )
-        }
-
-        // Frosted-Glass Export Confirmation Toast with saved filename & one-tap Share button
-        AnimatedVisibility(
-            visible = uiState.exportConfirmationToast != null,
-            enter = fadeIn(tween(200)) + slideInVertically(tween(220)) { -it / 2 },
-            exit = fadeOut(tween(180)) + slideOutVertically(tween(180)) { -it / 2 },
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 66.dp, start = 14.dp, end = 14.dp)
-        ) {
-            val exported = uiState.exportConfirmationToast
-            if (exported != null) {
-                ExportConfirmationToast(
-                    exported = exported,
-                    onShare = { shareExportedAction(exported) },
-                    onDismiss = viewModel::dismissExportConfirmationToast
-                )
             }
         }
     }
@@ -620,10 +621,8 @@ fun EditorScreen(
                     ExportFormat.WEBP -> createWebpLauncher.launch(suggestedName)
                     ExportFormat.PDF -> createPdfLauncher.launch(suggestedName)
                     ExportFormat.TIFF -> createTiffLauncher.launch(suggestedName)
-
                 }
             },
-            onShareExported = shareExportedAction,
             onDismiss = {
                 viewModel.dismissExportStatus()
                 showExportSheet = false
@@ -661,29 +660,6 @@ fun EditorScreen(
             onDismiss = { showProfileBrowser = false }
         )
     }
-
-    if (uiState.isAiModelManagerVisible) {
-        AiModelManagerSheet(
-            catalog = uiState.aiModelCatalog,
-            modelProgress = uiState.aiModelProgress,
-            onSelectModel = viewModel::selectActiveAiModel,
-            onDeleteModel = viewModel::deleteAiModel,
-            onDownloadBuiltinSd15 = viewModel::startBuiltinSd15Download,
-            onDownloadCustomUrl = viewModel::downloadCustomAiModelFromUrl,
-            onPickLocalZip = {
-                aiZipPickerLauncher.launch(
-                    arrayOf(
-                        "application/zip",
-                        "application/x-zip-compressed",
-                        "application/octet-stream",
-                        "*/*"
-                    )
-                )
-            },
-            onCancelDownload = viewModel::cancelAiModelDownload,
-            onDismiss = viewModel::dismissAiModelManager
-        )
-    }
 }
 
 @Composable
@@ -696,6 +672,8 @@ private fun ImmersiveCanvasStage(
     viewModel: EditorViewModel,
     onZoomChanged: (Boolean) -> Unit,
     onOpenPhoto: () -> Unit,
+    onOpenRawFile: () -> Unit,
+    onQuickShare: () -> Unit,
     onOpenExport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -769,19 +747,22 @@ private fun ImmersiveCanvasStage(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Top Floating Frosted-Glass Header: Emblem + Import | Undo / Redo / Before-After | Export (+ RAW/Format Badge)
+        // Top Floating Frosted-Glass Header: Emblem + Gallery / RAW Import | Undo / Redo / Before-After | Quick Share + Export
         TopFloatingGlassHeader(
             photoFormatInfo = uiState.photoFormatInfo,
             canExport = uiState.fullWidth > 0,
+            isExporting = uiState.exportStatus is ExportStatus.Exporting,
             canUndo = uiState.canUndo,
             canRedo = uiState.canRedo,
             isComparingOriginal = uiState.isComparingOriginal,
             isSplitCompareEnabled = uiState.isSplitCompareEnabled,
             onOpenPhoto = onOpenPhoto,
+            onOpenRawFile = onOpenRawFile,
             onUndo = viewModel::undo,
             onRedo = viewModel::redo,
             onCompareChanged = viewModel::setComparingOriginal,
             onToggleSplitCompare = viewModel::toggleSplitCompare,
+            onQuickShare = onQuickShare,
             onOpenExport = onOpenExport,
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -870,15 +851,18 @@ private fun ImmersiveCanvasStage(
 private fun TopFloatingGlassHeader(
     photoFormatInfo: PhotoFormatInfo,
     canExport: Boolean,
+    isExporting: Boolean,
     canUndo: Boolean,
     canRedo: Boolean,
     isComparingOriginal: Boolean,
     isSplitCompareEnabled: Boolean,
     onOpenPhoto: () -> Unit,
+    onOpenRawFile: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onCompareChanged: (Boolean) -> Unit,
     onToggleSplitCompare: () -> Unit,
+    onQuickShare: () -> Unit,
     onOpenExport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -892,7 +876,7 @@ private fun TopFloatingGlassHeader(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val useCompactScroll = maxWidth < 332.dp
+            val useCompactScroll = maxWidth < 436.dp
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -910,7 +894,7 @@ private fun TopFloatingGlassHeader(
                     Arrangement.SpaceBetween
                 }
             ) {
-                // Left Elevated Graphite Pill: ZamLab Emblem + Import Photo
+                // Left Elevated Graphite Pill: ZamLab Emblem + Gallery Open + Secondary Import RAW / File
                 Surface(
                     shape = RoundedCornerShape(50),
                     color = StudioGraphite,
@@ -959,6 +943,27 @@ private fun TopFloatingGlassHeader(
                                 contentDescription = stringResource(R.string.cd_open_photo),
                                 tint = StudioCoolWhite,
                                 modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(16.dp)
+                                .background(StudioHairline)
+                        )
+
+                        IconButton(
+                            onClick = onOpenRawFile,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("import_raw_file_button")
+                        ) {
+                            Icon(
+                                imageVector = StudioIcons.ImportRawFile,
+                                contentDescription = stringResource(R.string.cd_import_raw_file),
+                                tint = StudioMutedSlate,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
@@ -1068,39 +1073,74 @@ private fun TopFloatingGlassHeader(
             }
         }
 
-        // Right Bold Uppercase Cinema Amber EXPORT Pill (#F5A623 fill, #121316 bold text, 20dp corner radius)
-        Button(
-            onClick = onOpenExport,
-            enabled = canExport,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = StudioCinemaAmber,
-                contentColor = StudioCharcoal,
-                disabledContainerColor = StudioCinemaAmber.copy(alpha = 0.28f),
-                disabledContentColor = StudioCharcoal.copy(alpha = 0.6f)
-            ),
-            shape = RoundedCornerShape(20.dp),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
-            modifier = Modifier
-                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                .height(48.dp)
-                .testTag("export_button")
+        // Right Cluster: Direct One-Tap Quick Share + Bold Uppercase Cinema Amber EXPORT Pill
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Icon(
-                imageVector = StudioIcons.ExportArrow,
-                contentDescription = stringResource(R.string.cd_export_photo),
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(5.dp))
-            Text(
-                text = stringResource(R.string.action_export).uppercase(Locale.ROOT),
-                style = MaterialTheme.typography.labelMedium.copy(
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = 0.6.sp
+            Surface(
+                shape = CircleShape,
+                color = StudioGraphite,
+                shadowElevation = 6.dp,
+                modifier = Modifier.border(1.dp, StudioHairline, CircleShape)
+            ) {
+                IconButton(
+                    onClick = onQuickShare,
+                    enabled = canExport && !isExporting,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("top_share_button")
+                ) {
+                    if (isExporting) {
+                        CircularProgressIndicator(
+                            color = StudioCinemaAmber,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = StudioIcons.SharePhoto,
+                            contentDescription = stringResource(R.string.cd_quick_share),
+                            tint = if (canExport) StudioCoolWhite else StudioTextMuted.copy(alpha = 0.5f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+            }
+
+            Button(
+                onClick = onOpenExport,
+                enabled = canExport && !isExporting,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = StudioCinemaAmber,
+                    contentColor = StudioCharcoal,
+                    disabledContainerColor = StudioCinemaAmber.copy(alpha = 0.28f),
+                    disabledContentColor = StudioCharcoal.copy(alpha = 0.6f)
                 ),
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis
-            )
+                shape = RoundedCornerShape(20.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .height(48.dp)
+                    .testTag("export_button")
+            ) {
+                Icon(
+                    imageVector = StudioIcons.ExportArrow,
+                    contentDescription = stringResource(R.string.cd_export_photo),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = stringResource(R.string.action_export).uppercase(Locale.ROOT),
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.6.sp
+                    ),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         }
         }
@@ -1343,18 +1383,6 @@ private fun ActiveToolPanel(
             onDeleteUserPreset = viewModel::deleteUserPreset
         )
 
-        StudioTab.AI -> AiCreatePanel(
-            catalog = uiState.aiModelCatalog,
-            modelProgress = uiState.aiModelProgress,
-            generationState = uiState.aiGenerationState,
-            onOpenModelManager = viewModel::openAiModelManager,
-            onDownloadBuiltinSd15 = viewModel::startBuiltinSd15Download,
-            onCancelModelDownload = viewModel::cancelAiModelDownload,
-            onGenerate = viewModel::generateAiPhoto,
-            onCancelGeneration = viewModel::cancelAiGeneration,
-            onClearError = viewModel::clearAiGenerationError
-        )
-
         StudioTab.CROP -> CropPanel(
             crop = uiState.gradingParams.crop,
             overlayMode = uiState.cropOverlayMode,
@@ -1418,8 +1446,8 @@ private fun ActiveToolPanel(
 }
 
 /**
- * Compact 7-tab floating frosted-glass capsule bottom navigation:
- * Adjust | All | LUTs | AI | Crop | Heal | Masks.
+ * Compact 6-tab floating frosted-glass capsule bottom navigation:
+ * Adjust | All | LUTs | Crop | Heal | Masks.
  */
 @Composable
 private fun FloatingCapsuleNavDock(
@@ -1431,7 +1459,6 @@ private fun FloatingCapsuleNavDock(
     val gp = uiState.gradingParams
     val hasAdjustEdits = gp.hasLightEdits || gp.hasColorEdits || gp.hasEffectsEdits || gp.hasDetailEdits || gp.hasProfileEdits
     val hasLutEdits = uiState.selectedLutId != null || uiState.selectedUserPresetId != null
-    val hasAiReady = uiState.isAiModelReady
     val hasCropEdits = !gp.crop.isDefault
     val hasHealEdits = uiState.hasHealEdits
     val hasMaskEdits = gp.hasMaskEdits
@@ -1446,7 +1473,7 @@ private fun FloatingCapsuleNavDock(
             .testTag("floating_capsule_nav")
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val useHorizontalScroll = maxWidth < 452.dp
+            val useHorizontalScroll = maxWidth < 388.dp
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1498,16 +1525,6 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasLutEdits,
                     testTag = "tab_luts",
                     onClick = { onSelectTab(StudioTab.LUTS) },
-                    modifier = itemModifier
-                )
-                CapsuleNavTabItem(
-                    label = stringResource(R.string.tab_ai),
-                    selectedIcon = StudioIcons.TabAi,
-                    unselectedIcon = StudioIcons.TabAi,
-                    selected = uiState.activeTab == StudioTab.AI,
-                    hasEdits = hasAiReady,
-                    testTag = "tab_ai",
-                    onClick = { onSelectTab(StudioTab.AI) },
                     modifier = itemModifier
                 )
                 CapsuleNavTabItem(
@@ -1623,108 +1640,79 @@ private fun CapsuleNavTabItem(
 }
 
 /**
- * Sleek frosted-glass post-export confirmation toast showing the saved filename,
- * destination/resolution metadata, and a one-tap Share button.
+ * Lightroom-style non-blocking Material 3 Snackbar host anchored directly above
+ * the 68dp floating capsule dock, styled in Calibrated Studio Darkroom tokens
+ * (#1E2026 container, #2E323C 1dp hairline border, #F2F4F8 message, #F5A623 SHARE action).
  */
 @Composable
-private fun ExportConfirmationToast(
-    exported: ExportStatus.Success,
-    onShare: () -> Unit,
-    onDismiss: () -> Unit,
+private fun StudioDarkroomSnackbarHost(
+    hostState: SnackbarHostState,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = StudioGlassSurface.copy(alpha = 0.95f),
-        shadowElevation = 10.dp,
+    SnackbarHost(
+        hostState = hostState,
         modifier = modifier
-            .widthIn(max = 440.dp)
-            .fillMaxWidth()
-            .border(1.dp, StudioGlassHighlight, RoundedCornerShape(16.dp))
-            .testTag("export_confirmation_toast")
-    ) {
-        Row(
+    ) { data ->
+        val snackbarShape = RoundedCornerShape(14.dp)
+        Snackbar(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint = StudioSuccessGreen,
-                modifier = Modifier.size(20.dp)
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Saved ${exported.filename}",
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-                    color = StudioActiveOffWhite,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "${exported.format.label} • ${exported.width}×${exported.height} • ${exported.destinationLabel}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StudioTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            if (exported.uri != null) {
-                Button(
-                    onClick = onShare,
-                    shape = RoundedCornerShape(50),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = StudioActiveOffWhite,
-                        contentColor = StudioObsidian
-                    ),
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .testTag("toast_share_exported_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Share,
-                        contentDescription = stringResource(R.string.cd_share_exported_file),
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = stringResource(R.string.action_share),
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .widthIn(max = 460.dp)
+                .border(1.dp, StudioTileBorder, snackbarShape)
+                .testTag("export_snackbar"),
+            shape = snackbarShape,
+            containerColor = StudioTileSurface,
+            contentColor = StudioCoolWhite,
+            actionContentColor = StudioCinemaAmber,
+            action = data.visuals.actionLabel?.let { actionLabel ->
+                {
+                    TextButton(
+                        onClick = { data.performAction() },
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = StudioCinemaAmber
+                        ),
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .testTag("export_snackbar_share_action")
+                    ) {
+                        Text(
+                            text = actionLabel,
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                letterSpacing = 0.6.sp
+                            ),
+                            color = StudioCinemaAmber,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
-            IconButton(
-                onClick = onDismiss,
-                modifier = Modifier
-                    .size(48.dp)
-                    .testTag("dismiss_export_toast_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = stringResource(R.string.cd_dismiss_export_toast),
-                    tint = StudioTextSecondary,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
+        ) {
+            Text(
+                text = data.visuals.message,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = FontWeight.Medium
+                ),
+                color = StudioCoolWhite,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
 
-private fun launchShareExportedFile(context: Context, exported: ExportStatus.Success) {
-    val uri = exported.uri ?: return
+private fun launchShareExportedFile(
+    context: Context,
+    exported: ExportStatus.Success,
+    chooserTitle: String = "Share Photo"
+) {
     val sendIntent = Intent(Intent.ACTION_SEND).apply {
         type = exported.mimeType
-        putExtra(Intent.EXTRA_STREAM, uri)
-        putExtra(Intent.EXTRA_SUBJECT, exported.filename)
+        putExtra(Intent.EXTRA_STREAM, exported.uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    val chooser = Intent.createChooser(sendIntent, "Share ${exported.filename}")
+    val chooser = Intent.createChooser(sendIntent, chooserTitle)
     runCatching {
         context.startActivity(chooser)
     }

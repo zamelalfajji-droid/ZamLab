@@ -113,7 +113,7 @@ fun LutPanel(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 6.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -286,7 +286,7 @@ fun LutPanel(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF12151C))
-                .padding(horizontal = 16.dp, vertical = 6.dp)
+                .padding(horizontal = 14.dp, vertical = 4.dp)
         ) {
             Row(
                 modifier = Modifier

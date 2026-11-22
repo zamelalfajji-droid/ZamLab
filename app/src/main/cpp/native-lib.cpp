@@ -5,7 +5,11 @@
 #include <fstream>
 #include <cmath>
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <unistd.h>
+#include <utility>
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_example_nativebridge_NativeBridge_getEngineVersion(
@@ -790,5 +794,280 @@ Java_com_example_nativebridge_NativeBridge_applyAnamorphicStreakNative(
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
 }
+
+// 8. NATIVE C++17 LIGHTROOM / ACR .XMP PRESET PARSER (Reads from POSIX File Descriptor)
+namespace {
+
+std::string stripXmlBlock(const std::string& xml, const std::string& tagName) {
+    std::string out = xml;
+    const std::string openPrefix = "<" + tagName;
+    const std::string closeTag = "</" + tagName + ">";
+    size_t pos = 0;
+    while ((pos = out.find(openPrefix, pos)) != std::string::npos) {
+        const size_t afterName = pos + openPrefix.size();
+        if (afterName < out.size()) {
+            const char nextC = out[afterName];
+            if (nextC != '>' && nextC != '/' && !std::isspace(static_cast<unsigned char>(nextC))) {
+                pos = afterName;
+                continue;
+            }
+        }
+        const size_t openEnd = out.find('>', afterName);
+        if (openEnd == std::string::npos) break;
+        if (openEnd > pos && out[openEnd - 1] == '/') {
+            out.erase(pos, openEnd - pos + 1);
+            continue;
+        }
+        const size_t closePos = out.find(closeTag, openEnd + 1);
+        if (closePos == std::string::npos) {
+            out.erase(pos);
+            break;
+        }
+        out.erase(pos, (closePos + closeTag.size()) - pos);
+    }
+    return out;
+}
+
+bool parseFloatToken(const std::string& raw, float& outVal) {
+    const char* start = raw.c_str();
+    while (*start != '\0' && std::isspace(static_cast<unsigned char>(*start))) ++start;
+    if (*start == '\0') return false;
+    char* endPtr = nullptr;
+    const float parsed = std::strtof(start, &endPtr);
+    if (endPtr == start || !std::isfinite(parsed)) return false;
+    outVal = parsed;
+    return true;
+}
+
+bool extractCrsFloatTag(const std::string& xml, const std::string& fullTag, float& outVal) {
+    // 1. Attribute form: crs:TagName="value" or crs:TagName='value'
+    size_t pos = 0;
+    while ((pos = xml.find(fullTag, pos)) != std::string::npos) {
+        const bool validLead = (pos == 0) ||
+            std::isspace(static_cast<unsigned char>(xml[pos - 1])) ||
+            xml[pos - 1] == '<';
+        const size_t after = pos + fullTag.size();
+        if (validLead && after < xml.size()) {
+            size_t eq = after;
+            while (eq < xml.size() && std::isspace(static_cast<unsigned char>(xml[eq]))) ++eq;
+            if (eq < xml.size() && xml[eq] == '=') {
+                size_t qStart = eq + 1;
+                while (qStart < xml.size() && std::isspace(static_cast<unsigned char>(xml[qStart]))) ++qStart;
+                if (qStart < xml.size() && (xml[qStart] == '"' || xml[qStart] == '\'')) {
+                    const char quote = xml[qStart];
+                    const size_t qEnd = xml.find(quote, qStart + 1);
+                    if (qEnd != std::string::npos) {
+                        float parsed = 0.0f;
+                        if (parseFloatToken(xml.substr(qStart + 1, qEnd - qStart - 1), parsed)) {
+                            outVal = parsed;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        pos = after;
+    }
+
+    // 2. Element form: <crs:TagName>value</crs:TagName>
+    const std::string openTag = "<" + fullTag + ">";
+    const std::string closeTag = "</" + fullTag + ">";
+    const size_t openPos = xml.find(openTag);
+    if (openPos != std::string::npos) {
+        const size_t valStart = openPos + openTag.size();
+        const size_t closePos = xml.find(closeTag, valStart);
+        if (closePos != std::string::npos) {
+            float parsed = 0.0f;
+            if (parseFloatToken(xml.substr(valStart, closePos - valStart), parsed)) {
+                outVal = parsed;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void extractToneCurvePv2012(
+        const std::string& xml,
+        std::vector<std::pair<float, float>>& outPoints) {
+    const std::string openPrefix = "<crs:ToneCurvePV2012";
+    const std::string closeTag = "</crs:ToneCurvePV2012>";
+    size_t openPos = xml.find(openPrefix);
+    while (openPos != std::string::npos) {
+        const size_t afterName = openPos + openPrefix.size();
+        if (afterName < xml.size() &&
+            (xml[afterName] == '>' || std::isspace(static_cast<unsigned char>(xml[afterName])))) {
+            const size_t bodyStart = xml.find('>', afterName);
+            const size_t closePos = (bodyStart != std::string::npos)
+                ? xml.find(closeTag, bodyStart + 1)
+                : std::string::npos;
+            if (bodyStart != std::string::npos && closePos != std::string::npos) {
+                const std::string block = xml.substr(bodyStart + 1, closePos - bodyStart - 1);
+                size_t liPos = 0;
+                while ((liPos = block.find("<rdf:li", liPos)) != std::string::npos) {
+                    const size_t liOpenEnd = block.find('>', liPos + 7);
+                    if (liOpenEnd == std::string::npos) break;
+                    const size_t liClose = block.find("</rdf:li>", liOpenEnd + 1);
+                    if (liClose == std::string::npos) break;
+                    const std::string item = block.substr(liOpenEnd + 1, liClose - liOpenEnd - 1);
+                    const size_t comma = item.find(',');
+                    if (comma != std::string::npos) {
+                        float x = 0.0f;
+                        float y = 0.0f;
+                        if (parseFloatToken(item.substr(0, comma), x) &&
+                            parseFloatToken(item.substr(comma + 1), y)) {
+                            const float nx = std::clamp(x / 255.0f, 0.0f, 1.0f);
+                            const float ny = std::clamp(y / 255.0f, 0.0f, 1.0f);
+                            outPoints.emplace_back(nx, ny);
+                        }
+                    }
+                    liPos = liClose + 9;
+                }
+                break;
+            }
+        }
+        openPos = xml.find(openPrefix, afterName);
+    }
+
+    if (outPoints.size() >= 2) {
+        std::sort(outPoints.begin(), outPoints.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (outPoints.size() > 32) {
+            outPoints.resize(32);
+        }
+    }
+}
+
+} // namespace
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_example_nativebridge_NativeBridge_nativeParseXmpPreset(
+        JNIEnv* env,
+        jobject /* this */,
+        jint fd) {
+    if (fd < 0) return nullptr;
+
+    // Duplicate fd so Android's ParcelFileDescriptor keeps ownership of the original descriptor
+    const int dupFd = dup(fd);
+    if (dupFd < 0) return nullptr;
+
+    lseek(dupFd, 0, SEEK_SET);
+    constexpr size_t kMaxXmpBytes = 4 * 1024 * 1024; // 4 MB safety limit
+    std::string xmlContent;
+    xmlContent.reserve(8192);
+    char buffer[8192];
+    while (xmlContent.size() < kMaxXmpBytes) {
+        const ssize_t n = read(dupFd, buffer, sizeof(buffer));
+        if (n <= 0) break;
+        const size_t toAppend = std::min(static_cast<size_t>(n), kMaxXmpBytes - xmlContent.size());
+        xmlContent.append(buffer, toAppend);
+    }
+    close(dupFd);
+
+    if (xmlContent.empty()) return nullptr;
+    if (xmlContent.find('<') == std::string::npos) return nullptr;
+    if (xmlContent.find("crs:") == std::string::npos &&
+        xmlContent.find("xmp") == std::string::npos &&
+        xmlContent.find("XMP") == std::string::npos &&
+        xmlContent.find("rdf:") == std::string::npos) {
+        return nullptr;
+    }
+
+    // Strip localized mask subtrees so local adjustments cannot overwrite global develop tags
+    std::string cleaned = stripXmlBlock(xmlContent, "crs:MaskGroupBasedCorrections");
+    cleaned = stripXmlBlock(cleaned, "crs:CorrectionMasks");
+    cleaned = stripXmlBlock(cleaned, "crs:Correction");
+    cleaned = stripXmlBlock(cleaned, "crs:CorrectionRangeMask");
+
+    float exposure = 0.0f;
+    float contrast = 0.0f;
+    float highlights = 0.0f;
+    float shadows = 0.0f;
+    float whites = 0.0f;
+    float blacks = 0.0f;
+    float temperature = 0.0f;
+    float tint = 0.0f;
+    float vibrance = 0.0f;
+    float saturation = 0.0f;
+    float clarity = 0.0f;
+    float dehaze = 0.0f;
+
+    float v = 0.0f;
+    if (extractCrsFloatTag(cleaned, "crs:Exposure2012", v) ||
+        extractCrsFloatTag(cleaned, "crs:Exposure", v)) {
+        exposure = std::clamp(v, -4.0f, 4.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Contrast2012", v) ||
+        extractCrsFloatTag(cleaned, "crs:Contrast", v)) {
+        contrast = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Highlights2012", v)) {
+        highlights = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Shadows2012", v)) {
+        shadows = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Whites2012", v)) {
+        whites = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Blacks2012", v)) {
+        blacks = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:IncrementalTemperature", v)) {
+        temperature = std::clamp(v, -100.0f, 100.0f);
+    } else if (extractCrsFloatTag(cleaned, "crs:Temperature", v)) {
+        temperature = (v > 500.0f)
+            ? std::clamp((v - 5500.0f) / 45.0f, -100.0f, 100.0f)
+            : std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:IncrementalTint", v) ||
+        extractCrsFloatTag(cleaned, "crs:Tint", v)) {
+        tint = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Vibrance", v)) {
+        vibrance = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Saturation", v)) {
+        saturation = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Clarity2012", v) ||
+        extractCrsFloatTag(cleaned, "crs:Clarity", v)) {
+        clarity = std::clamp(v, -100.0f, 100.0f);
+    }
+    if (extractCrsFloatTag(cleaned, "crs:Dehaze", v)) {
+        dehaze = std::clamp(v, -100.0f, 100.0f);
+    }
+
+    std::vector<std::pair<float, float>> toneCurve;
+    extractToneCurvePv2012(cleaned, toneCurve);
+
+    const jsize totalLen = static_cast<jsize>(13 + toneCurve.size() * 2);
+    std::vector<jfloat> packed;
+    packed.reserve(static_cast<size_t>(totalLen));
+    packed.push_back(exposure);
+    packed.push_back(contrast);
+    packed.push_back(highlights);
+    packed.push_back(shadows);
+    packed.push_back(whites);
+    packed.push_back(blacks);
+    packed.push_back(temperature);
+    packed.push_back(tint);
+    packed.push_back(vibrance);
+    packed.push_back(saturation);
+    packed.push_back(clarity);
+    packed.push_back(dehaze);
+    packed.push_back(static_cast<jfloat>(toneCurve.size()));
+    for (const auto& pt : toneCurve) {
+        packed.push_back(pt.first);
+        packed.push_back(pt.second);
+    }
+
+    jfloatArray result = env->NewFloatArray(totalLen);
+    if (result != nullptr) {
+        env->SetFloatArrayRegion(result, 0, totalLen, packed.data());
+    }
+    return result;
+}
+
 
 

@@ -52,11 +52,14 @@ data class ProxyDecodeResult(
 @Immutable
 data class ExportSaveResult(
     val filename: String,
-    val uri: Uri?,
+    val uri: Uri,
     val mimeType: String,
     val format: ExportFormat,
     val destinationLabel: String
-)
+) {
+    val savedSnackbarMessage: String
+        get() = format.savedSnackbarMessage
+}
 
 enum class ExportFormat(
     val label: String,
@@ -65,7 +68,8 @@ enum class ExportFormat(
     val extension: String,
     val supportsQuality: Boolean,
     val defaultSaveLabel: String,
-    val defaultFolderDescription: String
+    val defaultFolderDescription: String,
+    val isDownloadsDestination: Boolean
 ) {
     JPG(
         label = "JPG",
@@ -73,8 +77,9 @@ enum class ExportFormat(
         mimeType = "image/jpeg",
         extension = "jpg",
         supportsQuality = true,
-        defaultSaveLabel = "Save to Photos",
-        defaultFolderDescription = "Pictures/ZamLab"
+        defaultSaveLabel = "Export to Gallery",
+        defaultFolderDescription = "Pictures/ZamLab",
+        isDownloadsDestination = false
     ),
     PNG(
         label = "PNG",
@@ -82,8 +87,9 @@ enum class ExportFormat(
         mimeType = "image/png",
         extension = "png",
         supportsQuality = false,
-        defaultSaveLabel = "Save to Photos",
-        defaultFolderDescription = "Pictures/ZamLab"
+        defaultSaveLabel = "Export to Gallery",
+        defaultFolderDescription = "Pictures/ZamLab",
+        isDownloadsDestination = false
     ),
     WEBP(
         label = "WebP",
@@ -91,8 +97,9 @@ enum class ExportFormat(
         mimeType = "image/webp",
         extension = "webp",
         supportsQuality = true,
-        defaultSaveLabel = "Save to Photos",
-        defaultFolderDescription = "Pictures/ZamLab"
+        defaultSaveLabel = "Export to Gallery",
+        defaultFolderDescription = "Pictures/ZamLab",
+        isDownloadsDestination = false
     ),
     TIFF(
         label = "TIFF (16-Bit)",
@@ -100,8 +107,9 @@ enum class ExportFormat(
         mimeType = "image/tiff",
         extension = "tiff",
         supportsQuality = false,
-        defaultSaveLabel = "Save to Photos",
-        defaultFolderDescription = "Pictures/ZamLab"
+        defaultSaveLabel = "Export to Downloads",
+        defaultFolderDescription = "Downloads/ZamLab",
+        isDownloadsDestination = true
     ),
 
     PDF(
@@ -110,9 +118,13 @@ enum class ExportFormat(
         mimeType = "application/pdf",
         extension = "pdf",
         supportsQuality = false,
-        defaultSaveLabel = "Save to Documents",
-        defaultFolderDescription = "Documents/ZamLab"
+        defaultSaveLabel = "Export to Downloads",
+        defaultFolderDescription = "Downloads/ZamLab",
+        isDownloadsDestination = true
     );
+
+    val savedSnackbarMessage: String
+        get() = if (isDownloadsDestination) "Saved to Downloads" else "Saved to Gallery"
 
     fun resolveCompressFormat(quality: Int): Bitmap.CompressFormat {
         return when (this) {
@@ -906,9 +918,12 @@ object ImageIoHelper {
     }
 
     /**
-     * Saves the graded bitmap to its standard MediaStore destination:
-     * - PDF -> `Documents/ZamLab` via `MediaStore.Files`
-     * - JPG, PNG, WebP -> `Pictures/ZamLab` via `MediaStore.Images`
+     * Immediately writes the rendered bitmap to public device storage via [MediaStore]:
+     * - JPG, PNG, WebP -> `Pictures/ZamLab` via [MediaStore.Images.Media.EXTERNAL_CONTENT_URI]
+     * - PDF, 16-bit TIFF -> `Downloads/ZamLab` via [MediaStore.Downloads.EXTERNAL_CONTENT_URI] (API 29+)
+     *
+     * Sets `IS_PENDING = 1` during encoding and publishes with `IS_PENDING = 0` upon completion,
+     * returning the newly created public `content://` [Uri] inside [ExportSaveResult].
      */
     suspend fun saveToGalleryMediaStore(
         context: Context,
@@ -919,15 +934,15 @@ object ImageIoHelper {
         val resolver = context.contentResolver
 
         val (collectionUri, relativePath, destinationLabel) = when (options.format) {
-            ExportFormat.PDF -> {
+            ExportFormat.PDF, ExportFormat.TIFF -> {
                 val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI
                 } else {
                     MediaStore.Files.getContentUri("external")
                 }
-                Triple(collection, "${Environment.DIRECTORY_DOCUMENTS}/ZamLab", "Documents/ZamLab")
+                Triple(collection, "${Environment.DIRECTORY_DOWNLOADS}/ZamLab", "Downloads/ZamLab")
             }
-            ExportFormat.TIFF ,ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP -> {
+            ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP -> {
                 Triple(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     "${Environment.DIRECTORY_PICTURES}/ZamLab",

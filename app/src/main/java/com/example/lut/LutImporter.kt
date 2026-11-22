@@ -4,7 +4,9 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.Immutable
+import com.example.editor.ColorGradingEngine
 import com.example.editor.ImageIoHelper
+import com.example.nativebridge.NativeBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
@@ -143,30 +145,58 @@ object LutImporter {
             bundled to custom
         }
 
+    /**
+     * Validates the user-selected preset/LUT filename extension after opening Android SAF with wildcard MIME type.
+     * Returns `"cube"`, `"xmp"`, or `"zip"` for supported extensions; returns `null` if the provider
+     * omitted an extension so content headers can be inspected; throws [IllegalArgumentException]
+     * for unsupported explicit extensions (e.g. `.jpg`, `.txt`, `.pdf`).
+     */
+    fun validatePresetExtension(fileName: String): String? {
+        val trimmed = fileName.trim()
+        val dotIdx = trimmed.lastIndexOf('.')
+        if (dotIdx <= 0 || dotIdx == trimmed.length - 1) return null
+        return when (val ext = trimmed.substring(dotIdx + 1).lowercase(Locale.US)) {
+            "cube", "xmp", "zip" -> ext
+            else -> throw IllegalArgumentException(
+                "Unsupported file \".$ext\". Please choose a .cube, .xmp, or .zip preset file."
+            )
+        }
+    }
+
     suspend fun importFromUri(context: Context, uri: Uri): LutImportSummary =
         withContext(Dispatchers.IO) {
             try {
                 val displayName = ImageIoHelper.queryDisplayName(context, uri, "imported_lut")
-                val lowerName = displayName.lowercase(Locale.US)
+                val validatedExt = validatePresetExtension(displayName)
                 val customDir = File(context.filesDir, CUSTOM_LUT_DIR).apply { mkdirs() }
 
                 val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytesLimited() }
                     ?: throw IllegalStateException("Cannot read selected file.")
 
                 when {
-                    lowerName.endsWith(".zip") || isZipHeader(rawBytes) -> {
+                    validatedExt == "zip" || (validatedExt == null && isZipHeader(rawBytes)) -> {
                         importZipBytes(rawBytes, customDir)
                     }
-                    lowerName.endsWith(".xmp") || looksLikeXml(rawBytes) -> {
+                    validatedExt == "xmp" || (validatedExt == null && looksLikeXml(rawBytes)) -> {
+                        val nativeXmpData = if (NativeBridge.isAvailable) {
+                            runCatching {
+                                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                                    NativeBridge.nativeParseXmpPreset(pfd.fd)
+                                }
+                            }.getOrNull()
+                        } else {
+                            null
+                        }
                         val lut = persistAndParseSingle(
                             bytes = rawBytes,
                             originalName = ensureExtension(displayName, ".xmp"),
                             customDir = customDir,
-                            fallbackCategory = "Custom"
+                            fallbackCategory = "Custom",
+                            nativeXmpOverlay = nativeXmpData
                         )
                         LutImportSummary(listOf(lut), emptyList())
                     }
-                    else -> {
+                    validatedExt == "cube" || (validatedExt == null && looksLikeCube(rawBytes)) -> {
                         val lut = persistAndParseSingle(
                             bytes = rawBytes,
                             originalName = ensureExtension(displayName, ".cube"),
@@ -174,6 +204,11 @@ object LutImporter {
                             fallbackCategory = "Custom"
                         )
                         LutImportSummary(listOf(lut), emptyList())
+                    }
+                    else -> {
+                        throw IllegalArgumentException(
+                            "Unsupported preset file \"$displayName\". Please select a .cube, .xmp, or .zip file."
+                        )
                     }
                 }
             } catch (e: OutOfMemoryError) {
@@ -288,7 +323,8 @@ object LutImporter {
         bytes: ByteArray,
         originalName: String,
         customDir: File,
-        fallbackCategory: String
+        fallbackCategory: String,
+        nativeXmpOverlay: FloatArray? = null
     ): CubeLut {
         customDir.mkdirs()
         val sanitizedFile = originalName.replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -301,13 +337,43 @@ object LutImporter {
             fallbackCategory = fallbackCategory,
             bakeXmpTable = false
         )
-        val resolvedFolder = parsedTemp.category.ifBlank { fallbackCategory }.ifBlank { "Custom" }
+        val mergedTemp = if (nativeXmpOverlay != null &&
+            nativeXmpOverlay.size >= ColorGradingEngine.NATIVE_XMP_HEADER_SIZE &&
+            parsedTemp.xmpSettings != null
+        ) {
+            val decoded = ColorGradingEngine.decodeNativeXmpToGradingParams(nativeXmpOverlay)
+            val curvePairs = if (!decoded.toneCurve.isDefault) {
+                decoded.toneCurve.master.map { it.x to it.y }
+            } else {
+                parsedTemp.xmpSettings.toneCurveMaster
+            }
+            parsedTemp.copy(
+                xmpSettings = parsedTemp.xmpSettings.copy(
+                    exposure = decoded.exposure,
+                    contrast = decoded.contrast,
+                    highlights = decoded.highlights,
+                    shadows = decoded.shadows,
+                    whites = decoded.whites,
+                    blacks = decoded.blacks,
+                    temperature = decoded.temperature,
+                    tint = decoded.tint,
+                    vibrance = decoded.vibrance,
+                    saturation = decoded.saturation,
+                    clarity = decoded.clarity,
+                    dehaze = decoded.dehaze,
+                    toneCurveMaster = curvePairs
+                )
+            )
+        } else {
+            parsedTemp
+        }
+        val resolvedFolder = mergedTemp.category.ifBlank { fallbackCategory }.ifBlank { "Custom" }
         val encodedFolder = URLEncoder.encode(resolvedFolder, "UTF-8")
         val targetDir = if (resolvedFolder == "Custom") customDir else File(customDir, encodedFolder).apply { mkdirs() }
         val relPath = if (resolvedFolder == "Custom") uniqueName else "$encodedFolder/$uniqueName"
 
         File(targetDir, uniqueName).writeBytes(bytes)
-        return parsedTemp.copy(id = "custom_$relPath", category = resolvedFolder)
+        return mergedTemp.copy(id = "custom_$relPath", category = resolvedFolder)
     }
 
     private fun parseByExtension(
@@ -428,7 +494,13 @@ object LutImporter {
 
     private fun looksLikeXml(bytes: ByteArray): Boolean {
         val sample = String(bytes, 0, minOf(bytes.size, 256), Charsets.UTF_8).trimStart()
-        return sample.startsWith("<") && (sample.contains("xmp", ignoreCase = true) || sample.contains("adobe", ignoreCase = true))
+        return sample.startsWith("<") && (sample.contains("xmp", ignoreCase = true) || sample.contains("adobe", ignoreCase = true) || sample.contains("crs:", ignoreCase = true))
+    }
+
+    private fun looksLikeCube(bytes: ByteArray): Boolean {
+        val sample = String(bytes, 0, minOf(bytes.size, 1024), Charsets.UTF_8)
+        return sample.contains("LUT_3D_SIZE", ignoreCase = true) ||
+            sample.contains("LUT_1D_SIZE", ignoreCase = true)
     }
 
     private fun InputStream.readBytesLimited(): ByteArray {

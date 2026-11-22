@@ -45,4 +45,6 @@ object NativeBridge {
         bitmap: Bitmap,
         amount: Float
     ): Boolean
+
+    external fun nativeParseXmpPreset(fd: Int): FloatArray?
 }

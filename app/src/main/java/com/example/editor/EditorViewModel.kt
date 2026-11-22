@@ -13,14 +13,6 @@ import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.R
-import com.example.ai.AiAspectRatio
-import com.example.ai.AiGenerationException
-import com.example.ai.AiModelCatalogState
-import com.example.ai.InstalledAiModel
-import com.example.ai.ModelDownloadProgress
-import com.example.ai.ModelInstallPhase
-import com.example.ai.OnDeviceImageGenerator
-import com.example.ai.SdModelManager
 import com.example.gl.GlOffscreenRenderer
 import com.example.lut.CubeLut
 import com.example.lut.LutImporter
@@ -29,7 +21,6 @@ import com.example.lut.PresetDescriptor
 import com.example.lut.PresetLocationType
 import com.example.lut.UserPreset
 import com.example.lut.UserPresetStore
-import java.io.FileOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -60,7 +51,6 @@ enum class StudioTab {
     ADJUST,
     ALL,
     LUTS,
-    AI,
     CROP,
     HEAL,
     MASK
@@ -104,22 +94,17 @@ sealed interface ExportStatus {
         val filename: String,
         val width: Int,
         val height: Int,
-        val uri: Uri?,
+        val uri: Uri,
         val mimeType: String,
         val format: ExportFormat,
-        val destinationLabel: String
-    ) : ExportStatus
-    data class Error(val message: String) : ExportStatus
-}
-
-@Immutable
-sealed interface AiGenerationState {
-    data object Idle : AiGenerationState
-    data class Generating(val currentStep: Int, val totalSteps: Int) : AiGenerationState {
-        val progressFraction: Float
-            get() = if (totalSteps > 0) (currentStep.toFloat() / totalSteps.toFloat()).coerceIn(0f, 1f) else 0f
+        val destinationLabel: String,
+        val openShareImmediately: Boolean = false,
+        val eventId: Long = System.nanoTime()
+    ) : ExportStatus {
+        val snackbarMessage: String
+            get() = format.savedSnackbarMessage
     }
-    data class Error(val message: String) : AiGenerationState
+    data class Error(val message: String) : ExportStatus
 }
 
 data class EditorSnapshot(
@@ -193,18 +178,8 @@ data class EditorUiState(
     val touchAdjustSwatchArgb: Long? = null,
     val touchAdjustHudLabel: String? = null,
     val touchAdjustHudValueText: String? = null,
-    val isTouchAdjustSwiping: Boolean = false,
-    val isAiModelManagerVisible: Boolean = false,
-    val aiModelCatalog: AiModelCatalogState = AiModelCatalogState(),
-    val aiModelProgress: ModelDownloadProgress = ModelDownloadProgress(),
-    val aiGenerationState: AiGenerationState = AiGenerationState.Idle
+    val isTouchAdjustSwiping: Boolean = false
 ) {
-    val activeAiModel: InstalledAiModel?
-        get() = aiModelCatalog.activeModel
-
-    val isAiModelReady: Boolean
-        get() = aiModelCatalog.activeModel != null
-
     val healBrushRadiusNorm: Float
         get() = OfflineHealEngine.brushSizePxToRadiusNorm(healBrushSizePx)
 
@@ -307,8 +282,6 @@ class EditorViewModel(
     private var touchSwipeStartVal: Float = 0f
     private var touchSwipeStartSat: Float = 0f
     private var touchSwipeSnapshot: EditorSnapshot? = null
-    private var aiModelDownloadJob: Job? = null
-    private var aiGenerationJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -317,7 +290,6 @@ class EditorViewModel(
                 loadClipboardPreferences()
             }
         }
-        refreshAiModelStatus()
         loadStarterLutsAndSamplePhoto()
         observeHistogramPipeline()
     }
@@ -332,10 +304,6 @@ class EditorViewModel(
         userPresetThumbJob = null
         histPrepareJob?.cancel()
         histPrepareJob = null
-        aiModelDownloadJob?.cancel()
-        aiModelDownloadJob = null
-        aiGenerationJob?.cancel()
-        aiGenerationJob = null
 
         val toRecycle = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
         toRecycle.addAll(thumbnailCache.values)
@@ -2977,8 +2945,16 @@ class EditorViewModel(
         }
     }
 
-    fun exportToGallery(options: ExportOptions) {
-        val proxyFallback = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
+    /**
+     * Immediately renders and writes the current edited photo to public device storage via MediaStore
+     * (`Pictures/ZamLab` for JPG/PNG/WebP, `Downloads/ZamLab` for PDF/16-bit TIFF) and returns the
+     * newly published public `content://` [Uri].
+     */
+    suspend fun exportToMediaStore(
+        options: ExportOptions,
+        openShareImmediately: Boolean = false
+    ): Uri? {
+        val proxyFallback = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return null
         val sourceRef = activePhotoSourceRef
         val nativeW = nativePhotoWidth
         val nativeH = nativePhotoHeight
@@ -2987,61 +2963,90 @@ class EditorViewModel(
         val lut = state.activeLut
         val strokes = state.healStrokes
 
-        viewModelScope.launch {
-            _uiState.update { it.copy(exportStatus = ExportStatus.Exporting) }
-            try {
-                val (saved, outW, outH) = renderNativeExportBitmap(
-                    proxyFallback = proxyFallback,
-                    sourceRef = sourceRef,
-                    nativeW = nativeW,
-                    nativeH = nativeH,
-                    params = params,
-                    lut = lut,
-                    healStrokes = strokes,
+        _uiState.update { it.copy(exportStatus = ExportStatus.Exporting) }
+        return try {
+            val (saved, outW, outH) = renderNativeExportBitmap(
+                proxyFallback = proxyFallback,
+                sourceRef = sourceRef,
+                nativeW = nativeW,
+                nativeH = nativeH,
+                params = params,
+                lut = lut,
+                healStrokes = strokes,
+                options = options
+            ) { gradedBitmap ->
+                ImageIoHelper.saveToGalleryMediaStore(
+                    context = getApplication(),
+                    bitmap = gradedBitmap,
                     options = options
-                ) { gradedBitmap ->
-                    ImageIoHelper.saveToGalleryMediaStore(
-                        context = getApplication(),
-                        bitmap = gradedBitmap,
-                        options = options
-                    )
-                }
-                val success = ExportStatus.Success(
-                    filename = saved.filename,
-                    width = outW,
-                    height = outH,
-                    uri = saved.uri,
-                    mimeType = saved.mimeType,
-                    format = saved.format,
-                    destinationLabel = saved.destinationLabel
                 )
-                _uiState.update {
-                    it.copy(
-                        exportStatus = success,
-                        exportConfirmationToast = success
-                    )
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (oom: OutOfMemoryError) {
-                Log.e(TAG, "Gallery export out of memory", oom)
-                _uiState.update {
-                    it.copy(
-                        exportStatus = ExportStatus.Error(
-                            "Insufficient memory for full-resolution export. Try 2048 px or 1080 px resolution."
-                        )
-                    )
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Gallery export failed", e)
-                _uiState.update {
-                    it.copy(exportStatus = ExportStatus.Error(e.localizedMessage ?: "Export failed."))
-                }
             }
+            val success = ExportStatus.Success(
+                filename = saved.filename,
+                width = outW,
+                height = outH,
+                uri = saved.uri,
+                mimeType = saved.mimeType,
+                format = saved.format,
+                destinationLabel = saved.destinationLabel,
+                openShareImmediately = openShareImmediately
+            )
+            _uiState.update {
+                it.copy(
+                    exportStatus = success,
+                    exportConfirmationToast = success
+                )
+            }
+            saved.uri
+        } catch (e: CancellationException) {
+            throw e
+        } catch (oom: OutOfMemoryError) {
+            Log.e(TAG, "Gallery export out of memory", oom)
+            val msg = "Insufficient memory for full-resolution export. Try 2048 px or 1080 px resolution."
+            _uiState.update {
+                it.copy(
+                    exportStatus = ExportStatus.Error(msg),
+                    statusBannerMessage = if (openShareImmediately) msg else it.statusBannerMessage
+                )
+            }
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Gallery export failed", e)
+            val msg = e.localizedMessage ?: "Export failed."
+            _uiState.update {
+                it.copy(
+                    exportStatus = ExportStatus.Error(msg),
+                    statusBannerMessage = if (openShareImmediately) msg else it.statusBannerMessage
+                )
+            }
+            null
         }
     }
 
+    fun exportToGallery(options: ExportOptions, openShareImmediately: Boolean = false) {
+        if (_uiState.value.exportStatus is ExportStatus.Exporting) return
+        viewModelScope.launch {
+            exportToMediaStore(options = options, openShareImmediately = openShareImmediately)
+        }
+    }
+
+    /**
+     * One-tap direct share from the top app bar: immediately writes full-resolution JPG
+     * to `Pictures/ZamLab` via MediaStore and opens the Android share sheet with the returned Uri.
+     */
+    fun exportAndShareNow() {
+        exportToGallery(
+            options = ExportOptions(
+                format = ExportFormat.JPG,
+                quality = 95,
+                resolution = ExportResolution.FULL
+            ),
+            openShareImmediately = true
+        )
+    }
+
     fun exportToDocumentUri(uri: Uri, options: ExportOptions) {
+        if (_uiState.value.exportStatus is ExportStatus.Exporting) return
         val proxyFallback = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
         val sourceRef = activePhotoSourceRef
         val nativeW = nativePhotoWidth
@@ -3116,312 +3121,5 @@ class EditorViewModel(
 
     fun dismissStatusBanner() {
         _uiState.update { it.copy(statusBannerMessage = null) }
-    }
-
-    // --- Offline MediaPipe Stable Diffusion AI Studio & Multi-Model Manager ---
-
-    fun openAiModelManager() {
-        refreshAiModelStatus()
-        _uiState.update {
-            it.copy(
-                isAiModelManagerVisible = true,
-                aiModelProgress = if (it.aiModelProgress.phase == ModelInstallPhase.ERROR) {
-                    ModelDownloadProgress()
-                } else {
-                    it.aiModelProgress
-                }
-            )
-        }
-    }
-
-    fun dismissAiModelManager() {
-        _uiState.update { it.copy(isAiModelManagerVisible = false) }
-    }
-
-    fun refreshAiModelStatus() {
-        viewModelScope.launch {
-            val ctx = getApplication<Application>()
-            val catalog = withContext(Dispatchers.IO) {
-                SdModelManager.loadCatalog(ctx)
-            }
-            _uiState.update { state ->
-                val isBusy = state.aiModelProgress.phase == ModelInstallPhase.DOWNLOADING ||
-                    state.aiModelProgress.phase == ModelInstallPhase.EXTRACTING
-                state.copy(
-                    aiModelCatalog = catalog,
-                    aiModelProgress = if (isBusy) state.aiModelProgress else ModelDownloadProgress()
-                )
-            }
-        }
-    }
-
-    fun startBuiltinSd15Download() {
-        launchModelInstall(label = SdModelManager.BUILTIN_SD15_NAME) { ctx, onProgress ->
-            SdModelManager.downloadAndInstallBuiltinSd15(ctx, onProgress)
-        }
-    }
-
-    fun downloadCustomAiModelFromUrl(displayName: String, rawUrl: String) {
-        val label = displayName.trim().ifEmpty { "Custom Model" }
-        launchModelInstall(label = label) { ctx, onProgress ->
-            SdModelManager.downloadAndInstallFromUrl(
-                context = ctx,
-                displayName = displayName,
-                rawUrl = rawUrl,
-                onProgress = onProgress
-            )
-        }
-    }
-
-    fun importLocalAiModelZip(uri: Uri) {
-        launchModelInstall(label = "Local ZIP Model", initialPhase = ModelInstallPhase.EXTRACTING) { ctx, onProgress ->
-            SdModelManager.importLocalZip(
-                context = ctx,
-                uri = uri,
-                onProgress = onProgress
-            )
-        }
-    }
-
-    private fun launchModelInstall(
-        label: String,
-        initialPhase: ModelInstallPhase = ModelInstallPhase.DOWNLOADING,
-        installBlock: suspend (Application, (ModelDownloadProgress) -> Unit) -> AiModelCatalogState
-    ) {
-        if (aiModelDownloadJob?.isActive == true) return
-        val ctx = getApplication<Application>()
-        aiModelDownloadJob = viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    aiModelProgress = ModelDownloadProgress(
-                        phase = initialPhase,
-                        targetLabel = label,
-                        bytesProcessed = 0L,
-                        totalBytes = SdModelManager.APPROXIMATE_MODEL_BYTES
-                    )
-                )
-            }
-            try {
-                val updatedCatalog = installBlock(ctx) { progress ->
-                    _uiState.update { state ->
-                        state.copy(aiModelProgress = progress)
-                    }
-                }
-                val installedName = updatedCatalog.activeModel?.displayName ?: label
-                _uiState.update {
-                    it.copy(
-                        aiModelCatalog = updatedCatalog,
-                        aiModelProgress = ModelDownloadProgress(),
-                        statusBannerMessage = "Installed offline AI model: $installedName"
-                    )
-                }
-            } catch (e: CancellationException) {
-                _uiState.update {
-                    it.copy(aiModelProgress = ModelDownloadProgress(phase = ModelInstallPhase.IDLE))
-                }
-                throw e
-            } catch (t: Throwable) {
-                Log.e(TAG, "AI model install failed", t)
-                _uiState.update {
-                    it.copy(
-                        aiModelProgress = ModelDownloadProgress(
-                            phase = ModelInstallPhase.ERROR,
-                            targetLabel = label,
-                            errorMessage = t.localizedMessage ?: "Failed to install offline AI model."
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    fun cancelAiModelDownload() {
-        aiModelDownloadJob?.cancel()
-        aiModelDownloadJob = null
-        _uiState.update {
-            it.copy(aiModelProgress = ModelDownloadProgress(phase = ModelInstallPhase.IDLE))
-        }
-    }
-
-    fun selectActiveAiModel(modelId: String) {
-        viewModelScope.launch {
-            val ctx = getApplication<Application>()
-            val updated = withContext(Dispatchers.IO) {
-                SdModelManager.setActiveModel(ctx, modelId)
-            }
-            val selectedName = updated.activeModel?.displayName
-            _uiState.update {
-                it.copy(
-                    aiModelCatalog = updated,
-                    aiGenerationState = AiGenerationState.Idle,
-                    statusBannerMessage = selectedName?.let { name -> "Active AI model: $name" }
-                )
-            }
-        }
-    }
-
-    fun deleteAiModel(modelId: String) {
-        viewModelScope.launch {
-            val ctx = getApplication<Application>()
-            val targetName = _uiState.value.aiModelCatalog.models
-                .firstOrNull { it.id == modelId }
-                ?.displayName
-            val updated = withContext(Dispatchers.IO) {
-                SdModelManager.deleteModel(ctx, modelId)
-            }
-            _uiState.update {
-                it.copy(
-                    aiModelCatalog = updated,
-                    aiGenerationState = AiGenerationState.Idle,
-                    statusBannerMessage = targetName?.let { name -> "Deleted AI model: $name" }
-                )
-            }
-        }
-    }
-
-    fun generateAiPhoto(
-        prompt: String,
-        aspectRatio: AiAspectRatio,
-        steps: Int
-    ) {
-        if (aiGenerationJob?.isActive == true) return
-        val trimmedPrompt = prompt.trim()
-        if (trimmedPrompt.isEmpty()) {
-            _uiState.update {
-                it.copy(aiGenerationState = AiGenerationState.Error("Enter a prompt to create a photo."))
-            }
-            return
-        }
-
-        val ctx = getApplication<Application>()
-        val clampedSteps = SdModelManager.clampInferenceSteps(steps)
-        aiGenerationJob = viewModelScope.launch {
-            _uiState.update {
-                it.copy(aiGenerationState = AiGenerationState.Generating(currentStep = 0, totalSteps = clampedSteps))
-            }
-            try {
-                val activeEntry = _uiState.value.activeAiModel
-                val modelDir = withContext(Dispatchers.IO) {
-                    if (activeEntry != null) {
-                        SdModelManager.resolveModelDirectoryForId(ctx, activeEntry.id)
-                    } else {
-                        SdModelManager.resolveActiveModelDirectory(ctx)
-                    }
-                }
-                if (modelDir == null) {
-                    val refreshed = withContext(Dispatchers.IO) { SdModelManager.loadCatalog(ctx) }
-                    _uiState.update {
-                        it.copy(
-                            aiModelCatalog = refreshed,
-                            aiGenerationState = AiGenerationState.Error(
-                                "No offline AI model installed. Download SD v1.5 or add a model in Models."
-                            )
-                        )
-                    }
-                    return@launch
-                }
-
-                val generatedBitmap = OnDeviceImageGenerator.generate(
-                    context = ctx,
-                    modelDir = modelDir,
-                    prompt = trimmedPrompt,
-                    aspectRatio = aspectRatio,
-                    steps = clampedSteps,
-                    onStepProgress = { step, total ->
-                        _uiState.update { state ->
-                            state.copy(aiGenerationState = AiGenerationState.Generating(step, total))
-                        }
-                    }
-                )
-
-                val cachedPngFile = withContext(Dispatchers.IO) {
-                    val outDir = File(ctx.cacheDir, "ai_generated").apply { mkdirs() }
-                    val outFile = File(outDir, "zamlab_ai_${System.currentTimeMillis()}.png")
-                    FileOutputStream(outFile).use { fos ->
-                        generatedBitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-                        fos.flush()
-                    }
-                    outFile
-                }
-
-                hasExternalOrUserPhoto.set(true)
-                photoLoadRequestSeq.incrementAndGet()
-                replaceActiveCachedImportFile(cachedPngFile)
-                activePhotoSourceRef = PhotoSourceRef.LocalFile(cachedPngFile)
-                nativePhotoWidth = generatedBitmap.width
-                nativePhotoHeight = generatedBitmap.height
-
-                val shortTitle = trimmedPrompt.take(28).let {
-                    if (trimmedPrompt.length > 28) "$it…" else it
-                }
-                val modelBadge = activeEntry?.displayName?.take(14) ?: "SD 1.5"
-                applyLoadedSourceBitmap(
-                    bitmap = generatedBitmap,
-                    name = "AI • $shortTitle",
-                    clearHealSession = true,
-                    nativeWidth = generatedBitmap.width,
-                    nativeHeight = generatedBitmap.height
-                )
-
-                _uiState.update {
-                    it.copy(
-                        photoFormatInfo = PhotoFormatInfo(
-                            badgeLabel = "AI · $modelBadge",
-                            isRaw = false,
-                            isEmbeddedPreviewOnly = false,
-                            extension = "png"
-                        ),
-                        aiGenerationState = AiGenerationState.Idle,
-                        statusBannerMessage = "Generated offline AI photo (${generatedBitmap.width}×${generatedBitmap.height})"
-                    )
-                }
-            } catch (e: CancellationException) {
-                _uiState.update { it.copy(aiGenerationState = AiGenerationState.Idle) }
-                throw e
-            } catch (e: AiGenerationException) {
-                _uiState.update {
-                    it.copy(
-                        aiGenerationState = AiGenerationState.Error(
-                            e.message ?: "Offline image generation failed."
-                        )
-                    )
-                }
-            } catch (oom: OutOfMemoryError) {
-                Log.e(TAG, "AI generation OOM", oom)
-                Runtime.getRuntime().gc()
-                _uiState.update {
-                    it.copy(
-                        aiGenerationState = AiGenerationState.Error(
-                            "Insufficient memory for AI generation. Try closing other apps or lowering steps."
-                        )
-                    )
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Unexpected AI generation failure", t)
-                _uiState.update {
-                    it.copy(
-                        aiGenerationState = AiGenerationState.Error(
-                            t.localizedMessage ?: "Offline image generation failed."
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    fun cancelAiGeneration() {
-        aiGenerationJob?.cancel()
-        aiGenerationJob = null
-        _uiState.update { it.copy(aiGenerationState = AiGenerationState.Idle) }
-    }
-
-    fun clearAiGenerationError() {
-        _uiState.update { state ->
-            if (state.aiGenerationState is AiGenerationState.Error) {
-                state.copy(aiGenerationState = AiGenerationState.Idle)
-            } else {
-                state
-            }
-        }
     }
 }
