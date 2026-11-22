@@ -52,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +83,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -94,6 +97,8 @@ import com.example.editor.GradingParams
 import com.example.editor.HealMode
 import com.example.editor.HealStroke
 import com.example.editor.HistogramData
+import com.example.editor.HslBand
+import com.example.editor.HslBandAdjustment
 import com.example.editor.LocalMask
 import com.example.editor.MaskType
 import com.example.editor.NormalizedCropRect
@@ -106,6 +111,8 @@ import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioCyan
 import com.example.ui.theme.StudioEraserCrimson
 import com.example.ui.theme.StudioEraserCrimsonSoft
+import com.example.ui.theme.StudioGlassHairline
+import com.example.ui.theme.StudioGlassSurface
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioTextPrimary
@@ -146,6 +153,13 @@ fun PhotoViewport(
     activeMask: LocalMask? = null,
     showMaskOverlay: Boolean = true,
     viewportResetToken: Long = 0L,
+    isTouchAdjustEnabled: Boolean = false,
+    touchAdjustSelectedBand: HslBand? = null,
+    touchAdjustSwatchArgb: Long? = null,
+    touchAdjustBandAdjustment: HslBandAdjustment = HslBandAdjustment(),
+    touchAdjustHudLabel: String? = null,
+    touchAdjustHudValueText: String? = null,
+    isTouchAdjustSwiping: Boolean = false,
     onZoomChanged: (Boolean) -> Unit = {},
     onCompareChanged: (Boolean) -> Unit,
     onSplitRatioChange: (Float) -> Unit,
@@ -161,12 +175,24 @@ fun PhotoViewport(
     onCropDragStateChanged: (Boolean) -> Unit = {},
     onUpdateMask: (String, (LocalMask) -> LocalMask) -> Unit = { _, _ -> },
     onMaskDragStateChanged: (Boolean) -> Unit = {},
+    onToggleTouchAdjust: () -> Unit = {},
+    onTouchAdjustTap: (Float, Float) -> Unit = { _, _ -> },
+    onTouchAdjustSwipeStart: (Float, Float) -> Unit = { _, _ -> },
+    onTouchAdjustSwipeUpdate: (Boolean, Float) -> Unit = { _, _ -> },
+    onTouchAdjustSwipeEnd: (Boolean) -> Unit = {},
+    onUpdateTouchAdjustBand: ((HslBandAdjustment) -> HslBandAdjustment) -> Unit = {},
+    onResetTouchAdjustBand: () -> Unit = {},
+    onDismissTouchAdjustPill: () -> Unit = {},
+    onTouchAdjustSliderDraggingChanged: (Boolean) -> Unit = {},
+    topOverlayInset: Dp = 12.dp,
+    bottomOverlayInset: Dp = 12.dp,
     modifier: Modifier = Modifier
 ) {
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var brushCursorNormalized by remember { mutableStateOf<Offset?>(null) }
     var zoomAnimJob by remember { mutableStateOf<Job?>(null) }
+    var pendingSingleTapJob by remember { mutableStateOf<Job?>(null) }
     var lastTapUpTimeMs by remember { mutableLongStateOf(0L) }
     var lastTapUpPos by remember { mutableStateOf(Offset.Zero) }
 
@@ -180,6 +206,8 @@ fun PhotoViewport(
     LaunchedEffect(viewportResetToken) {
         zoomAnimJob?.cancel()
         zoomAnimJob = null
+        pendingSingleTapJob?.cancel()
+        pendingSingleTapJob = null
         zoomScale = 1f
         panOffset = Offset.Zero
     }
@@ -188,8 +216,24 @@ fun PhotoViewport(
         if (activeTab == StudioTab.CROP) {
             zoomAnimJob?.cancel()
             zoomAnimJob = null
+            pendingSingleTapJob?.cancel()
+            pendingSingleTapJob = null
             zoomScale = 1f
             panOffset = Offset.Zero
+        }
+    }
+
+    LaunchedEffect(isTouchAdjustEnabled) {
+        if (!isTouchAdjustEnabled) {
+            pendingSingleTapJob?.cancel()
+            pendingSingleTapJob = null
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            pendingSingleTapJob?.cancel()
+            pendingSingleTapJob = null
         }
     }
 
@@ -208,21 +252,22 @@ fun PhotoViewport(
     val currentHealMode by rememberUpdatedState(healMode)
     val currentIsPickingCloneSource by rememberUpdatedState(isPickingCloneSource)
     val currentIsHealProcessing by rememberUpdatedState(isHealProcessing)
+    val currentIsTouchAdjustEnabled by rememberUpdatedState(isTouchAdjustEnabled)
+    val currentOnTouchAdjustTap by rememberUpdatedState(onTouchAdjustTap)
+    val currentOnTouchAdjustSwipeStart by rememberUpdatedState(onTouchAdjustSwipeStart)
+    val currentOnTouchAdjustSwipeUpdate by rememberUpdatedState(onTouchAdjustSwipeUpdate)
+    val currentOnTouchAdjustSwipeEnd by rememberUpdatedState(onTouchAdjustSwipeEnd)
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(Color(0xFF171B24), StudioBackground),
-                )
-            )
+            .background(StudioBackground)
             .clipToBounds()
     ) {
         val viewportW = with(density) { maxWidth.toPx() }
         val viewportH = with(density) { maxHeight.toPx() }
 
-        if (previewBitmap == null) {
+        if (previewBitmap == null || previewBitmap.isRecycled) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = StudioAmber)
             }
@@ -414,7 +459,7 @@ fun PhotoViewport(
                 )
             }
         } else {
-            Modifier.pointerInput(isSplitCompareEnabled) {
+            Modifier.pointerInput(isSplitCompareEnabled, isTouchAdjustEnabled) {
                 val touchSlop = viewConfiguration.touchSlop
                 val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
                 val doubleTapSlop = touchSlop * 6f
@@ -422,18 +467,24 @@ fun PhotoViewport(
                     val firstDown = awaitFirstDown(requireUnconsumed = false)
                     zoomAnimJob?.cancel()
                     zoomAnimJob = null
+                    pendingSingleTapJob?.cancel()
+                    pendingSingleTapJob = null
 
                     val downPosition = firstDown.position
                     val downTimeMs = SystemClock.uptimeMillis()
                     val isSecondTap = (downTimeMs - lastTapUpTimeMs) <= doubleTapTimeout &&
                         (downPosition - lastTapUpPos).getDistance() <= doubleTapSlop
 
+                    val touchAdjustAtDown = currentIsTouchAdjustEnabled
+                    val touchAdjustSwipeAtDown = touchAdjustAtDown && zoomScale <= 1.01f
                     var isHoldComparing = false
-                    var holdCancelled = isSecondTap
+                    var holdCancelled = isSecondTap || touchAdjustAtDown
                     var movedPastSlop = false
                     var maxPointers = 1
+                    var touchSwipeActive = false
+                    var touchSwipeIsVertical = true
 
-                    val holdJob: Job? = if (!isSecondTap) {
+                    val holdJob: Job? = if (!isSecondTap && !touchAdjustAtDown) {
                         gestureScope.launch {
                             delay(190L)
                             if (!holdCancelled) {
@@ -466,12 +517,18 @@ fun PhotoViewport(
                                 maxPointers = activePointers
                             }
 
-                            if (activePointers > 1 && !holdCancelled) {
-                                holdCancelled = true
-                                holdJob?.cancel()
-                                if (isHoldComparing) {
-                                    isHoldComparing = false
-                                    currentCompareCallback(false)
+                            if (activePointers > 1) {
+                                if (!holdCancelled) {
+                                    holdCancelled = true
+                                    holdJob?.cancel()
+                                    if (isHoldComparing) {
+                                        isHoldComparing = false
+                                        currentCompareCallback(false)
+                                    }
+                                }
+                                if (touchSwipeActive) {
+                                    touchSwipeActive = false
+                                    currentOnTouchAdjustSwipeEnd(false)
                                 }
                             } else if (activePointers == 1 && !movedPastSlop) {
                                 val dist = (pressedChanges.first().position - downPosition).getDistance()
@@ -488,34 +545,66 @@ fun PhotoViewport(
                                 }
                             }
 
-                            val zoomChange = event.calculateZoom()
-                            val panChange = event.calculatePan()
-                            val centroid = event.calculateCentroid(useCurrent = true)
-                            val canTransform = activePointers > 1 || (zoomScale > 1.01f && movedPastSlop)
+                            if (touchAdjustSwipeAtDown && activePointers == 1 && maxPointers == 1 && movedPastSlop) {
+                                val curPos = pressedChanges.first().position
+                                val delta = curPos - downPosition
+                                if (!touchSwipeActive) {
+                                    touchSwipeIsVertical = abs(delta.y) >= abs(delta.x)
+                                    touchSwipeActive = true
+                                    val startNorm = viewportToNormalized(
+                                        pos = downPosition,
+                                        viewportW = latestViewportW,
+                                        viewportH = latestViewportH,
+                                        imgLeft = latestImgLeft,
+                                        imgTop = latestImgTop,
+                                        fittedW = latestFittedW,
+                                        fittedH = latestFittedH,
+                                        zoom = zoomScale,
+                                        pan = panOffset
+                                    )
+                                    currentOnTouchAdjustSwipeStart(startNorm.x, startNorm.y)
+                                }
+                                val fraction = if (touchSwipeIsVertical) {
+                                    -delta.y / max(latestFittedH * 0.55f, 180f)
+                                } else {
+                                    delta.x / max(latestFittedW * 0.55f, 180f)
+                                }
+                                currentOnTouchAdjustSwipeUpdate(touchSwipeIsVertical, fraction)
+                                pressedChanges.forEach { it.consume() }
+                            } else {
+                                val zoomChange = event.calculateZoom()
+                                val panChange = event.calculatePan()
+                                val centroid = event.calculateCentroid(useCurrent = true)
+                                val canTransform = activePointers > 1 ||
+                                    (!touchAdjustSwipeAtDown && zoomScale > 1.01f && movedPastSlop)
 
-                            if (canTransform && (zoomChange != 1f || panChange != Offset.Zero)) {
-                                val (nextZoom, nextPan) = ViewportZoomMath.applyPinchAndPan(
-                                    currentZoom = zoomScale,
-                                    currentPan = panOffset,
-                                    zoomChange = if (activePointers > 1) zoomChange else 1f,
-                                    panChange = panChange,
-                                    focalPoint = centroid,
-                                    viewportW = latestViewportW,
-                                    viewportH = latestViewportH,
-                                    fittedW = latestFittedW,
-                                    fittedH = latestFittedH
-                                )
-                                zoomScale = nextZoom
-                                panOffset = nextPan
-                                event.changes.forEach { it.consume() }
+                                if (canTransform && (zoomChange != 1f || panChange != Offset.Zero)) {
+                                    val (nextZoom, nextPan) = ViewportZoomMath.applyPinchAndPan(
+                                        currentZoom = zoomScale,
+                                        currentPan = panOffset,
+                                        zoomChange = if (activePointers > 1) zoomChange else 1f,
+                                        panChange = panChange,
+                                        focalPoint = centroid,
+                                        viewportW = latestViewportW,
+                                        viewportH = latestViewportH,
+                                        fittedW = latestFittedW,
+                                        fittedH = latestFittedH
+                                    )
+                                    zoomScale = nextZoom
+                                    panOffset = nextPan
+                                    event.changes.forEach { it.consume() }
+                                }
                             }
                         } while (event.changes.any { it.pressed })
                     } finally {
-                        val wasCleanTap = !movedPastSlop && maxPointers == 1 && !isHoldComparing
+                        val wasCleanTap = !movedPastSlop && maxPointers == 1 && !isHoldComparing && !touchSwipeActive
                         holdCancelled = true
                         holdJob?.cancel()
                         if (isHoldComparing) {
                             currentCompareCallback(false)
+                        }
+                        if (touchSwipeActive) {
+                            currentOnTouchAdjustSwipeEnd(maxPointers == 1)
                         }
                         if (zoomScale <= 1.02f && zoomAnimJob == null) {
                             zoomScale = 1f
@@ -552,6 +641,27 @@ fun PhotoViewport(
                             } else {
                                 lastTapUpTimeMs = SystemClock.uptimeMillis()
                                 lastTapUpPos = downPosition
+                                if (touchAdjustAtDown) {
+                                    val tapSnapshotZoom = zoomScale
+                                    val tapSnapshotPan = panOffset
+                                    pendingSingleTapJob = gestureScope.launch {
+                                        delay(doubleTapTimeout)
+                                        if (currentIsTouchAdjustEnabled) {
+                                            val norm = viewportToNormalized(
+                                                pos = downPosition,
+                                                viewportW = latestViewportW,
+                                                viewportH = latestViewportH,
+                                                imgLeft = latestImgLeft,
+                                                imgTop = latestImgTop,
+                                                fittedW = latestFittedW,
+                                                fittedH = latestFittedH,
+                                                zoom = tapSnapshotZoom,
+                                                pan = tapSnapshotPan
+                                            )
+                                            currentOnTouchAdjustTap(norm.x, norm.y)
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             lastTapUpTimeMs = 0L
@@ -580,6 +690,17 @@ fun PhotoViewport(
                 onDispose {
                     glController?.release()
                 }
+            }
+
+            SideEffect {
+                glController?.updateState(
+                    imageBitmap = previewBitmap,
+                    params = gradingParams,
+                    lut = activeLut,
+                    isOriginal = isComparingOriginal,
+                    splitRatio = effectiveSplitRatio,
+                    applyCrop = applyCropInShader
+                )
             }
 
             Box(
@@ -827,16 +948,18 @@ fun PhotoViewport(
             }
         }
 
-        // Top-left live RGB/Luma Histogram HUD
-        if (histogram != null) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(12.dp)
-            ) {
+        // Top-left live RGB/Luma Histogram HUD (shown cleanly when toggled from floating utility pill)
+        AnimatedVisibility(
+            visible = showHistogram && histogram != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = topOverlayInset, start = 12.dp)
+        ) {
+            if (histogram != null) {
                 HistogramHud(
                     histogram = histogram,
-                    expanded = showHistogram,
                     onClick = onToggleHistogram
                 )
             }
@@ -846,7 +969,7 @@ fun PhotoViewport(
         Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(12.dp),
+                .padding(top = topOverlayInset, end = 12.dp),
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -942,7 +1065,7 @@ fun PhotoViewport(
                 color = StudioSurface.copy(alpha = 0.82f),
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(12.dp)
+                    .padding(start = 12.dp, bottom = bottomOverlayInset)
                     .border(1.dp, StudioBorder, RoundedCornerShape(16.dp))
             ) {
                 Text(
@@ -957,7 +1080,7 @@ fun PhotoViewport(
                 color = StudioAmber.copy(alpha = 0.9f),
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(12.dp)
+                    .padding(end = 12.dp, bottom = bottomOverlayInset)
             ) {
                 Text(
                     text = "AFTER",
@@ -975,7 +1098,7 @@ fun PhotoViewport(
             exit = fadeOut(),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 12.dp, start = 16.dp, end = 16.dp)
+                .padding(top = topOverlayInset, start = 16.dp, end = 16.dp)
         ) {
             Surface(
                 shape = RoundedCornerShape(22.dp),
@@ -1003,11 +1126,14 @@ fun PhotoViewport(
                             "Tap target color on photo"
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        color = StudioTextPrimary
+                        color = StudioTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .clickable(onClick = onCancelEyedropper)
                             .testTag("cancel_eyedropper_button"),
@@ -1025,6 +1151,46 @@ fun PhotoViewport(
         }
 
         // End Floating Eyedropper
+
+        // Touch Adjust live swipe value HUD & subtle gesture hint
+        TouchAdjustSwipeHud(
+            visible = isTouchAdjustSwiping && !isComparingOriginal,
+            label = touchAdjustHudLabel,
+            valueText = touchAdjustHudValueText,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = topOverlayInset)
+        )
+
+        TouchAdjustHintPill(
+            visible = isTouchAdjustEnabled &&
+                !isTouchAdjustSwiping &&
+                touchAdjustSelectedBand == null &&
+                !isEyedropperActive &&
+                !isComparingOriginal &&
+                !isCropMode &&
+                !isHealMode,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = topOverlayInset)
+        )
+
+        // Floating HSL Target Pill Bar anchored to bottom of image canvas
+        TouchAdjustHslPillBar(
+            visible = isTouchAdjustEnabled &&
+                touchAdjustSelectedBand != null &&
+                !isCropMode &&
+                !isHealMode &&
+                !isComparingOriginal,
+            band = touchAdjustSelectedBand,
+            swatchArgb = touchAdjustSwatchArgb,
+            adjustment = touchAdjustBandAdjustment,
+            onUpdateBand = onUpdateTouchAdjustBand,
+            onResetBand = onResetTouchAdjustBand,
+            onDismiss = onDismissTouchAdjustPill,
+            onDraggingChanged = onTouchAdjustSliderDraggingChanged,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
     }
 }
 
@@ -1112,32 +1278,24 @@ private fun viewportToNormalized(
 @Composable
 private fun HistogramHud(
     histogram: HistogramData,
-    expanded: Boolean,
     onClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = StudioSurface.copy(alpha = 0.86f),
+        shape = RoundedCornerShape(14.dp),
+        color = StudioGlassSurface,
+        shadowElevation = 6.dp,
         modifier = Modifier
-            .border(1.dp, StudioBorder.copy(alpha = 0.85f), RoundedCornerShape(10.dp))
-            .clip(RoundedCornerShape(10.dp))
+            .border(1.dp, StudioGlassHairline, RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .testTag("histogram_hud")
     ) {
-        if (!expanded) {
-            Text(
-                text = "RGB",
-                style = MaterialTheme.typography.labelSmall,
-                color = StudioTextSecondary,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
-            )
-        } else {
-            Box(modifier = Modifier.padding(5.dp)) {
-                Canvas(
-                    modifier = Modifier
-                        .width(108.dp)
-                        .height(42.dp)
-                ) {
+        Box(modifier = Modifier.padding(6.dp)) {
+            Canvas(
+                modifier = Modifier
+                    .width(108.dp)
+                    .height(42.dp)
+            ) {
                     val bins = histogram.luma.size
                     if (bins < 2) return@Canvas
                     val stepX = size.width / (bins - 1).toFloat()
@@ -1175,7 +1333,6 @@ private fun HistogramHud(
                     color = StudioTextSecondary.copy(alpha = 0.85f),
                     modifier = Modifier.align(Alignment.TopStart)
                 )
-            }
         }
     }
 }

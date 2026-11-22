@@ -48,6 +48,9 @@ object LocalInpaintingEngine {
         sourceBitmap: Bitmap,
         strokes: List<HealStroke>
     ): Bitmap {
+        if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
+            throw IllegalStateException("Source image unavailable for healing.")
+        }
         val srcW = sourceBitmap.width
         val srcH = sourceBitmap.height
         val fullMask = rasterizeAlphaMask(srcW, srcH, strokes, defaultFeatherPx = BOUNDARY_FEATHER_PX)
@@ -71,6 +74,7 @@ object LocalInpaintingEngine {
         }
         if (fullMaxX < fullMinX || fullMaxY < fullMinY) {
             return sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                ?: throw IllegalStateException("Unable to copy source bitmap.")
         }
 
         // 2. Smart padded square bounding-box crop around the masked object
@@ -91,8 +95,8 @@ object LocalInpaintingEngine {
         val sqH = sqY1 - sqY0 + 1
 
         // Read ONLY the cropped square pixels directly from full-res sourceBitmap
-        val cropOrigPixels = IntArray(sqW * sqH)
-        sourceBitmap.getPixels(cropOrigPixels, 0, sqW, sqX0, sqY0, sqW, sqH)
+        var cropOrigPixels: IntArray? = IntArray(sqW * sqH)
+        sourceBitmap.getPixels(cropOrigPixels!!, 0, sqW, sqX0, sqY0, sqW, sqH)
 
         // Extract binary mask inside the full-res square crop (using threshold inside feather)
         val cropOrigMask = BooleanArray(sqW * sqH) { i ->
@@ -113,33 +117,46 @@ object LocalInpaintingEngine {
         val workMask = BooleanArray(workLen)
 
         if (workW == sqW && workH == sqH) {
+            val localOrig = cropOrigPixels
             for (i in 0 until workLen) {
-                val px = cropOrigPixels[i]
+                val px = localOrig[i]
                 workR[i] = ((px ushr 16) and 0xFF).toFloat()
                 workG[i] = ((px ushr 8) and 0xFF).toFloat()
                 workB[i] = (px and 0xFF).toFloat()
                 workMask[i] = cropOrigMask[i]
             }
         } else {
-            val cropSrcBmp = createBitmap(sqW, sqH).apply {
-                setPixels(cropOrigPixels, 0, sqW, 0, 0, sqW, sqH)
-            }
-            val scaledWorkBmp = cropSrcBmp.scale(workW, workH)
-            val scaledPixels = IntArray(workLen)
-            scaledWorkBmp.getPixels(scaledPixels, 0, workW, 0, 0, workW, workH)
-            for (wy in 0 until workH) {
-                val sy = ((wy + 0.5f) * sqH / workH).toInt().coerceIn(0, sqH - 1)
-                val rowOff = wy * workW
-                for (wx in 0 until workW) {
-                    val sx = ((wx + 0.5f) * sqW / workW).toInt().coerceIn(0, sqW - 1)
-                    val idx = rowOff + wx
-                    val px = scaledPixels[idx]
-                    workR[idx] = ((px ushr 16) and 0xFF).toFloat()
-                    workG[idx] = ((px ushr 8) and 0xFF).toFloat()
-                    workB[idx] = (px and 0xFF).toFloat()
-                    workMask[idx] = cropOrigMask[sy * sqW + sx]
+            var cropSrcBmp: Bitmap? = null
+            var scaledWorkBmp: Bitmap? = null
+            try {
+                cropSrcBmp = createBitmap(sqW, sqH).apply {
+                    setPixels(cropOrigPixels!!, 0, sqW, 0, 0, sqW, sqH)
+                }
+                scaledWorkBmp = cropSrcBmp.scale(workW, workH)
+                val scaledPixels = IntArray(workLen)
+                scaledWorkBmp.getPixels(scaledPixels, 0, workW, 0, 0, workW, workH)
+                for (wy in 0 until workH) {
+                    val sy = ((wy + 0.5f) * sqH / workH).toInt().coerceIn(0, sqH - 1)
+                    val rowOff = wy * workW
+                    for (wx in 0 until workW) {
+                        val sx = ((wx + 0.5f) * sqW / workW).toInt().coerceIn(0, sqW - 1)
+                        val idx = rowOff + wx
+                        val px = scaledPixels[idx]
+                        workR[idx] = ((px ushr 16) and 0xFF).toFloat()
+                        workG[idx] = ((px ushr 8) and 0xFF).toFloat()
+                        workB[idx] = (px and 0xFF).toFloat()
+                        workMask[idx] = cropOrigMask[sy * sqW + sx]
+                    }
+                }
+            } finally {
+                if (scaledWorkBmp != null && scaledWorkBmp !== cropSrcBmp && !scaledWorkBmp.isRecycled) {
+                    scaledWorkBmp.recycle()
+                }
+                if (cropSrcBmp != null && !cropSrcBmp.isRecycled) {
+                    cropSrcBmp.recycle()
                 }
             }
+            cropOrigPixels = null
         }
 
         val baseLevel = PyramidLevel(
@@ -162,11 +179,12 @@ object LocalInpaintingEngine {
 
         // Map synthesized pixels cleanly back into the full-res square crop (high-res unscaled if 1:1)
         val synthesizedCropPixels = if (workW == sqW && workH == sqH) {
+            val localOrig = cropOrigPixels!!
             IntArray(workLen) { i ->
                 if (!workMask[i]) {
-                    cropOrigPixels[i]
+                    localOrig[i]
                 } else {
-                    val a = (cropOrigPixels[i] ushr 24) and 0xFF
+                    val a = (localOrig[i] ushr 24) and 0xFF
                     val ri = baseLevel.r[i].roundToInt().coerceIn(0, 255)
                     val gi = baseLevel.g[i].roundToInt().coerceIn(0, 255)
                     val bi = baseLevel.b[i].roundToInt().coerceIn(0, 255)
@@ -180,12 +198,23 @@ object LocalInpaintingEngine {
                 val bi = baseLevel.b[i].roundToInt().coerceIn(0, 255)
                 (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
             }
-            val workOutBmp = createBitmap(workW, workH).apply {
-                setPixels(workOutPixels, 0, workW, 0, 0, workW, workH)
-            }
-            val upscaledCropBmp = workOutBmp.scale(sqW, sqH)
-            IntArray(sqW * sqH).also { arr ->
-                upscaledCropBmp.getPixels(arr, 0, sqW, 0, 0, sqW, sqH)
+            var workOutBmp: Bitmap? = null
+            var upscaledCropBmp: Bitmap? = null
+            try {
+                workOutBmp = createBitmap(workW, workH).apply {
+                    setPixels(workOutPixels, 0, workW, 0, 0, workW, workH)
+                }
+                upscaledCropBmp = workOutBmp.scale(sqW, sqH)
+                IntArray(sqW * sqH).also { arr ->
+                    upscaledCropBmp.getPixels(arr, 0, sqW, 0, 0, sqW, sqH)
+                }
+            } finally {
+                if (upscaledCropBmp != null && upscaledCropBmp !== workOutBmp && !upscaledCropBmp.isRecycled) {
+                    upscaledCropBmp.recycle()
+                }
+                if (workOutBmp != null && !workOutBmp.isRecycled) {
+                    workOutBmp.recycle()
+                }
             }
         }
 

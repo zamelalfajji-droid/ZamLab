@@ -51,8 +51,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -218,7 +216,17 @@ private fun ProfileAmountRow(
             .padding(horizontal = 4.dp, vertical = 2.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .doubleTapToReset(
+                    onDoubleTapReset = {
+                        onDraggingChanged(false)
+                        onAmountChange(1f)
+                    }
+                )
+                .padding(vertical = 2.dp)
+                .testTag("slider_profile_amount_header"),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -239,7 +247,7 @@ private fun ProfileAmountRow(
                 if (kotlin.math.abs(amount - 1f) > 0.02f) {
                     Box(
                         modifier = Modifier
-                            .defaultMinSize(minWidth = 28.dp, minHeight = 28.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .clickable {
                                 onDraggingChanged(false)
@@ -259,23 +267,22 @@ private fun ProfileAmountRow(
             }
         }
 
-        Slider(
+        StudioPrecisionTrack(
             value = amount.coerceIn(0f, 2f),
+            valueRange = 0f..2f,
+            step = 0.01f,
+            accentColor = StudioAmber,
+            compact = true,
+            testTag = "slider_profile_amount",
             onValueChange = {
                 onDraggingChanged(true)
                 onAmountChange(it)
             },
             onValueChangeFinished = { onDraggingChanged(false) },
-            valueRange = 0f..2f,
-            colors = SliderDefaults.colors(
-                thumbColor = StudioAmber,
-                activeTrackColor = StudioAmber,
-                inactiveTrackColor = StudioSurfaceHighest
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(30.dp)
-                .testTag("slider_profile_amount")
+            onReset = {
+                onDraggingChanged(false)
+                onAmountChange(1f)
+            }
         )
     }
 }
@@ -736,7 +743,9 @@ fun ProfileBrowserSheet(
                     Text(
                         text = "Active: ${activeProfile.name} • Tap ★ to favorite",
                         style = MaterialTheme.typography.labelSmall,
-                        color = StudioTextSecondary
+                        color = StudioTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -789,26 +798,34 @@ fun ProfileBrowserSheet(
                         BrowserFilter.MUTED -> CameraProfiles.byCategory(ProfileCategory.MUTED).size
                         BrowserFilter.BW -> CameraProfiles.byCategory(ProfileCategory.BW).size
                     }
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = if (selected) StudioAmber.copy(alpha = 0.2f) else StudioSurfaceElevated,
+                    Box(
                         modifier = Modifier
-                            .defaultMinSize(minHeight = 36.dp)
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                             .clip(RoundedCornerShape(20.dp))
-                            .border(
-                                width = 1.dp,
-                                color = if (selected) StudioAmber else StudioBorderSubtle,
-                                shape = RoundedCornerShape(20.dp)
-                            )
                             .clickable { activeFilter = filter }
-                            .testTag("profile_filter_${filter.name.lowercase()}")
+                            .testTag("profile_filter_${filter.name.lowercase()}"),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = if (filter == BrowserFilter.FAVORITES) "${filter.label} ($count)" else filter.label,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (selected) StudioAmber else StudioTextSecondary,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (selected) StudioAmber.copy(alpha = 0.2f) else StudioSurfaceElevated,
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 36.dp)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (selected) StudioAmber else StudioBorderSubtle,
+                                    shape = RoundedCornerShape(20.dp)
+                                )
+                        ) {
+                            Text(
+                                text = if (filter == BrowserFilter.FAVORITES) "${filter.label} ($count)" else filter.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (selected) StudioAmber else StudioTextSecondary,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -986,7 +1003,7 @@ private fun ProfileThumbnailCard(
             .clickable(onClick = onSelect)
             .testTag("profile_card_${profile.id}")
     ) {
-        if (thumbnail != null) {
+        if (thumbnail != null && !thumbnail.isRecycled) {
             Image(
                 bitmap = thumbnail.asImageBitmap(),
                 contentDescription = "${profile.name} profile preview",

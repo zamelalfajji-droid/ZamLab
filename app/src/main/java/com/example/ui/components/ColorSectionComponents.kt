@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -12,8 +13,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,9 +53,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -68,7 +71,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -85,17 +92,24 @@ import com.example.editor.HslBandAdjustment
 import com.example.editor.HslMixerData
 import com.example.editor.PointColorData
 import com.example.editor.WhiteBalancePreset
+import com.example.ui.theme.StudioActiveOffWhite
 import com.example.ui.theme.StudioAmber
 import com.example.ui.theme.StudioBackground
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioBorderSubtle
 import com.example.ui.theme.StudioCyan
+import com.example.ui.theme.StudioGlassHairline
+import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioLuxuryGold
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioSurfaceHighest
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -145,20 +159,20 @@ fun ColorSectionContent(
     ) {
         Box(modifier = Modifier.weight(1f)) {
             Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = StudioSurface,
+                shape = RoundedCornerShape(12.dp),
+                color = StudioGlassSurface,
                 modifier = Modifier
                     .fillMaxWidth()
                     .defaultMinSize(minHeight = 48.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(12.dp))
                     .border(
                         width = 1.dp,
                         color = if (params.whiteBalancePreset != WhiteBalancePreset.AS_SHOT) {
-                            StudioAmber.copy(alpha = 0.6f)
+                            StudioLuxuryGold.copy(alpha = 0.45f)
                         } else {
-                            StudioBorderSubtle
+                            StudioGlassHairline
                         },
-                        shape = RoundedCornerShape(10.dp)
+                        shape = RoundedCornerShape(12.dp)
                     )
                     .clickable { showWbDropdown = true }
                     .testTag("wb_preset_dropdown")
@@ -245,15 +259,15 @@ fun ColorSectionContent(
 
         val isWbPickerActive = activeEyedropperMode == EyedropperMode.WHITE_BALANCE
         Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = if (isWbPickerActive) StudioCyan.copy(alpha = 0.22f) else StudioSurface,
+            shape = RoundedCornerShape(12.dp),
+            color = if (isWbPickerActive) StudioActiveOffWhite.copy(alpha = 0.14f) else StudioGlassSurface,
             modifier = Modifier
                 .size(48.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .border(
                     width = 1.dp,
-                    color = if (isWbPickerActive) StudioCyan else StudioBorderSubtle,
-                    shape = RoundedCornerShape(10.dp)
+                    color = if (isWbPickerActive) StudioActiveOffWhite.copy(alpha = 0.35f) else StudioGlassHairline,
+                    shape = RoundedCornerShape(12.dp)
                 )
         ) {
             IconButton(
@@ -478,15 +492,15 @@ private fun ColorSubBar(
     )
 
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = StudioSurface,
+        shape = RoundedCornerShape(12.dp),
+        color = StudioGlassSurface,
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 2.dp)
             .border(
                 width = 1.dp,
-                color = if (isExpanded) StudioBorder else StudioBorderSubtle,
-                shape = RoundedCornerShape(10.dp)
+                color = if (isExpanded) StudioActiveOffWhite.copy(alpha = 0.16f) else StudioGlassHairline,
+                shape = RoundedCornerShape(12.dp)
             )
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -508,7 +522,7 @@ private fun ColorSubBar(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = if (isExpanded) "Collapse $title" else "Expand $title",
-                        tint = if (isExpanded) StudioAmber else StudioTextSecondary,
+                        tint = if (isExpanded) StudioActiveOffWhite else StudioTextSecondary,
                         modifier = Modifier
                             .size(16.dp)
                             .rotate(arrowRotation)
@@ -516,13 +530,16 @@ private fun ColorSubBar(
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
-                        tint = if (hasActiveEdits || isExpanded) StudioCyan else StudioTextSecondary,
+                        tint = if (hasActiveEdits || isExpanded) StudioActiveOffWhite else StudioTextSecondary,
                         modifier = Modifier.size(15.dp)
                     )
                     Text(
                         text = title,
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (isExpanded || hasActiveEdits) StudioTextPrimary else StudioTextSecondary
+                        color = if (isExpanded || hasActiveEdits) StudioTextPrimary else StudioTextSecondary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                     if (hasActiveEdits) {
                         Box(
@@ -538,7 +555,7 @@ private fun ColorSubBar(
                 if (hasActiveEdits) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .clickable(onClick = onReset)
                             .testTag("${testTag}_reset"),
@@ -591,26 +608,37 @@ private fun HslColorMixerContent(
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
                 text = "Channel: ${activeBand.label}",
                 style = MaterialTheme.typography.labelMedium,
-                color = bandColor
+                color = bandColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
             if (!bandAdj.isDefault) {
-                Text(
-                    text = "Reset ${activeBand.label}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = bandColor,
+                Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clip(RoundedCornerShape(8.dp))
                         .clickable {
                             onDraggingChanged(false)
                             onBandChange(activeBand) { HslBandAdjustment() }
                         }
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                )
+                        .padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Text(
+                        text = "Reset ${activeBand.label}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = bandColor,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
         }
 
@@ -626,9 +654,16 @@ private fun HslColorMixerContent(
                 val swatch = Color(band.swatchArgb)
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
-                        .clickable { onSelectBand(band) }
+                        .tapAndDoubleTapReset(
+                            onTap = { onSelectBand(band) },
+                            onDoubleTapReset = {
+                                onSelectBand(band)
+                                onDraggingChanged(false)
+                                onBandChange(band) { HslBandAdjustment() }
+                            }
+                        )
                         .testTag("hsl_chip_${band.name.lowercase()}"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -780,7 +815,9 @@ private fun PointColorEditor(
                     Text(
                         text = if (isEyedropperActive) "Picking…" else "Eyedropper",
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (isEyedropperActive) StudioCyan else StudioTextPrimary
+                        color = if (isEyedropperActive) StudioCyan else StudioTextPrimary,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -806,7 +843,10 @@ private fun PointColorEditor(
                             "Default Red"
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        color = StudioTextPrimary
+                        color = StudioTextPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = if (pointColor.isSampled) "Isolated color swatch" else "Tap eyedropper to sample photo",
@@ -960,17 +1000,10 @@ private fun ColorGradingWheelsEditor(
                     ColorWheelTab.HIGHLIGHTS -> !grading.highlights.isDefault
                     ColorWheelTab.GLOBAL -> !grading.global.isDefault
                 }
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = if (selected) StudioAmber.copy(alpha = 0.2f) else StudioSurfaceElevated,
+                Box(
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 36.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .clip(RoundedCornerShape(18.dp))
-                        .border(
-                            width = 1.dp,
-                            color = if (selected) StudioAmber else StudioBorderSubtle,
-                            shape = RoundedCornerShape(18.dp)
-                        )
                         .clickable {
                             selectedTab = tab
                             when (tab) {
@@ -981,25 +1014,40 @@ private fun ColorGradingWheelsEditor(
                                 ColorWheelTab.THREE_WHEELS -> Unit
                             }
                         }
-                        .testTag("cg_tab_${tab.name.lowercase()}")
+                        .testTag("cg_tab_${tab.name.lowercase()}"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = tab.label,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (selected) StudioAmber else StudioTextSecondary
-                        )
-                        if (hasMod) {
-                            Box(
-                                modifier = Modifier
-                                    .size(5.dp)
-                                    .clip(CircleShape)
-                                    .background(StudioAmber)
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = if (selected) StudioAmber.copy(alpha = 0.2f) else StudioSurfaceElevated,
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 36.dp)
+                            .border(
+                                width = 1.dp,
+                                color = if (selected) StudioAmber else StudioBorderSubtle,
+                                shape = RoundedCornerShape(18.dp)
                             )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Text(
+                                text = tab.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (selected) StudioAmber else StudioTextSecondary,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                            if (hasMod) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(5.dp)
+                                        .clip(CircleShape)
+                                        .background(StudioAmber)
+                                )
+                            }
                         }
                     }
                 }
@@ -1028,6 +1076,11 @@ private fun ColorGradingWheelsEditor(
                         activeTarget = ActiveWheelTarget.MIDTONES
                         updateWheel(ActiveWheelTarget.MIDTONES, next)
                     },
+                    onResetWheel = {
+                        activeTarget = ActiveWheelTarget.MIDTONES
+                        onDraggingChanged(false)
+                        updateWheel(ActiveWheelTarget.MIDTONES, ColorWheelValue())
+                    },
                     onDraggingChanged = onDraggingChanged
                 )
 
@@ -1051,6 +1104,11 @@ private fun ColorGradingWheelsEditor(
                             activeTarget = ActiveWheelTarget.SHADOWS
                             updateWheel(ActiveWheelTarget.SHADOWS, next)
                         },
+                        onResetWheel = {
+                            activeTarget = ActiveWheelTarget.SHADOWS
+                            onDraggingChanged(false)
+                            updateWheel(ActiveWheelTarget.SHADOWS, ColorWheelValue())
+                        },
                         onDraggingChanged = onDraggingChanged
                     )
 
@@ -1068,6 +1126,11 @@ private fun ColorGradingWheelsEditor(
                         onValueChange = { next ->
                             activeTarget = ActiveWheelTarget.HIGHLIGHTS
                             updateWheel(ActiveWheelTarget.HIGHLIGHTS, next)
+                        },
+                        onResetWheel = {
+                            activeTarget = ActiveWheelTarget.HIGHLIGHTS
+                            onDraggingChanged(false)
+                            updateWheel(ActiveWheelTarget.HIGHLIGHTS, ColorWheelValue())
                         },
                         onDraggingChanged = onDraggingChanged
                     )
@@ -1091,26 +1154,45 @@ private fun ColorGradingWheelsEditor(
                     onValueChange = { next ->
                         updateWheel(wheelTarget, next)
                     },
+                    onResetWheel = {
+                        onDraggingChanged(false)
+                        updateWheel(wheelTarget, ColorWheelValue())
+                    },
                     onDraggingChanged = onDraggingChanged
                 )
             }
         }
 
-        // Active Wheel Hue/Sat status + Double-tap hint
+        // Active Wheel Hue/Sat status + Double-tap hint (double-tap readout resets active wheel)
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .doubleTapToReset(
+                    onDoubleTapReset = {
+                        onDraggingChanged(false)
+                        updateWheel(wheelTarget, ColorWheelValue())
+                    }
+                )
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
                 text = "${wheelTarget.label}: H ${activeWheelValue.hueDeg.roundToInt()}° • S ${activeWheelValue.saturation.roundToInt()}%",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (activeWheelValue.isDefault) StudioTextMuted else StudioAmber
+                color = if (activeWheelValue.isDefault) StudioTextMuted else StudioAmber,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
             Text(
-                text = "Double-tap wheel to center",
+                text = "Double-tap wheel to reset",
                 style = MaterialTheme.typography.labelSmall,
-                color = StudioTextMuted
+                color = StudioTextMuted,
+                maxLines = 1,
+                softWrap = false
             )
         }
 
@@ -1191,6 +1273,7 @@ private fun LabeledColorWheel(
     onFocus: () -> Unit,
     onEnlarge: (() -> Unit)?,
     onValueChange: (ColorWheelValue) -> Unit,
+    onResetWheel: () -> Unit,
     onDraggingChanged: (Boolean) -> Unit
 ) {
     Column(
@@ -1202,10 +1285,13 @@ private fun LabeledColorWheel(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
-                .clickable {
-                    onFocus()
-                    onEnlarge?.invoke()
-                }
+                .tapAndDoubleTapReset(
+                    onTap = {
+                        onFocus()
+                        onEnlarge?.invoke()
+                    },
+                    onDoubleTapReset = onResetWheel
+                )
                 .padding(horizontal = 6.dp, vertical = 2.dp)
         ) {
             Text(
@@ -1231,6 +1317,7 @@ private fun LabeledColorWheel(
             isActive = isActive,
             testTag = testTag,
             onValueChange = onValueChange,
+            onResetWheel = onResetWheel,
             onDraggingChanged = onDraggingChanged
         )
     }
@@ -1243,13 +1330,29 @@ private fun InteractiveColorWheel(
     isActive: Boolean,
     testTag: String,
     onValueChange: (ColorWheelValue) -> Unit,
+    onResetWheel: () -> Unit,
     onDraggingChanged: (Boolean) -> Unit
 ) {
     val currentValue by rememberUpdatedState(value)
     val currentOnChange by rememberUpdatedState(onValueChange)
+    val currentOnReset by rememberUpdatedState(onResetWheel)
     val currentOnDrag by rememberUpdatedState(onDraggingChanged)
 
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val viewConfig = LocalViewConfiguration.current
+    val scope = rememberCoroutineScope()
+    var pendingSingleTapJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            pendingSingleTapJob?.cancel()
+            pendingSingleTapJob = null
+        }
+    }
+
     val wheelBorder = if (isActive) StudioAmber else StudioBorder
+    val doubleTapSlopPx = with(density) { 48.dp.toPx() }
 
     val sweepColors = remember {
         listOf(
@@ -1282,29 +1385,88 @@ private fun InteractiveColorWheel(
             .clip(CircleShape)
             .border(width = if (isActive) 1.8.dp else 1.dp, color = wheelBorder, shape = CircleShape)
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onDoubleTap = {
-                        currentOnDrag(false)
-                        currentOnChange(currentValue.copy(hueDeg = 0f, saturation = 0f))
-                    },
-                    onTap = { offset ->
-                        updateFromOffset(offset, this.size.width.toFloat(), this.size.height.toFloat())
+                var lastTapUpTimeMs = 0L
+                var lastTapPos = Offset.Zero
+                val touchSlop = viewConfig.touchSlop
+                val dragStartSlop = (touchSlop * 0.45f).coerceAtLeast(4f)
+                val doubleTapWindowMs = maxOf(viewConfig.doubleTapTimeoutMillis, 360L)
+                val singleTapDelayMs = minOf(viewConfig.doubleTapTimeoutMillis, 230L)
+
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val downTimeMs = SystemClock.uptimeMillis()
+                    val downPos = down.position
+                    val isDoubleTapCandidate = lastTapUpTimeMs > 0L &&
+                        (downTimeMs - lastTapUpTimeMs) <= doubleTapWindowMs &&
+                        (downPos - lastTapPos).getDistance() <= doubleTapSlopPx
+
+                    pendingSingleTapJob?.cancel()
+                    pendingSingleTapJob = null
+
+                    var dragging = false
+                    var cancelledByParent = false
+
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                                ?: event.changes.firstOrNull()
+                                ?: break
+
+                            if (!dragging && change.isConsumed) {
+                                cancelledByParent = true
+                                lastTapUpTimeMs = 0L
+                                break
+                            }
+
+                            if (!change.pressed) {
+                                if (dragging) change.consume()
+                                break
+                            }
+
+                            if (!dragging) {
+                                if ((change.position - downPos).getDistance() >= dragStartSlop) {
+                                    dragging = true
+                                    lastTapUpTimeMs = 0L
+                                    change.consume()
+                                    currentOnDrag(true)
+                                    updateFromOffset(
+                                        change.position,
+                                        this.size.width.toFloat(),
+                                        this.size.height.toFloat()
+                                    )
+                                }
+                            } else {
+                                change.consume()
+                                updateFromOffset(
+                                    change.position,
+                                    this.size.width.toFloat(),
+                                    this.size.height.toFloat()
+                                )
+                            }
+                        }
+                    } finally {
+                        if (dragging) {
+                            currentOnDrag(false)
+                        } else if (!cancelledByParent) {
+                            if (isDoubleTapCandidate) {
+                                lastTapUpTimeMs = 0L
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                currentOnReset()
+                            } else {
+                                lastTapUpTimeMs = SystemClock.uptimeMillis()
+                                lastTapPos = downPos
+                                val wPx = this.size.width.toFloat()
+                                val hPx = this.size.height.toFloat()
+                                pendingSingleTapJob = scope.launch {
+                                    delay(singleTapDelayMs)
+                                    updateFromOffset(downPos, wPx, hPx)
+                                    pendingSingleTapJob = null
+                                }
+                            }
+                        }
                     }
-                )
-            }
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { start ->
-                        currentOnDrag(true)
-                        updateFromOffset(start, this.size.width.toFloat(), this.size.height.toFloat())
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        updateFromOffset(change.position, this.size.width.toFloat(), this.size.height.toFloat())
-                    },
-                    onDragEnd = { currentOnDrag(false) },
-                    onDragCancel = { currentOnDrag(false) }
-                )
+                }
             }
             .testTag(testTag)
     ) {
@@ -1391,7 +1553,7 @@ private fun InteractiveColorWheel(
 }
 
 @Composable
-private fun GradientRangeSlider(
+internal fun GradientRangeSlider(
     label: String,
     icon: ImageVector,
     value: Float,
@@ -1403,147 +1565,74 @@ private fun GradientRangeSlider(
     testTag: String,
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    compact: Boolean = false,
+    step: Float = SliderStepMath.defaultStepForRange(valueRange)
 ) {
-    val currentOnChange by rememberUpdatedState(onValueChange)
-    val currentOnFinish by rememberUpdatedState(onValueChangeFinished)
-    val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1e-4f)
-    val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
-
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .doubleTapToReset(onDoubleTapReset = onReset)
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 8.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 2.dp)
+                    .testTag("${testTag}_label")
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
                     tint = if (isModified) accentColor else StudioTextSecondary,
-                    modifier = Modifier.size(15.dp)
+                    modifier = Modifier.size(if (compact) 13.dp else 15.dp)
                 )
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (isModified) StudioTextPrimary else StudioTextSecondary
+                    style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleSmall,
+                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
             Surface(
                 shape = RoundedCornerShape(6.dp),
                 color = if (isModified) accentColor.copy(alpha = 0.16f) else StudioSurfaceHighest,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onReset)
-                    .testTag("${testTag}_value")
+                modifier = Modifier.testTag("${testTag}_value")
             ) {
                 Text(
                     text = formattedValue,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (isModified) accentColor else StudioTextSecondary,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.padding(
+                        horizontal = if (compact) 6.dp else 8.dp,
+                        vertical = if (compact) 2.dp else 3.dp
+                    )
                 )
             }
         }
 
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(38.dp)
-                .pointerInput(valueRange) {
-                    detectTapGestures(
-                        onDoubleTap = { onReset() },
-                        onTap = { pos ->
-                            val w = size.width.toFloat().coerceAtLeast(1f)
-                            val pad = 10.dp.toPx()
-                            val usable = (w - pad * 2f).coerceAtLeast(1f)
-                            val f = ((pos.x - pad) / usable).coerceIn(0f, 1f)
-                            currentOnChange(valueRange.start + f * span)
-                            currentOnFinish()
-                        }
-                    )
-                }
-                .pointerInput(valueRange) {
-                    detectDragGestures(
-                        onDragStart = { start ->
-                            val w = size.width.toFloat().coerceAtLeast(1f)
-                            val pad = 10.dp.toPx()
-                            val usable = (w - pad * 2f).coerceAtLeast(1f)
-                            val f = ((start.x - pad) / usable).coerceIn(0f, 1f)
-                            currentOnChange(valueRange.start + f * span)
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            val w = size.width.toFloat().coerceAtLeast(1f)
-                            val pad = 10.dp.toPx()
-                            val usable = (w - pad * 2f).coerceAtLeast(1f)
-                            val f = ((change.position.x - pad) / usable).coerceIn(0f, 1f)
-                            currentOnChange(valueRange.start + f * span)
-                        },
-                        onDragEnd = { currentOnFinish() },
-                        onDragCancel = { currentOnFinish() }
-                    )
-                }
-                .testTag(testTag),
-            contentAlignment = Alignment.Center
-        ) {
-            Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(36.dp)
-            ) {
-                val pad = 10.dp.toPx()
-                val trackW = (size.width - pad * 2f).coerceAtLeast(1f)
-                val trackH = 6.dp.toPx()
-                val cy = size.height * 0.5f
-
-                // Gradient track
-                drawRoundRect(
-                    brush = Brush.horizontalGradient(
-                        colors = gradientColors,
-                        startX = pad,
-                        endX = pad + trackW
-                    ),
-                    topLeft = Offset(pad, cy - trackH * 0.5f),
-                    size = Size(trackW, trackH),
-                    cornerRadius = CornerRadius(trackH * 0.5f, trackH * 0.5f)
-                )
-
-                // Zero center tick mark for symmetric bipolar sliders (-100..+100)
-                if (valueRange.start < 0f && valueRange.endInclusive > 0f) {
-                    val zeroF = -valueRange.start / span
-                    val zx = pad + zeroF * trackW
-                    drawLine(
-                        color = StudioBackground.copy(alpha = 0.8f),
-                        start = Offset(zx, cy - trackH * 0.85f),
-                        end = Offset(zx, cy + trackH * 0.85f),
-                        strokeWidth = 1.5.dp.toPx()
-                    )
-                }
-
-                // Thumb indicator
-                val thumbX = pad + fraction * trackW
-                val thumbR = 8.5.dp.toPx()
-                drawCircle(
-                    color = Color.Black.copy(alpha = 0.4f),
-                    radius = thumbR + 2.dp.toPx(),
-                    center = Offset(thumbX, cy)
-                )
-                drawCircle(
-                    color = Color.White,
-                    radius = thumbR,
-                    center = Offset(thumbX, cy)
-                )
-                drawCircle(
-                    color = accentColor,
-                    radius = (thumbR - 2.5.dp.toPx()).coerceAtLeast(2f),
-                    center = Offset(thumbX, cy)
-                )
-            }
-        }
+        StudioPrecisionTrack(
+            value = value,
+            valueRange = valueRange,
+            step = step,
+            accentColor = accentColor,
+            gradientColors = gradientColors,
+            compact = compact,
+            testTag = testTag,
+            onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
+            onReset = onReset
+        )
     }
 }

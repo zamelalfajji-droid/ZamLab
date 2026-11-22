@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,8 +43,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -98,18 +97,21 @@ fun MaskPanel(
                 .background(Color(0xFF12151C))
                 .padding(horizontal = 10.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 OutlinedButton(
                     onClick = { onAddMask(MaskType.RADIAL) },
                     enabled = canAddMore,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 40.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .testTag("mask_add_radial_button")
                 ) {
                     Icon(
@@ -118,20 +120,22 @@ fun MaskPanel(
                         tint = if (canAddMore) StudioAmber else StudioTextMuted,
                         modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(5.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "+ Radial",
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (canAddMore) StudioAmber else StudioTextMuted
+                        color = if (canAddMore) StudioAmber else StudioTextMuted,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
 
                 OutlinedButton(
                     onClick = { onAddMask(MaskType.LINEAR) },
                     enabled = canAddMore,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 40.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .testTag("mask_add_linear_button")
                 ) {
                     Icon(
@@ -140,23 +144,27 @@ fun MaskPanel(
                         tint = if (canAddMore) StudioCyan else StudioTextMuted,
                         modifier = Modifier.size(15.dp)
                     )
-                    Spacer(modifier = Modifier.width(5.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "+ Linear",
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (canAddMore) StudioCyan else StudioTextMuted
+                        color = if (canAddMore) StudioCyan else StudioTextMuted,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.spacedBy(0.dp)
             ) {
                 IconButton(
                     onClick = onToggleShowOverlay,
                     enabled = activeMask != null,
-                    modifier = Modifier.testTag("mask_overlay_toggle")
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("mask_overlay_toggle")
                 ) {
                     Icon(
                         imageVector = if (showMaskOverlay) Icons.Default.Visibility else Icons.Default.VisibilityOff,
@@ -173,7 +181,9 @@ fun MaskPanel(
                 IconButton(
                     onClick = { activeMask?.let { onToggleMaskInverted(it.id) } },
                     enabled = activeMask != null,
-                    modifier = Modifier.testTag("mask_invert_toggle")
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("mask_invert_toggle")
                 ) {
                     Icon(
                         imageVector = Icons.Default.InvertColors,
@@ -190,7 +200,9 @@ fun MaskPanel(
                 IconButton(
                     onClick = { activeMask?.let { onDeleteMask(it.id) } },
                     enabled = activeMask != null,
-                    modifier = Modifier.testTag("mask_delete_button")
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("mask_delete_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,
@@ -238,7 +250,8 @@ fun MaskPanel(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Button(
                                 onClick = { onAddMask(MaskType.RADIAL) },
@@ -246,25 +259,40 @@ fun MaskPanel(
                                     containerColor = StudioAmber,
                                     contentColor = StudioBackground
                                 ),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                                 modifier = Modifier
-                                    .defaultMinSize(minHeight = 48.dp)
+                                    .weight(1f)
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                     .testTag("mask_empty_add_radial")
                             ) {
                                 Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Radial Gradient", style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    text = "Radial Gradient",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                             OutlinedButton(
                                 onClick = { onAddMask(MaskType.LINEAR) },
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                                 modifier = Modifier
-                                    .defaultMinSize(minHeight = 48.dp)
+                                    .weight(1f)
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                     .testTag("mask_empty_add_linear")
                             ) {
                                 Icon(Icons.Default.Gradient, contentDescription = null, tint = StudioCyan, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Linear Gradient", style = MaterialTheme.typography.labelLarge, color = StudioCyan)
+                                Text(
+                                    text = "Linear Gradient",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = StudioCyan,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -285,7 +313,7 @@ fun MaskPanel(
                     val accent = if (m.type == MaskType.RADIAL) StudioAmber else StudioCyan
                     Box(
                         modifier = Modifier
-                            .defaultMinSize(minHeight = 40.dp)
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(
                                 when {
@@ -305,7 +333,8 @@ fun MaskPanel(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.widthIn(max = 160.dp)
                         ) {
                             Box(
                                 modifier = Modifier
@@ -322,6 +351,7 @@ fun MaskPanel(
                                     else -> StudioTextPrimary
                                 },
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -331,7 +361,7 @@ fun MaskPanel(
                 // Active mask enable/bypass toggle chip
                 Box(
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 40.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (activeMask.enabled) StudioSurfaceElevated else StudioEraserCrimson.copy(alpha = 0.14f))
                         .border(
@@ -347,7 +377,9 @@ fun MaskPanel(
                     Text(
                         text = if (activeMask.enabled) "Active" else "Bypassed",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (activeMask.enabled) StudioTextSecondary else StudioEraserCrimson
+                        color = if (activeMask.enabled) StudioTextSecondary else StudioEraserCrimson,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -501,17 +533,26 @@ private fun MaskSliderRow(
     testTag: String,
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    step: Float = SliderStepMath.defaultStepForRange(valueRange)
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .doubleTapToReset(onDoubleTapReset = onReset)
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 2.dp)
+                    .testTag("${testTag}_label")
             ) {
                 Icon(
                     imageVector = icon,
@@ -522,38 +563,36 @@ private fun MaskSliderRow(
                 Text(
                     text = label,
                     style = MaterialTheme.typography.titleSmall,
-                    color = if (isModified) StudioTextPrimary else StudioTextSecondary
+                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             Surface(
                 shape = RoundedCornerShape(6.dp),
                 color = if (isModified) accentColor.copy(alpha = 0.14f) else StudioSurfaceHighest,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onReset)
+                modifier = Modifier.testTag("${testTag}_value")
             ) {
                 Text(
                     text = formattedValue,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (isModified) accentColor else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                 )
             }
         }
-        Slider(
+        StudioPrecisionTrack(
             value = value,
+            valueRange = valueRange,
+            step = step,
+            accentColor = accentColor,
+            testTag = testTag,
             onValueChange = onValueChange,
             onValueChangeFinished = onValueChangeFinished,
-            valueRange = valueRange,
-            colors = SliderDefaults.colors(
-                thumbColor = accentColor,
-                activeTrackColor = accentColor,
-                inactiveTrackColor = StudioSurfaceHighest
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(34.dp)
-                .testTag(testTag)
+            onReset = onReset
         )
     }
 }

@@ -45,8 +45,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -145,7 +143,7 @@ fun LutPanel(
                 Spacer(modifier = Modifier.width(8.dp))
                 Box(
                     modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 40.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .clickable { onSelectLut(null) }
                         .testTag("lut_clear_active_button"),
@@ -170,7 +168,9 @@ fun LutPanel(
                             Text(
                                 text = "Off",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = StudioTextSecondary
+                                color = StudioTextSecondary,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -181,7 +181,9 @@ fun LutPanel(
             OutlinedButton(
                 onClick = onImportCubeClick,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                modifier = Modifier.testTag("import_lut_button")
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .testTag("import_lut_button")
             ) {
                 Icon(
                     imageVector = Icons.Default.FileUpload,
@@ -193,7 +195,9 @@ fun LutPanel(
                 Text(
                     text = stringResource(R.string.action_import_lut),
                     style = MaterialTheme.typography.labelMedium,
-                    color = StudioCyan
+                    color = StudioCyan,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }
@@ -285,8 +289,19 @@ fun LutPanel(
                 .padding(horizontal = 16.dp, vertical = 6.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .doubleTapToReset(
+                        enabled = selectedLutId != null,
+                        onDoubleTapReset = {
+                            onDraggingChanged(false)
+                            onIntensityChange(0.75f)
+                        }
+                    )
+                    .padding(vertical = 2.dp)
+                    .testTag("lut_intensity_label"),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -296,38 +311,44 @@ fun LutPanel(
                         "LUT Intensity"
                     },
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (selectedLutId != null) StudioTextPrimary else StudioTextMuted
+                    color = if (selectedLutId != null) StudioTextPrimary else StudioTextMuted,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = if (selectedLutId != null) StudioAmber.copy(alpha = 0.14f) else StudioSurfaceHighest
+                    color = if (selectedLutId != null) StudioAmber.copy(alpha = 0.14f) else StudioSurfaceHighest,
+                    modifier = Modifier.testTag("lut_intensity_value")
                 ) {
                     Text(
                         text = "${(lutIntensity * 100f).roundToInt()}%",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (selectedLutId != null) StudioAmber else StudioTextMuted,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                     )
                 }
             }
-            Slider(
+            StudioPrecisionTrack(
                 value = lutIntensity,
+                valueRange = 0f..1f,
+                step = 0.01f,
+                enabled = selectedLutId != null,
+                accentColor = StudioAmber,
+                compact = true,
+                testTag = "lut_intensity_slider",
                 onValueChange = { v ->
                     onDraggingChanged(true)
                     onIntensityChange(v)
                 },
                 onValueChangeFinished = { onDraggingChanged(false) },
-                valueRange = 0f..1f,
-                enabled = selectedLutId != null,
-                colors = SliderDefaults.colors(
-                    thumbColor = StudioAmber,
-                    activeTrackColor = StudioAmber,
-                    inactiveTrackColor = StudioSurfaceHighest
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(30.dp)
-                    .testTag("lut_intensity_slider")
+                onReset = {
+                    onDraggingChanged(false)
+                    onIntensityChange(0.75f)
+                }
             )
         }
     }
@@ -409,7 +430,7 @@ private fun MyPresetsSection(
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 36.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                         .testTag("save_current_look_button")
                 ) {
                     Icon(
@@ -420,7 +441,9 @@ private fun MyPresetsSection(
                     Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = stringResource(R.string.action_save_look).removePrefix("+ "),
-                        style = MaterialTheme.typography.labelSmall
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -508,24 +531,30 @@ private fun UserPresetThumbnailCard(
                 )
             }
 
-            Surface(
-                shape = CircleShape,
-                color = Color.Black.copy(alpha = 0.72f),
+            Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(3.dp)
-                    .size(20.dp)
+                    .size(48.dp)
                     .clip(CircleShape)
                     .clickable(onClick = onDelete)
-                    .testTag("delete_user_preset_${preset.id}")
+                    .testTag("delete_user_preset_${preset.id}"),
+                contentAlignment = Alignment.TopStart
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Delete ${preset.name}",
-                        tint = StudioTextPrimary,
-                        modifier = Modifier.size(12.dp)
-                    )
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.72f),
+                    modifier = Modifier
+                        .padding(3.dp)
+                        .size(20.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Delete ${preset.name}",
+                            tint = StudioTextPrimary,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
                 }
             }
 
@@ -774,7 +803,7 @@ private fun LutGridThumbnailCard(
             contentAlignment = Alignment.Center
         ) {
             val thumbnail = item.previewThumbnail
-            if (thumbnail != null) {
+            if (thumbnail != null && !thumbnail.isRecycled) {
                 val imgBmp = remember(thumbnail) { thumbnail.asImageBitmap() }
                 Image(
                     bitmap = imgBmp,
@@ -791,23 +820,29 @@ private fun LutGridThumbnailCard(
                 )
             }
             if (item.isCustom && onDelete != null) {
-                Surface(
-                    shape = CircleShape,
-                    color = Color.Black.copy(alpha = 0.72f),
+                Box(
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(3.dp)
-                        .size(20.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
-                        .clickable(onClick = onDelete)
+                        .clickable(onClick = onDelete),
+                    contentAlignment = Alignment.TopStart
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Remove ${item.title}",
-                            tint = StudioTextPrimary,
-                            modifier = Modifier.size(12.dp)
-                        )
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.72f),
+                        modifier = Modifier
+                            .padding(3.dp)
+                            .size(20.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Remove ${item.title}",
+                                tint = StudioTextPrimary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
                     }
                 }
             }

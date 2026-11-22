@@ -11,11 +11,11 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.GridOn
@@ -47,6 +48,8 @@ import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Transform
 import androidx.compose.material.icons.filled.ZoomOutMap
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.DropdownMenu
@@ -54,8 +57,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -70,17 +71,24 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.editor.CropAspectPreset
 import com.example.editor.CropGeometryParams
 import com.example.editor.CropOverlayMode
+import com.example.ui.theme.StudioActiveOffWhite
 import com.example.ui.theme.StudioAmber
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioBorderSubtle
 import com.example.ui.theme.StudioCyan
+import com.example.ui.theme.StudioGlassHairline
+import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioObsidian
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioSurfaceHighest
@@ -107,6 +115,8 @@ fun CropPanel(
     onToggleConstrainCrop: () -> Unit,
     onCropChange: ((CropGeometryParams) -> CropGeometryParams) -> Unit,
     onDraggingChanged: (Boolean) -> Unit,
+    onApplyCrop: () -> Unit,
+    onResetAllCrop: () -> Unit,
     onResetCropOrientation: () -> Unit,
     onResetGeometry: () -> Unit,
     modifier: Modifier = Modifier
@@ -115,21 +125,99 @@ fun CropPanel(
     var isGeometryExpanded by remember { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        // Composition Overlay selector bar
-        CropOverlaySelectorBar(
-            selectedMode = overlayMode,
-            onSelectMode = onOverlayModeChange
-        )
+        // Prominent Pinned Action Bar: Reset Crop (frosted glass) + Apply Crop (crisp off-white pill)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            val canResetCrop = !crop.isDefault
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = StudioGlassSurface,
+                modifier = Modifier
+                    .weight(1f)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+                    .clip(RoundedCornerShape(50))
+                    .clickable(enabled = canResetCrop, onClick = onResetAllCrop)
+                    .testTag("reset_crop_button")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.RestartAlt,
+                        contentDescription = stringResource(R.string.cd_reset_crop),
+                        tint = if (canResetCrop) StudioActiveOffWhite else StudioTextMuted.copy(alpha = 0.5f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = stringResource(R.string.action_reset_crop),
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = FontWeight.Medium,
+                            letterSpacing = 0.2.sp
+                        ),
+                        color = if (canResetCrop) StudioActiveOffWhite else StudioTextMuted.copy(alpha = 0.5f),
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
 
-        HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
+            Button(
+                onClick = onApplyCrop,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = StudioActiveOffWhite,
+                    contentColor = StudioObsidian
+                ),
+                shape = RoundedCornerShape(50),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                modifier = Modifier
+                    .weight(1.25f)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .testTag("apply_crop_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = stringResource(R.string.cd_apply_crop),
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(R.string.action_apply_crop),
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.2.sp
+                    ),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        HorizontalDivider(color = StudioGlassHairline, thickness = 1.dp)
 
         Column(
             modifier = Modifier
+                .weight(1f)
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // Composition Overlay selector bar
+            CropOverlaySelectorBar(
+                selectedMode = overlayMode,
+                onSelectMode = onOverlayModeChange
+            )
             // 1. CROP & ORIENTATION SUB-HEADER
             CropAccordionSection(
                 title = "Crop & Orientation",
@@ -179,6 +267,7 @@ fun CropPanel(
                             icon = Icons.Default.Straighten,
                             value = crop.straightenDeg,
                             valueRange = -45f..45f,
+                            step = 0.1f,
                             formattedValue = formatSignedDegrees(crop.straightenDeg, 2),
                             isModified = abs(crop.straightenDeg) > 0.01f,
                             accentColor = StudioAmber,
@@ -220,7 +309,9 @@ fun CropPanel(
                             Text(
                                 text = "Auto",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = StudioCyan
+                                color = StudioCyan,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -250,9 +341,10 @@ fun CropPanel(
                         .padding(horizontal = 8.dp, vertical = 2.dp)
                         .testTag("checkbox_constrain_crop"),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(
+                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -268,13 +360,18 @@ fun CropPanel(
                         Text(
                             text = "Constrain Crop",
                             style = MaterialTheme.typography.titleSmall,
-                            color = if (crop.constrainCrop) StudioTextPrimary else StudioTextSecondary
+                            color = if (crop.constrainCrop) StudioTextPrimary else StudioTextSecondary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Text(
                         text = if (crop.constrainCrop) "Auto-trim" else "Show edges",
                         style = MaterialTheme.typography.labelSmall,
                         color = StudioTextMuted,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(end = 6.dp)
                     )
                 }
@@ -324,6 +421,7 @@ fun CropPanel(
                     icon = Icons.Default.Rotate90DegreesCcw,
                     value = crop.geometryRotateDeg,
                     valueRange = -180f..180f,
+                    step = 0.5f,
                     formattedValue = formatSignedDegrees(crop.geometryRotateDeg, 1),
                     isModified = abs(crop.geometryRotateDeg) > 0.05f,
                     accentColor = StudioCyan,
@@ -468,6 +566,8 @@ private fun CropOverlaySelectorBar(
                         text = mode.label,
                         style = MaterialTheme.typography.labelSmall,
                         color = if (selected) StudioAmber else StudioTextPrimary,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
@@ -510,9 +610,10 @@ private fun AspectRatioControlsRow(
                         .fillMaxWidth()
                         .padding(horizontal = 10.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Row(
+                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -536,6 +637,7 @@ private fun AspectRatioControlsRow(
                             style = MaterialTheme.typography.labelMedium,
                             color = StudioTextPrimary,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -602,7 +704,9 @@ private fun AspectRatioControlsRow(
                 Text(
                     text = if (aspectLocked) "Locked" else "Free",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (aspectLocked) StudioAmber else StudioTextSecondary
+                    color = if (aspectLocked) StudioAmber else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }
@@ -636,7 +740,9 @@ private fun AspectRatioControlsRow(
                 Text(
                     text = "Swap",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (aspectSwapped) StudioCyan else StudioTextSecondary
+                    color = if (aspectSwapped) StudioCyan else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }
@@ -757,7 +863,9 @@ private fun TransformActionButton(
                     active -> StudioAmber
                     enabled -> StudioTextPrimary
                     else -> StudioTextMuted
-                }
+                },
+                maxLines = 1,
+                softWrap = false
             )
         }
     }
@@ -825,7 +933,11 @@ private fun CropAccordionSection(
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
-                        color = StudioTextPrimary
+                        color = StudioTextPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     if (hasActiveEdits) {
                         Box(
@@ -840,10 +952,9 @@ private fun CropAccordionSection(
                 if (hasActiveEdits) {
                     Box(
                         modifier = Modifier
-                            .minimumInteractiveComponentSize()
+                            .size(48.dp)
                             .clip(CircleShape)
-                            .clickable(onClick = onResetSection)
-                            .padding(8.dp),
+                            .clickable(onClick = onResetSection),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -882,6 +993,7 @@ private fun CropPrecisionSlider(
     icon: ImageVector,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
+    step: Float = SliderStepMath.defaultStepForRange(valueRange),
     formattedValue: String,
     isModified: Boolean,
     accentColor: Color,
@@ -892,19 +1004,20 @@ private fun CropPrecisionSlider(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .doubleTapToReset(onDoubleTapReset = onReset)
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .pointerInput(onReset) {
-                        detectTapGestures(onDoubleTap = { onReset() })
-                    }
-                    .padding(vertical = 2.dp, horizontal = 2.dp)
+                    .weight(1f)
+                    .padding(horizontal = 2.dp)
                     .testTag("${testTag}_label")
             ) {
                 Icon(
@@ -916,39 +1029,37 @@ private fun CropPrecisionSlider(
                 Text(
                     text = label,
                     style = MaterialTheme.typography.titleSmall,
-                    color = if (isModified) StudioTextPrimary else StudioTextSecondary
+                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
             Surface(
                 shape = RoundedCornerShape(6.dp),
                 color = if (isModified) accentColor.copy(alpha = 0.14f) else StudioSurfaceHighest,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onReset)
+                modifier = Modifier.testTag("${testTag}_value")
             ) {
                 Text(
                     text = formattedValue,
                     style = MaterialTheme.typography.labelSmall,
                     color = if (isModified) accentColor else StudioTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                 )
             }
         }
-        Slider(
+        StudioPrecisionTrack(
             value = value,
+            valueRange = valueRange,
+            step = step,
+            accentColor = accentColor,
+            testTag = testTag,
             onValueChange = onValueChange,
             onValueChangeFinished = onValueChangeFinished,
-            valueRange = valueRange,
-            colors = SliderDefaults.colors(
-                thumbColor = accentColor,
-                activeTrackColor = accentColor,
-                inactiveTrackColor = StudioSurfaceHighest
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(34.dp)
-                .testTag(testTag)
+            onReset = onReset
         )
     }
 }

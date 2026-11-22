@@ -4,7 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,8 +33,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -47,7 +44,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -199,6 +195,8 @@ fun HealPanel(
                             text = stringResource(R.string.action_set_clone_source),
                             style = MaterialTheme.typography.labelSmall,
                             color = if (isPickingCloneSource) Color(0xFF0B0E14) else StudioAmber,
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         )
                     }
@@ -308,7 +306,7 @@ fun HealPanel(
                 enabled = canUndoStroke && !isProcessing,
                 modifier = Modifier
                     .weight(1f)
-                    .minimumInteractiveComponentSize()
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     .testTag("heal_undo_stroke_button"),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
             ) {
@@ -322,6 +320,7 @@ fun HealPanel(
                     text = stringResource(R.string.action_heal_undo),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -331,7 +330,7 @@ fun HealPanel(
                 enabled = canRedoStroke && !isProcessing,
                 modifier = Modifier
                     .weight(1f)
-                    .minimumInteractiveComponentSize()
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     .testTag("heal_redo_stroke_button"),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
             ) {
@@ -345,6 +344,7 @@ fun HealPanel(
                     text = stringResource(R.string.action_heal_redo),
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -385,6 +385,7 @@ fun HealPanel(
                         style = MaterialTheme.typography.labelSmall,
                         color = if (showHealMask) activeAccent else StudioTextSecondary,
                         maxLines = 1,
+                        softWrap = false,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -395,7 +396,7 @@ fun HealPanel(
                 enabled = hasHealEdits && !isProcessing,
                 modifier = Modifier
                     .weight(1f)
-                    .minimumInteractiveComponentSize()
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     .testTag("heal_reset_button"),
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
             ) {
@@ -411,6 +412,7 @@ fun HealPanel(
                     style = MaterialTheme.typography.labelMedium,
                     color = if (hasHealEdits && !isProcessing) StudioEraserCrimson else StudioTextMuted,
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -480,6 +482,7 @@ private fun HealModePill(
                 style = MaterialTheme.typography.labelSmall,
                 color = if (selected) accentColor else StudioTextSecondary,
                 maxLines = 1,
+                softWrap = false,
                 overflow = TextOverflow.Ellipsis
             )
         }
@@ -503,38 +506,40 @@ private fun HealBrushSliderRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .pointerInput(onReset) {
-                    detectTapGestures(onDoubleTap = { onReset() })
-                }
+                .clip(RoundedCornerShape(6.dp))
+                .doubleTapToReset(enabled = enabled, onDoubleTapReset = onReset)
+                .padding(vertical = 2.dp)
                 .testTag(labelTag),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium,
-                color = StudioTextPrimary
+                color = StudioTextPrimary,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
             Text(
                 text = formattedValue,
                 style = MaterialTheme.typography.labelSmall,
-                color = accentColor
+                color = accentColor,
+                maxLines = 1,
+                softWrap = false
             )
         }
-        Slider(
+        StudioPrecisionTrack(
             value = value,
-            onValueChange = onValueChange,
             valueRange = valueRange,
+            step = SliderStepMath.defaultStepForRange(valueRange),
             enabled = enabled,
-            colors = SliderDefaults.colors(
-                thumbColor = accentColor,
-                activeTrackColor = accentColor,
-                inactiveTrackColor = StudioSurfaceHighest
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(28.dp)
-                .testTag(sliderTag)
+            accentColor = accentColor,
+            compact = true,
+            testTag = sliderTag,
+            onValueChange = onValueChange,
+            onReset = onReset
         )
     }
 }

@@ -34,15 +34,45 @@ data class CubeLut(
      * Writes result into [outRgb] (length >= 3) to avoid heap allocations per pixel.
      */
     fun sample(rIn: Float, gIn: Float, bIn: Float, outRgb: FloatArray) {
-        val nr = ((rIn - domainMin[0]) / (domainMax[0] - domainMin[0]).coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
-        val ng = ((gIn - domainMin[1]) / (domainMax[1] - domainMin[1]).coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
-        val nb = ((bIn - domainMin[2]) / (domainMax[2] - domainMin[2]).coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
+        if (outRgb.size < 3) return
+        val safeR = if (rIn.isFinite()) rIn else 0f
+        val safeG = if (gIn.isFinite()) gIn else 0f
+        val safeB = if (bIn.isFinite()) bIn else 0f
+        if (size < 2) {
+            outRgb[0] = safeR.coerceIn(0f, 1f)
+            outRgb[1] = safeG.coerceIn(0f, 1f)
+            outRgb[2] = safeB.coerceIn(0f, 1f)
+            return
+        }
+        val dMin0 = domainMin.getOrNull(0)?.takeIf { it.isFinite() } ?: 0f
+        val dMin1 = domainMin.getOrNull(1)?.takeIf { it.isFinite() } ?: 0f
+        val dMin2 = domainMin.getOrNull(2)?.takeIf { it.isFinite() } ?: 0f
+        val dMax0 = domainMax.getOrNull(0)?.takeIf { it.isFinite() } ?: 1f
+        val dMax1 = domainMax.getOrNull(1)?.takeIf { it.isFinite() } ?: 1f
+        val dMax2 = domainMax.getOrNull(2)?.takeIf { it.isFinite() } ?: 1f
+
+        val nr = ((safeR - dMin0) / (dMax0 - dMin0).coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
+        val ng = ((safeG - dMin1) / (dMax1 - dMin1).coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
+        val nb = ((safeB - dMin2) / (dMax2 - dMin2).coerceAtLeast(1e-5f)).coerceIn(0f, 1f)
 
         if (type == LutType.LUT_1D) {
+            if (table.size < size * 3) {
+                outRgb[0] = nr
+                outRgb[1] = ng
+                outRgb[2] = nb
+                return
+            }
             val maxIdx = (size - 1).toFloat()
             outRgb[0] = sample1DChannel(nr * maxIdx, 0)
             outRgb[1] = sample1DChannel(ng * maxIdx, 1)
             outRgb[2] = sample1DChannel(nb * maxIdx, 2)
+            return
+        }
+
+        if (table.size < size * size * size * 3) {
+            outRgb[0] = nr
+            outRgb[1] = ng
+            outRgb[2] = nb
             return
         }
 
@@ -156,18 +186,18 @@ object CubeLutParser {
                 if (clean.startsWith("DOMAIN_MIN", ignoreCase = true)) {
                     val parts = clean.split(whitespaceRegex)
                     if (parts.size >= 4) {
-                        domainMin[0] = parts[1].toFloatOrNull() ?: 0f
-                        domainMin[1] = parts[2].toFloatOrNull() ?: 0f
-                        domainMin[2] = parts[3].toFloatOrNull() ?: 0f
+                        domainMin[0] = parts[1].toFloatOrNull()?.takeIf { it.isFinite() } ?: 0f
+                        domainMin[1] = parts[2].toFloatOrNull()?.takeIf { it.isFinite() } ?: 0f
+                        domainMin[2] = parts[3].toFloatOrNull()?.takeIf { it.isFinite() } ?: 0f
                     }
                     continue
                 }
                 if (clean.startsWith("DOMAIN_MAX", ignoreCase = true)) {
                     val parts = clean.split(whitespaceRegex)
                     if (parts.size >= 4) {
-                        domainMax[0] = parts[1].toFloatOrNull() ?: 1f
-                        domainMax[1] = parts[2].toFloatOrNull() ?: 1f
-                        domainMax[2] = parts[3].toFloatOrNull() ?: 1f
+                        domainMax[0] = parts[1].toFloatOrNull()?.takeIf { it.isFinite() } ?: 1f
+                        domainMax[1] = parts[2].toFloatOrNull()?.takeIf { it.isFinite() } ?: 1f
+                        domainMax[2] = parts[3].toFloatOrNull()?.takeIf { it.isFinite() } ?: 1f
                     }
                     continue
                 }
@@ -180,9 +210,9 @@ object CubeLutParser {
                 // Data triplet line: R G B
                 val parts = clean.split(whitespaceRegex)
                 if (parts.size >= 3) {
-                    val r = parts[0].toFloatOrNull()
-                    val g = parts[1].toFloatOrNull()
-                    val b = parts[2].toFloatOrNull()
+                    val r = parts[0].toFloatOrNull()?.takeIf { it.isFinite() }
+                    val g = parts[1].toFloatOrNull()?.takeIf { it.isFinite() }
+                    val b = parts[2].toFloatOrNull()?.takeIf { it.isFinite() }
                     if (r != null && g != null && b != null) {
                         values.add(r)
                         values.add(g)
@@ -194,8 +224,9 @@ object CubeLutParser {
 
         val resolvedType = lutType
             ?: throw IllegalArgumentException("Missing LUT_3D_SIZE or LUT_1D_SIZE header in .cube file.")
-        if (lutSize < 2 || lutSize > 256) {
-            throw IllegalArgumentException("Unsupported LUT size: $lutSize.")
+        val maxLutSize = if (resolvedType == LutType.LUT_3D) 65 else 256
+        if (lutSize < 2 || lutSize > maxLutSize) {
+            throw IllegalArgumentException("Unsupported LUT size: $lutSize (max $maxLutSize).")
         }
 
         val expectedTriplets = when (resolvedType) {

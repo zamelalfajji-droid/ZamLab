@@ -5,21 +5,28 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -28,8 +35,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -42,23 +47,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.editor.ExportFormat
 import com.example.editor.ExportOptions
 import com.example.editor.ExportResolution
 import com.example.editor.ExportStatus
 import com.example.editor.ImageIoHelper
-import com.example.ui.theme.StudioAmber
-import com.example.ui.theme.StudioBackground
-import com.example.ui.theme.StudioBorder
-import com.example.ui.theme.StudioCyan
+import com.example.ui.theme.StudioActiveOffWhite
 import com.example.ui.theme.StudioEraserCrimson
+import com.example.ui.theme.StudioGlassHairline
+import com.example.ui.theme.StudioGlassHighlight
+import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioLuxuryGold
+import com.example.ui.theme.StudioObsidian
 import com.example.ui.theme.StudioSuccessGreen
-import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceElevated
-import com.example.ui.theme.StudioSurfaceHighest
+import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
 import kotlin.math.roundToInt
@@ -73,6 +84,7 @@ fun ExportBottomSheet(
     exportStatus: ExportStatus,
     onExportToGallery: (ExportOptions) -> Unit,
     onExportWithFilePicker: (ExportOptions) -> Unit,
+    onShareExported: (ExportStatus.Success) -> Unit,
     onDismiss: () -> Unit
 ) {
     var selectedFormat by remember { mutableStateOf(ExportFormat.JPG) }
@@ -89,182 +101,232 @@ fun ExportBottomSheet(
     }
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val isExporting = exportStatus is ExportStatus.Exporting
 
     ModalBottomSheet(
         onDismissRequest = {
-            if (exportStatus !is ExportStatus.Exporting) onDismiss()
+            if (!isExporting) onDismiss()
         },
         sheetState = sheetState,
-        containerColor = StudioSurface,
-        contentColor = StudioTextPrimary
+        containerColor = StudioGlassSurface.copy(alpha = 0.96f),
+        contentColor = StudioTextPrimary,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(top = 10.dp, bottom = 6.dp)
+                    .width(38.dp)
+                    .height(4.dp)
+                    .clip(CircleShape)
+                    .background(StudioGlassHighlight)
+            )
+        }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp),
+                .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(
-                text = "Export Settings",
-                style = MaterialTheme.typography.titleLarge,
-                color = StudioTextPrimary
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Export Studio",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = StudioActiveOffWhite,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = StudioObsidian,
+                    modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+                ) {
+                    Text(
+                        text = "$targetW × $targetH px",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Medium,
+                            letterSpacing = 0.3.sp
+                        ),
+                        color = StudioLuxuryGold,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
 
+            // Frosted-glass photo & output summary card
             Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = StudioSurfaceElevated,
+                shape = RoundedCornerShape(14.dp),
+                color = StudioObsidian.copy(alpha = 0.72f),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, StudioBorder, RoundedCornerShape(12.dp))
+                    .border(1.dp, StudioGlassHairline, RoundedCornerShape(14.dp))
             ) {
                 Column(
-                    modifier = Modifier.padding(14.dp),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
                         text = photoName,
                         style = MaterialTheme.typography.titleSmall,
-                        color = StudioTextPrimary,
+                        color = StudioActiveOffWhite,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    val qualityBadge = if (selectedFormat.supportsQuality) {
-                        "${currentOptions.effectiveQuality}% Quality"
-                    } else {
-                        "Lossless"
+                    val qualityBadge = when {
+                        selectedFormat == ExportFormat.PDF -> "Full-Bleed Print PDF"
+                        !selectedFormat.supportsQuality -> "Lossless 8-bit RGBA"
+                        selectedFormat == ExportFormat.WEBP && currentOptions.effectiveQuality >= 100 -> "Lossless WebP"
+                        else -> "${currentOptions.effectiveQuality}% Quality"
                     }
                     Text(
-                        text = "Output: $targetW × $targetH px • ${selectedFormat.label} ($qualityBadge)",
+                        text = "${selectedFormat.label} • $qualityBadge • ${selectedFormat.defaultFolderDescription}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = StudioAmber
+                        color = StudioLuxuryGold
                     )
                     Text(
-                        text = "LUT: ${activeLutTitle ?: "None"}",
+                        text = "Look / LUT: ${activeLutTitle ?: "Custom Grade"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = StudioTextSecondary
                     )
                 }
             }
 
-            // 1. File Format selector (JPG, PNG, WEBP)
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // 1. Output Format Selector: Clean 2×2 grid (JPG, PNG / WebP, PDF)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "File Format",
+                    text = "Output Format",
                     style = MaterialTheme.typography.labelLarge,
                     color = StudioTextSecondary
                 )
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    ExportFormat.entries.forEach { format ->
-                        val isSelected = selectedFormat == format
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(
-                                    if (isSelected) StudioAmber.copy(alpha = 0.14f) else StudioSurfaceElevated
-                                )
-                                .border(
-                                    width = if (isSelected) 1.5.dp else 1.dp,
-                                    color = if (isSelected) StudioAmber else StudioBorder,
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                                .clickable(enabled = exportStatus !is ExportStatus.Exporting) {
-                                    selectedFormat = format
-                                }
-                                .padding(horizontal = 10.dp, vertical = 10.dp)
-                                .testTag("format_${format.extension}")
-                        ) {
-                            Text(
-                                text = format.label,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = if (isSelected) StudioAmber else StudioTextPrimary
-                            )
-                            Text(
-                                text = format.subtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = StudioTextSecondary
-                            )
-                        }
+                    listOf(ExportFormat.JPG, ExportFormat.PNG).forEach { format ->
+                        FormatOptionTile(
+                            format = format,
+                            isSelected = selectedFormat == format,
+                            enabled = !isExporting,
+                            onClick = { selectedFormat = format },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(ExportFormat.WEBP, ExportFormat.PDF).forEach { format ->
+                        FormatOptionTile(
+                            format = format,
+                            isSelected = selectedFormat == format,
+                            enabled = !isExporting,
+                            showProIcon = format == ExportFormat.PDF,
+                            onClick = { selectedFormat = format },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
             }
 
-            // 2. Compression Quality
+            // 2. Compression Quality (JPG / WebP) or Format Spec Card (PNG / PDF / DNG)
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .doubleTapToReset(
+                            enabled = selectedFormat.supportsQuality && !isExporting,
+                            onDoubleTapReset = { qualityPercent = 95 }
+                        )
+                        .padding(vertical = 2.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Compression Quality",
+                        text = if (selectedFormat.supportsQuality) "Quality" else "Format Pipeline",
                         style = MaterialTheme.typography.labelLarge,
                         color = StudioTextSecondary
                     )
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
+                        shape = RoundedCornerShape(50),
                         color = if (selectedFormat.supportsQuality) {
-                            StudioAmber.copy(alpha = 0.14f)
+                            StudioLuxuryGold.copy(alpha = 0.14f)
                         } else {
-                            StudioSurfaceHighest
-                        }
+                            StudioObsidian
+                        },
+                        modifier = Modifier.border(
+                            1.dp,
+                            if (selectedFormat.supportsQuality) StudioLuxuryGold.copy(alpha = 0.35f) else StudioGlassHairline,
+                            RoundedCornerShape(50)
+                        )
                     ) {
                         val tier = when {
+                            selectedFormat == ExportFormat.PDF -> "Print 1:1 Vector Page"
                             !selectedFormat.supportsQuality -> "Lossless 100%"
-                            qualityPercent >= 90 -> "$qualityPercent% • Archive"
-                            qualityPercent >= 75 -> "$qualityPercent% • Balanced"
+                            selectedFormat == ExportFormat.WEBP && qualityPercent >= 100 -> "100% • Lossless"
+                            qualityPercent >= 90 -> "$qualityPercent% • Max"
+                            qualityPercent >= 75 -> "$qualityPercent% • High"
                             else -> "$qualityPercent% • Compact"
                         }
                         Text(
                             text = tier,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (selectedFormat.supportsQuality) StudioAmber else StudioTextSecondary,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            color = if (selectedFormat.supportsQuality) StudioLuxuryGold else StudioTextPrimary,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
                         )
                     }
                 }
 
                 if (selectedFormat.supportsQuality) {
-                    Slider(
+                    StudioPrecisionTrack(
                         value = qualityPercent.toFloat(),
-                        onValueChange = { v -> qualityPercent = ((v / 5f).roundToInt() * 5).coerceIn(10, 100) },
                         valueRange = 10f..100f,
-                        enabled = exportStatus !is ExportStatus.Exporting,
-                        colors = SliderDefaults.colors(
-                            thumbColor = StudioAmber,
-                            activeTrackColor = StudioAmber,
-                            inactiveTrackColor = StudioSurfaceHighest
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(34.dp)
-                            .testTag("export_quality_slider")
+                        step = 5f,
+                        enabled = !isExporting,
+                        accentColor = StudioActiveOffWhite,
+                        compact = true,
+                        testTag = "export_quality_slider",
+                        onValueChange = { v -> qualityPercent = v.roundToInt().coerceIn(10, 100) },
+                        onReset = { qualityPercent = 95 }
                     )
                 } else {
+                    val formatNote = when (selectedFormat) {
+                        ExportFormat.PNG -> "Lossless full-resolution 8-bit RGBA PNG saved to Pictures/ZamLab."
+                        ExportFormat.PDF -> "Full-bleed, margin-free print PDF matching exact photo dimensions saved to Documents/ZamLab."
+                        else -> ""
+                    }
                     Text(
-                        text = "PNG always uses lossless RGBA compression.",
+                        text = formatNote,
                         style = MaterialTheme.typography.bodySmall,
                         color = StudioTextSecondary,
-                        modifier = Modifier.padding(vertical = 4.dp)
+                        modifier = Modifier.padding(vertical = 3.dp)
                     )
                 }
             }
 
-            // 3. Output Resolution selector
+            // 3. Output Resolution Selector
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "Output Resolution",
                     style = MaterialTheme.typography.labelLarge,
                     color = StudioTextSecondary
                 )
-                val resEntries = ExportResolution.entries
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    resEntries.chunked(2).forEach { rowItems ->
+                    ExportResolution.entries.chunked(2).forEach { rowItems ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -275,30 +337,38 @@ fun ExportBottomSheet(
                                 Column(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .clip(RoundedCornerShape(10.dp))
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .clip(RoundedCornerShape(12.dp))
                                         .background(
-                                            if (isSelected) StudioCyan.copy(alpha = 0.14f) else StudioSurfaceElevated
+                                            if (isSelected) StudioActiveOffWhite.copy(alpha = 0.12f)
+                                            else StudioObsidian.copy(alpha = 0.68f)
                                         )
                                         .border(
-                                            width = if (isSelected) 1.5.dp else 1.dp,
-                                            color = if (isSelected) StudioCyan else StudioBorder,
-                                            shape = RoundedCornerShape(10.dp)
+                                            width = if (isSelected) 1.2.dp else 1.dp,
+                                            color = if (isSelected) StudioActiveOffWhite.copy(alpha = 0.65f) else StudioGlassHairline,
+                                            shape = RoundedCornerShape(12.dp)
                                         )
-                                        .clickable(enabled = exportStatus !is ExportStatus.Exporting) {
+                                        .clickable(enabled = !isExporting) {
                                             selectedResolution = res
                                         }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                                        .padding(horizontal = 11.dp, vertical = 9.dp)
                                         .testTag("resolution_${res.name.lowercase()}")
                                 ) {
                                     Text(
                                         text = res.label,
                                         style = MaterialTheme.typography.labelLarge,
-                                        color = if (isSelected) StudioCyan else StudioTextPrimary
+                                        color = if (isSelected) StudioActiveOffWhite else StudioTextPrimary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
                                         text = "$rw × $rh px",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = StudioTextSecondary
+                                        color = if (isSelected) StudioLuxuryGold else StudioTextMuted,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -307,41 +377,47 @@ fun ExportBottomSheet(
                 }
             }
 
+            // Status Feedback Area (Exporting / Success + Share / Error)
             when (exportStatus) {
                 is ExportStatus.Exporting -> {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(StudioObsidian.copy(alpha = 0.72f))
+                            .border(1.dp, StudioGlassHairline, RoundedCornerShape(12.dp))
+                            .padding(vertical = 12.dp, horizontal = 14.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         CircularProgressIndicator(
-                            color = StudioAmber,
-                            strokeWidth = 2.5.dp,
-                            modifier = Modifier.size(22.dp)
+                            color = StudioLuxuryGold,
+                            strokeWidth = 2.2.dp,
+                            modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "Rendering $targetW×$targetH ${selectedFormat.label}…",
+                            text = "Encoding $targetW×$targetH ${selectedFormat.label}…",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = StudioTextPrimary
+                            color = StudioActiveOffWhite
                         )
                     }
                 }
 
                 is ExportStatus.Success -> {
                     Surface(
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(14.dp),
                         color = StudioSuccessGreen.copy(alpha = 0.14f),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(1.dp, StudioSuccessGreen.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                            .border(1.dp, StudioSuccessGreen.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
                     ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.CheckCircle,
@@ -349,22 +425,60 @@ fun ExportBottomSheet(
                                 tint = StudioSuccessGreen,
                                 modifier = Modifier.size(20.dp)
                             )
-                            Text(
-                                text = "Saved ${exportStatus.filename} (${exportStatus.width}×${exportStatus.height})",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = StudioTextPrimary
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = exportStatus.filename,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = StudioActiveOffWhite,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${exportStatus.destinationLabel} • ${exportStatus.width}×${exportStatus.height}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = StudioTextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (exportStatus.uri != null) {
+                                Button(
+                                    onClick = { onShareExported(exportStatus) },
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = StudioActiveOffWhite,
+                                        contentColor = StudioObsidian
+                                    ),
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                        .testTag("sheet_share_exported_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = stringResource(R.string.cd_share_exported_file),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = stringResource(R.string.action_share),
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
                         }
                     }
                 }
 
                 is ExportStatus.Error -> {
                     Surface(
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(12.dp),
                         color = StudioEraserCrimson.copy(alpha = 0.14f),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(1.dp, StudioEraserCrimson.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                            .border(1.dp, StudioEraserCrimson.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
                     ) {
                         Text(
                             text = exportStatus.message,
@@ -378,26 +492,37 @@ fun ExportBottomSheet(
                 ExportStatus.Idle -> Unit
             }
 
+            // Action Buttons: Save As… (SAF) + Primary Save (MediaStore)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 OutlinedButton(
                     onClick = { onExportWithFilePicker(currentOptions) },
-                    enabled = exportStatus !is ExportStatus.Exporting,
-                    shape = RoundedCornerShape(12.dp),
+                    enabled = !isExporting,
+                    shape = RoundedCornerShape(50),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SolidColor(StudioGlassHighlight)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = StudioSurfaceElevated.copy(alpha = 0.5f),
+                        contentColor = StudioActiveOffWhite
+                    ),
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(0.88f)
                         .height(48.dp)
                         .testTag("confirm_export_saf_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.FolderOpen,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save As…", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        text = "Save As…",
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
 
                 Button(
@@ -408,14 +533,14 @@ fun ExportBottomSheet(
                             onExportWithFilePicker(currentOptions)
                         }
                     },
-                    enabled = exportStatus !is ExportStatus.Exporting,
+                    enabled = !isExporting,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = StudioAmber,
-                        contentColor = StudioBackground
+                        containerColor = StudioActiveOffWhite,
+                        contentColor = StudioObsidian
                     ),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(50),
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(1.12f)
                         .height(48.dp)
                         .testTag("confirm_export_gallery_button")
                 ) {
@@ -425,9 +550,76 @@ fun ExportBottomSheet(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save to Photos", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        text = selectedFormat.defaultSaveLabel,
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun FormatOptionTile(
+    format: ExportFormat,
+    isSelected: Boolean,
+    enabled: Boolean,
+    showProIcon: Boolean = false,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val accentColor = if (format == ExportFormat.PDF) {
+        StudioLuxuryGold
+    } else {
+        StudioActiveOffWhite
+    }
+    Column(
+        modifier = modifier
+            .defaultMinSize(minHeight = 48.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (isSelected) accentColor.copy(alpha = 0.14f)
+                else StudioObsidian.copy(alpha = 0.68f)
+            )
+            .border(
+                width = if (isSelected) 1.3.dp else 1.dp,
+                color = if (isSelected) accentColor.copy(alpha = 0.8f) else StudioGlassHairline,
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 11.dp, vertical = 10.dp)
+            .testTag("format_${format.extension}")
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            if (showProIcon && format == ExportFormat.PDF) {
+                Icon(
+                    imageVector = Icons.Default.PictureAsPdf,
+                    contentDescription = null,
+                    tint = if (isSelected) accentColor else StudioTextSecondary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            Text(
+                text = format.label,
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = if (isSelected) accentColor else StudioActiveOffWhite,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = format.subtitle,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isSelected) StudioTextPrimary else StudioTextSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

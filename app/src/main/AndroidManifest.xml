@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -14,12 +16,62 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.LumaGrade"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Appear in Android Share sheet for images & RAW photos -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="image/*" />
+                <data android:mimeType="image/x-adobe-dng" />
+                <data android:mimeType="image/dng" />
+                <data android:mimeType="image/heic" />
+                <data android:mimeType="image/heif" />
+                <data android:mimeType="image/tiff" />
+                <data android:mimeType="image/webp" />
+                <data android:mimeType="image/bmp" />
+                <data android:mimeType="image/png" />
+                <data android:mimeType="image/jpeg" />
+                <data android:mimeType="image/x-canon-cr2" />
+                <data android:mimeType="image/x-nikon-nef" />
+                <data android:mimeType="image/x-sony-arw" />
+                <data android:mimeType="image/x-olympus-orf" />
+                <data android:mimeType="image/x-panasonic-rw2" />
+                <data android:mimeType="image/x-fuji-raf" />
+            </intent-filter>
+
+            <!-- Appear under "Edit in" and "Open with" menus for images & RAW photos -->
+            <intent-filter>
+                <action android:name="android.intent.action.EDIT" />
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="image/*" />
+                <data android:mimeType="image/x-adobe-dng" />
+                <data android:mimeType="image/dng" />
+                <data android:mimeType="image/heic" />
+                <data android:mimeType="image/heif" />
+                <data android:mimeType="image/tiff" />
+                <data android:mimeType="image/webp" />
+                <data android:mimeType="image/bmp" />
+                <data android:mimeType="image/png" />
+                <data android:mimeType="image/jpeg" />
+                <data android:mimeType="image/x-canon-cr2" />
+                <data android:mimeType="image/x-nikon-nef" />
+                <data android:mimeType="image/x-sony-arw" />
+                <data android:mimeType="image/x-olympus-orf" />
+                <data android:mimeType="image/x-panasonic-rw2" />
+                <data android:mimeType="image/x-fuji-raf" />
             </intent-filter>
         </activity>
     </application>

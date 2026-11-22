@@ -145,35 +145,41 @@ object LutImporter {
 
     suspend fun importFromUri(context: Context, uri: Uri): LutImportSummary =
         withContext(Dispatchers.IO) {
-            val displayName = ImageIoHelper.queryDisplayName(context, uri, "imported_lut")
-            val lowerName = displayName.lowercase(Locale.US)
-            val customDir = File(context.filesDir, CUSTOM_LUT_DIR).apply { mkdirs() }
+            try {
+                val displayName = ImageIoHelper.queryDisplayName(context, uri, "imported_lut")
+                val lowerName = displayName.lowercase(Locale.US)
+                val customDir = File(context.filesDir, CUSTOM_LUT_DIR).apply { mkdirs() }
 
-            val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytesLimited() }
-                ?: throw IllegalStateException("Cannot read selected file.")
+                val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytesLimited() }
+                    ?: throw IllegalStateException("Cannot read selected file.")
 
-            when {
-                lowerName.endsWith(".zip") || isZipHeader(rawBytes) -> {
-                    importZipBytes(rawBytes, customDir)
+                when {
+                    lowerName.endsWith(".zip") || isZipHeader(rawBytes) -> {
+                        importZipBytes(rawBytes, customDir)
+                    }
+                    lowerName.endsWith(".xmp") || looksLikeXml(rawBytes) -> {
+                        val lut = persistAndParseSingle(
+                            bytes = rawBytes,
+                            originalName = ensureExtension(displayName, ".xmp"),
+                            customDir = customDir,
+                            fallbackCategory = "Custom"
+                        )
+                        LutImportSummary(listOf(lut), emptyList())
+                    }
+                    else -> {
+                        val lut = persistAndParseSingle(
+                            bytes = rawBytes,
+                            originalName = ensureExtension(displayName, ".cube"),
+                            customDir = customDir,
+                            fallbackCategory = "Custom"
+                        )
+                        LutImportSummary(listOf(lut), emptyList())
+                    }
                 }
-                lowerName.endsWith(".xmp") || looksLikeXml(rawBytes) -> {
-                    val lut = persistAndParseSingle(
-                        bytes = rawBytes,
-                        originalName = ensureExtension(displayName, ".xmp"),
-                        customDir = customDir,
-                        fallbackCategory = "Custom"
-                    )
-                    LutImportSummary(listOf(lut), emptyList())
-                }
-                else -> {
-                    val lut = persistAndParseSingle(
-                        bytes = rawBytes,
-                        originalName = ensureExtension(displayName, ".cube"),
-                        customDir = customDir,
-                        fallbackCategory = "Custom"
-                    )
-                    LutImportSummary(listOf(lut), emptyList())
-                }
+            } catch (e: OutOfMemoryError) {
+                throw IllegalStateException("Selected LUT file is too large to import.", e)
+            } catch (e: SecurityException) {
+                throw IllegalStateException("Permission denied reading selected LUT file.", e)
             }
         }
 
@@ -239,8 +245,8 @@ object LutImporter {
                     when {
                         lowerBase.endsWith(".zip") -> {
                             if (depth < MAX_ZIP_DEPTH) {
-                                val nestedBytes = zis.readEntryBytesLimited()
                                 runCatching {
+                                    val nestedBytes = zis.readEntryBytesLimited()
                                     importZipBytesRecursive(
                                         zipBytes = nestedBytes,
                                         customDir = customDir,
@@ -256,8 +262,8 @@ object LutImporter {
                             }
                         }
                         lowerBase.endsWith(".cube") || lowerBase.endsWith(".xmp") -> {
-                            val entryBytes = zis.readEntryBytesLimited()
                             runCatching {
+                                val entryBytes = zis.readEntryBytesLimited()
                                 persistAndParseSingle(
                                     bytes = entryBytes,
                                     originalName = baseName,

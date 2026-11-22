@@ -43,6 +43,9 @@ object ColorGradingEngine {
         params: GradingParams,
         lut: CubeLut?
     ): HistogramData = withContext(Dispatchers.Default) {
+        if (histSource.isRecycled || histSource.width <= 0 || histSource.height <= 0) {
+            return@withContext emptyHistogram()
+        }
         val gradedThumb = processBitmapInternal(histSource, params, lut)
         try {
             computeHistogram(gradedThumb)
@@ -75,10 +78,11 @@ object ColorGradingEngine {
         source: Bitmap,
         currentParams: GradingParams = GradingParams()
     ): GradingParams = withContext(Dispatchers.Default) {
+        if (source.isRecycled) return@withContext currentParams
         val w = source.width
         val h = source.height
         val total = w * h
-        if (total <= 0) return@withContext currentParams
+        if (w <= 0 || h <= 0 || total <= 0) return@withContext currentParams
 
         val pixels = IntArray(total)
         source.getPixels(pixels, 0, w, 0, 0, w, h)
@@ -165,10 +169,11 @@ object ColorGradingEngine {
 
 
     suspend fun computeAutoWhiteBalance(source: Bitmap): Pair<Float, Float> = withContext(Dispatchers.Default) {
+        if (source.isRecycled) return@withContext 0f to 0f
         val w = source.width
         val h = source.height
         val total = w * h
-        if (total <= 0) return@withContext 0f to 0f
+        if (w <= 0 || h <= 0 || total <= 0) return@withContext 0f to 0f
 
         val pixels = IntArray(total)
         source.getPixels(pixels, 0, w, 0, 0, w, h)
@@ -218,6 +223,9 @@ object ColorGradingEngine {
         ny: Float,
         paramsForRenderedSample: GradingParams? = null
     ): EyedropperSample = withContext(Dispatchers.Default) {
+        if (source.isRecycled || source.width <= 0 || source.height <= 0) {
+            return@withContext EyedropperSample(0.5f, 0.5f, 0.5f, 0f, 0f, 0.5f, 0xFF808080L)
+        }
         val w = source.width.coerceAtLeast(1)
         val h = source.height.coerceAtLeast(1)
         val cx = (nx.coerceIn(0f, 1f) * (w - 1)).roundToInt().coerceIn(0, w - 1)
@@ -228,20 +236,32 @@ object ColorGradingEngine {
         val pw = (min(w - 1, cx + 3) - x0 + 1).coerceAtLeast(1)
         val ph = (min(h - 1, cy + 3) - y0 + 1).coerceAtLeast(1)
 
-        val patch = Bitmap.createBitmap(source, x0, y0, pw, ph)
-        val evaluatedPatch = if (paramsForRenderedSample != null) {
-            processBitmapInternal(
-                patch,
-                paramsForRenderedSample.copy(pointColor = PointColorData()),
-                null
-            )
-        } else {
-            patch
-        }
-
+        var patch: Bitmap? = null
+        var evaluatedPatch: Bitmap? = null
         val pxCount = pw * ph
         val pixels = IntArray(pxCount)
-        evaluatedPatch.getPixels(pixels, 0, pw, 0, 0, pw, ph)
+        try {
+            val localPatch = Bitmap.createBitmap(source, x0, y0, pw, ph)
+            patch = localPatch
+            val evaluated = if (paramsForRenderedSample != null) {
+                processBitmapInternal(
+                    localPatch,
+                    paramsForRenderedSample.copy(pointColor = PointColorData()),
+                    null
+                )
+            } else {
+                localPatch
+            }
+            evaluatedPatch = evaluated
+            evaluated.getPixels(pixels, 0, pw, 0, 0, pw, ph)
+        } finally {
+            evaluatedPatch?.let { ep ->
+                if (ep !== patch && ep !== source && !ep.isRecycled) ep.recycle()
+            }
+            patch?.let { p ->
+                if (p !== source && !p.isRecycled) p.recycle()
+            }
+        }
 
         var rSum = 0f
         var gSum = 0f
@@ -277,11 +297,14 @@ object ColorGradingEngine {
         params: GradingParams,
         lut: CubeLut?
     ): Bitmap = coroutineScope {
+        if (source.isRecycled || source.width <= 0 || source.height <= 0) {
+            throw IllegalStateException("Source image unavailable for grading.")
+        }
         val rawW = source.width
         val rawH = source.height
         val rawTotal = rawW * rawH
-        val rawPixels = IntArray(rawTotal)
-        source.getPixels(rawPixels, 0, rawW, 0, 0, rawW, rawH)
+        var rawPixels: IntArray? = IntArray(rawTotal)
+        source.getPixels(rawPixels!!, 0, rawW, 0, 0, rawW, rawH)
 
         val effectiveLut = if (lut != null && lut.sourceFormat != LutSourceFormat.XMP) lut else null
         val applyLut = effectiveLut != null && params.lutIntensity > 0.001f
@@ -303,7 +326,7 @@ object ColorGradingEngine {
         val total = width * height
 
         var oobMask: BooleanArray? = null
-        val srcPixels: IntArray = if (!hasGeomOrCrop) {
+        var srcPixelsRef: IntArray? = if (!hasGeomOrCrop) {
             rawPixels
         } else {
             val eff = GeometryMath.effectiveCropRect(rawW, rawH, crop)
@@ -316,6 +339,7 @@ object ColorGradingEngine {
             val m0 = m[0]; val m1 = m[1]; val m2 = m[2]
             val m3 = m[3]; val m4 = m[4]; val m5 = m[5]
             val m6 = m[6]; val m7 = m[7]; val m8 = m[8]
+            val localRaw = rawPixels!!
 
             for (y in 0 until height) {
                 val vy = (y + 0.5f) / height.toFloat()
@@ -347,12 +371,15 @@ object ColorGradingEngine {
                         mask[rowOff + x] = true
                         resampled[rowOff + x] = 0xFF0B0E14.toInt()
                     } else {
-                        resampled[rowOff + x] = sampleBilinear(rawPixels, rawW, rawH, su, sv)
+                        resampled[rowOff + x] = sampleBilinear(localRaw, rawW, rawH, su, sv)
                     }
                 }
             }
             oobMask = mask
             resampled
+        }
+        if (hasGeomOrCrop) {
+            rawPixels = null
         }
 
         val onlyGeomOrCrop = hasGeomOrCrop &&
@@ -367,11 +394,14 @@ object ColorGradingEngine {
             !applyLut
 
         if (onlyGeomOrCrop) {
+            val pixelsToWrite = srcPixelsRef!!
+            srcPixelsRef = null
             val out = createBitmap(width, height)
-            out.setPixels(srcPixels, 0, width, 0, 0, width, height)
+            out.setPixels(pixelsToWrite, 0, width, 0, 0, width, height)
             return@coroutineScope out
         }
 
+        val srcPixels = srcPixelsRef!!
         val dstPixels = IntArray(total)
 
         val hasOptics = params.lensDistortion != 0f || params.chromaticAberration > 0f
@@ -389,12 +419,17 @@ object ColorGradingEngine {
         val blurNormX = if (width > 0) (minDim / width.toFloat()) * (lensBlurNorm * 0.018f) else 0f
         val blurNormY = if (height > 0) (minDim / height.toFloat()) * (lensBlurNorm * 0.018f) else 0f
 
-        val expMult = 2.0.pow(params.exposure.toDouble()).toFloat()
-        val contrastFactor = 1f + (params.contrast / 100f) * 0.75f
-        val hiStrength = (params.highlights / 100f) * 0.55f
-        val shStrength = (params.shadows / 100f) * 0.55f
-        val blackLift = (params.blacks / 100f) * 0.12f
-        val whiteGain = 1f + (params.whites / 100f) * 0.15f
+        val expMult = 2.0.pow(params.exposure.toDouble() * 1.15).toFloat()
+        val contrastNorm = params.contrast / 100f
+        val contrastFactor = if (contrastNorm >= 0f) {
+            1f + contrastNorm * 1.25f
+        } else {
+            (1f + contrastNorm * 0.85f).coerceAtLeast(0.15f)
+        }
+        val hiStrength = (params.highlights / 100f) * 0.88f
+        val shStrength = (params.shadows / 100f) * 0.88f
+        val blackLift = (params.blacks / 100f) * 0.28f
+        val whiteGain = 1f + (params.whites / 100f) * 0.45f
         val hasParametric = params.parametricShadows != 0f ||
             params.parametricDarks != 0f ||
             params.parametricLights != 0f ||
@@ -402,12 +437,17 @@ object ColorGradingEngine {
 
         val tempNorm = params.temperature / 100f
         val tintNorm = params.tint / 100f
-        val rTempMult = 1f + tempNorm * 0.24f + tintNorm * 0.06f
-        val gTempMult = 1f + tempNorm * 0.03f - tintNorm * 0.14f
-        val bTempMult = 1f - tempNorm * 0.26f + tintNorm * 0.06f
+        val rTempMult = (1f + tempNorm * 0.44f + tintNorm * 0.16f).coerceAtLeast(0.15f)
+        val gTempMult = (1f + tempNorm * 0.06f - tintNorm * 0.34f).coerceAtLeast(0.15f)
+        val bTempMult = (1f - tempNorm * 0.46f + tintNorm * 0.16f).coerceAtLeast(0.15f)
 
         val dehazeNorm = params.dehaze / 100f
-        val satFactor = (1f + params.saturation / 100f).coerceAtLeast(0f)
+        val satNorm = params.saturation / 100f
+        val satFactor = if (satNorm >= 0f) {
+            1f + satNorm * 1.40f
+        } else {
+            (1f + satNorm).coerceAtLeast(0f)
+        }
         val vibranceNorm = params.vibrance / 100f
 
         val hasCurve = !params.toneCurve.isDefault
@@ -437,8 +477,8 @@ object ColorGradingEngine {
         val shBalanceMult = (1f - balanceNorm * 0.5f).coerceIn(0.25f, 1.75f)
         val hiBalanceMult = (1f + balanceNorm * 0.5f).coerceIn(0.25f, 1.75f)
 
-        val texAmount = (params.texture / 100f) * 0.55f
-        val clarityAmount = (params.clarity / 100f) * 0.65f
+        val texAmount = (params.texture / 100f) * 0.85f
+        val clarityAmount = (params.clarity / 100f) * 1.05f
         val sharpNorm = (params.sharpening / 150f).coerceIn(0f, 1f)
         val sharpRadius = params.sharpenRadius.coerceIn(0.5f, 3.0f)
         val sharpDetailNorm = (params.sharpenDetail / 100f).coerceIn(0f, 1f)
@@ -500,6 +540,7 @@ object ColorGradingEngine {
         val workerCount = if (total > 80_000) 4 else 1
         val chunkRows = (height + workerCount - 1) / workerCount
 
+        val resolvedOobMask = oobMask
         val jobs = (0 until workerCount).map { worker ->
             val yStart = worker * chunkRows
             val yEnd = min(height, yStart + chunkRows)
@@ -514,7 +555,7 @@ object ColorGradingEngine {
                     for (x in 0 until width) {
                         val u = (x + 0.5f) / width.toFloat()
                         val idx = rowBase + x
-                        if (oobMask != null && oobMask[idx]) {
+                        if (resolvedOobMask != null && resolvedOobMask[idx]) {
                             dstPixels[idx] = 0xFF0B0E14.toInt()
                             continue
                         }
@@ -760,7 +801,7 @@ object ColorGradingEngine {
                                     val thresh = sharpMaskNorm * 0.18f
                                     edgeMask = smoothRamp(thresh * 0.45f, max(thresh * 1.45f, 0.002f), edgeMag)
                                 }
-                                localDelta += sharpSignal * sharpNorm * 1.15f * edgeMask
+                                localDelta += sharpSignal * sharpNorm * 1.45f * edgeMask
                             }
 
                             if (clarityAmount != 0f) {
@@ -873,11 +914,11 @@ object ColorGradingEngine {
                             b = (b + activeProfile.shadowBlueBias * shCastW + activeProfile.highlightBlueBias * hiCastW).coerceIn(0f, 1f)
                         }
 
-                        // 1. Exposure + Temperature + Tint
-                        if (expMult != 1f) {
-                            r *= expMult
-                            g *= expMult
-                            b *= expMult
+                        // 1. Exposure (in linear light) + Temperature + Tint
+                        if (abs(expMult - 1f) > 0.0005f) {
+                            r = linearToSrgbChan(srgbToLinearChan(r) * expMult)
+                            g = linearToSrgbChan(srgbToLinearChan(g) * expMult)
+                            b = linearToSrgbChan(srgbToLinearChan(b) * expMult)
                         }
                         if (tempNorm != 0f || tintNorm != 0f) {
                             r *= rTempMult
@@ -890,23 +931,30 @@ object ColorGradingEngine {
 
                         // 2. Dehaze (atmospheric contrast & shadow deepening)
                         if (dehazeNorm != 0f) {
-                            val dContrast = 1f + dehazeNorm * 0.28f
-                            val dShift = -dehazeNorm * 0.06f
+                            val dContrast = (1f + dehazeNorm * 0.48f).coerceAtLeast(0.25f)
+                            val dShift = -dehazeNorm * 0.11f
                             r = ((r - 0.5f) * dContrast + 0.5f + dShift).coerceIn(0f, 1f)
                             g = ((g - 0.5f) * dContrast + 0.5f + dShift).coerceIn(0f, 1f)
                             b = ((b - 0.5f) * dContrast + 0.5f + dShift).coerceIn(0f, 1f)
                             val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                            val dSat = 1f + dehazeNorm * 0.22f
+                            val dSat = (1f + dehazeNorm * 0.36f).coerceAtLeast(0f)
                             r = (luma + (r - luma) * dSat).coerceIn(0f, 1f)
                             g = (luma + (g - luma) * dSat).coerceIn(0f, 1f)
                             b = (luma + (b - luma) * dSat).coerceIn(0f, 1f)
                         }
 
-                        // 3. Whites & Blacks
+                        // 3. Whites & Blacks (tonally tapered so negative Whites don't crush shadows)
                         if (blackLift != 0f || whiteGain != 1f) {
-                            r = (r * whiteGain + blackLift).coerceIn(0f, 1f)
-                            g = (g * whiteGain + blackLift).coerceIn(0f, 1f)
-                            b = (b * whiteGain + blackLift).coerceIn(0f, 1f)
+                            val wbLuma = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                            val hiMask = smoothRamp(0.28f, 0.96f, wbLuma)
+                            val shMask = 1f - smoothRamp(0.0f, 0.62f, wbLuma)
+                            val shoulderPush = (whiteGain - 1f) * 0.22f * hiMask * hiMask
+                            val wr = r + (r * whiteGain - r) * hiMask + shoulderPush
+                            val wg = g + (g * whiteGain - g) * hiMask + shoulderPush
+                            val wb = b + (b * whiteGain - b) * hiMask + shoulderPush
+                            r = (wr + blackLift * shMask).coerceIn(0f, 1f)
+                            g = (wg + blackLift * shMask).coerceIn(0f, 1f)
+                            b = (wb + blackLift * shMask).coerceIn(0f, 1f)
                         }
 
                         // 4. Highlights, Shadows & Parametric tones
@@ -914,12 +962,12 @@ object ColorGradingEngine {
                             val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
                             var delta = 0f
                             if (shStrength != 0f) {
-                                val shT = ((0.55f - luma) / 0.55f).coerceIn(0f, 1f)
-                                delta += shStrength * (shT * shT * (3f - 2f * shT)) * 0.5f
+                                val shT = ((0.64f - luma) / 0.64f).coerceIn(0f, 1f)
+                                delta += shStrength * (shT * shT * (3f - 2f * shT)) * 0.56f
                             }
                             if (hiStrength != 0f) {
-                                val hiT = ((luma - 0.45f) / 0.55f).coerceIn(0f, 1f)
-                                delta += hiStrength * (hiT * hiT * (3f - 2f * hiT)) * 0.5f
+                                val hiT = ((luma - 0.36f) / 0.64f).coerceIn(0f, 1f)
+                                delta += hiStrength * (hiT * hiT * (3f - 2f * hiT)) * 0.56f
                             }
                             if (hasParametric) {
                                 delta += (
@@ -927,7 +975,7 @@ object ColorGradingEngine {
                                         (params.parametricDarks / 100f) * bandWeight(luma, 0.35f, 0.26f) +
                                         (params.parametricLights / 100f) * bandWeight(luma, 0.65f, 0.26f) +
                                         (params.parametricHighlights / 100f) * bandWeight(luma, 0.88f, 0.28f)
-                                    ) * 0.18f
+                                    ) * 0.22f
                             }
                             if (delta != 0f) {
                                 r = (r + delta).coerceIn(0f, 1f)
@@ -955,14 +1003,26 @@ object ColorGradingEngine {
                             if (blueCurveLut != null) b = sampleCurveLut(blueCurveLut, b)
                         }
 
-                        // 7. RGB Primary Calibration
+                        // 7. RGB Primary Calibration (row-normalized to preserve neutral grays)
                         if (hasCal) {
                             val rShift = calRedHue * 0.18f
                             val gShift = calGreenHue * 0.18f
                             val bShift = calBlueHue * 0.18f
-                            val nr = (r * (1f - abs(rShift) * 0.25f) + g * max(0f, -gShift) + b * max(0f, bShift))
-                            val ng = (g * (1f - abs(gShift) * 0.25f) + r * max(0f, rShift) + b * max(0f, -bShift))
-                            val nb = (b * (1f - abs(bShift) * 0.25f) + r * max(0f, -rShift) + g * max(0f, gShift))
+                            val r00 = 1f - abs(rShift) * 0.25f
+                            val r01 = max(0f, -gShift)
+                            val r02 = max(0f, bShift)
+                            val nr = (r * r00 + g * r01 + b * r02) / max(r00 + r01 + r02, 0.001f)
+
+                            val g10 = max(0f, rShift)
+                            val g11 = 1f - abs(gShift) * 0.25f
+                            val g12 = max(0f, -bShift)
+                            val ng = (r * g10 + g * g11 + b * g12) / max(g10 + g11 + g12, 0.001f)
+
+                            val b20 = max(0f, -rShift)
+                            val b21 = max(0f, gShift)
+                            val b22 = 1f - abs(bShift) * 0.25f
+                            val nb = (r * b20 + g * b21 + b * b22) / max(b20 + b21 + b22, 0.001f)
+
                             val luma = 0.2126f * nr + 0.7152f * ng + 0.0722f * nb
                             r = (luma + (nr - luma) * calRedSat).coerceIn(0f, 1f)
                             g = (luma + (ng - luma) * calGreenSat).coerceIn(0f, 1f)
@@ -1017,7 +1077,7 @@ object ColorGradingEngine {
                                 val maxC = max(r, max(g, b))
                                 val minC = min(r, min(g, b))
                                 val curSat = maxC - minC
-                                val vibMult = 1f + vibranceNorm * (1f - curSat) * 0.85f
+                                val vibMult = (1f + vibranceNorm * (1f - curSat * 0.75f) * 1.35f).coerceAtLeast(0f)
                                 val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
                                 r = (luma + (r - luma) * vibMult).coerceIn(0f, 1f)
                                 g = (luma + (g - luma) * vibMult).coerceIn(0f, 1f)
@@ -1073,26 +1133,30 @@ object ColorGradingEngine {
                                 val mw = evaluateLocalMaskWeight(lm, u, v, outputAspect)
                                 if (mw <= 0.001f) continue
                                 if (abs(lm.exposure) > 0.001f) {
-                                    val em = 2.0.pow((lm.exposure * mw).toDouble()).toFloat()
-                                    r = (r * em).coerceIn(0f, 1f)
-                                    g = (g * em).coerceIn(0f, 1f)
-                                    b = (b * em).coerceIn(0f, 1f)
+                                    val em = 2.0.pow((lm.exposure * 1.15f * mw).toDouble()).toFloat()
+                                    r = linearToSrgbChan(srgbToLinearChan(r) * em)
+                                    g = linearToSrgbChan(srgbToLinearChan(g) * em)
+                                    b = linearToSrgbChan(srgbToLinearChan(b) * em)
                                 }
                                 if (abs(lm.warmth) > 0.01f) {
                                     val wn = (lm.warmth / 100f) * mw
-                                    r = (r * (1f + wn * 0.24f)).coerceIn(0f, 1f)
-                                    g = (g * (1f + wn * 0.03f)).coerceIn(0f, 1f)
-                                    b = (b * (1f - wn * 0.26f)).coerceIn(0f, 1f)
+                                    r = (r * (1f + wn * 0.44f).coerceAtLeast(0.15f)).coerceIn(0f, 1f)
+                                    g = (g * (1f + wn * 0.06f).coerceAtLeast(0.15f)).coerceIn(0f, 1f)
+                                    b = (b * (1f - wn * 0.46f).coerceAtLeast(0.15f)).coerceIn(0f, 1f)
                                 }
                                 if (abs(lm.contrast) > 0.01f) {
-                                    val cf = 1f + (lm.contrast / 100f) * 0.75f * mw
+                                    val cn = lm.contrast / 100f
+                                    val cScale = if (cn >= 0f) 1.25f else 0.85f
+                                    val cf = (1f + cn * cScale * mw).coerceAtLeast(0.15f)
                                     r = ((r - 0.5f) * cf + 0.5f).coerceIn(0f, 1f)
                                     g = ((g - 0.5f) * cf + 0.5f).coerceIn(0f, 1f)
                                     b = ((b - 0.5f) * cf + 0.5f).coerceIn(0f, 1f)
                                 }
                                 if (abs(lm.saturation) > 0.01f) {
                                     val ml = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                                    val sf = (1f + (lm.saturation / 100f) * mw).coerceAtLeast(0f)
+                                    val sn = lm.saturation / 100f
+                                    val satScale = if (sn >= 0f) 1.40f else 1f
+                                    val sf = (1f + sn * satScale * mw).coerceAtLeast(0f)
                                     r = (ml + (r - ml) * sf).coerceIn(0f, 1f)
                                     g = (ml + (g - ml) * sf).coerceIn(0f, 1f)
                                     b = (ml + (b - ml) * sf).coerceIn(0f, 1f)
@@ -1106,7 +1170,7 @@ object ColorGradingEngine {
                                     val lU = pixelLuma(sampleBilinear(srcPixels, width, height, u, (v - sOffY).coerceIn(0f, 1f)))
                                     val lD = pixelLuma(sampleBilinear(srcPixels, width, height, u, (v + sOffY).coerceIn(0f, 1f)))
                                     val avgNL = (lL + lR + lU + lD) * 0.25f
-                                    val sDelta = (lC - avgNL) * (lm.sharpness / 100f) * 1.35f * mw
+                                    val sDelta = (lC - avgNL) * (lm.sharpness / 100f) * 1.55f * mw
                                     r = (r + sDelta).coerceIn(0f, 1f)
                                     g = (g + sDelta).coerceIn(0f, 1f)
                                     b = (b + sDelta).coerceIn(0f, 1f)
@@ -1220,6 +1284,9 @@ object ColorGradingEngine {
             }
         }
         jobs.awaitAll()
+        rawPixels = null
+        srcPixelsRef = null
+        oobMask = null
 
         val out = createBitmap(width, height)
         out.setPixels(dstPixels, 0, width, 0, 0, width, height)
@@ -1301,6 +1368,25 @@ object ColorGradingEngine {
     private fun smoothRamp(edge0: Float, edge1: Float, x: Float): Float {
         val t = ((x - edge0) / (edge1 - edge0).coerceAtLeast(1e-4f)).coerceIn(0f, 1f)
         return t * t * (3f - 2f * t)
+    }
+
+    private fun srgbToLinearChan(c: Float): Float {
+        val cc = c.coerceIn(0f, 1f)
+        return if (cc <= 0.04045f) {
+            cc / 12.92f
+        } else {
+            ((cc + 0.055f) / 1.055f).pow(2.4f)
+        }
+    }
+
+    private fun linearToSrgbChan(c: Float): Float {
+        val cc = c.coerceAtLeast(0f)
+        val s = if (cc <= 0.0031308f) {
+            cc * 12.92f
+        } else {
+            1.055f * cc.pow(1f / 2.4f) - 0.055f
+        }
+        return s.coerceIn(0f, 1f)
     }
 
     private fun sampleCurveLut(lut: FloatArray, v: Float): Float {
@@ -1431,7 +1517,15 @@ object ColorGradingEngine {
         return floatArrayOf(r - avg, g - avg, b - avg)
     }
 
+    private fun emptyHistogram(): HistogramData = HistogramData(
+        luma = FloatArray(HIST_BINS),
+        red = FloatArray(HIST_BINS),
+        green = FloatArray(HIST_BINS),
+        blue = FloatArray(HIST_BINS)
+    )
+
     private fun computeHistogram(bitmap: Bitmap): HistogramData {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return emptyHistogram()
         val w = bitmap.width
         val h = bitmap.height
         val total = w * h

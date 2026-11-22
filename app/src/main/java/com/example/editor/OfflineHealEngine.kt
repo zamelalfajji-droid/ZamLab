@@ -55,8 +55,12 @@ object OfflineHealEngine {
         sourceBitmap: Bitmap,
         stroke: HealStroke
     ): Bitmap {
+        if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
+            throw IllegalStateException("Source image unavailable for healing.")
+        }
         if (stroke.points.isEmpty()) {
             return sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                ?: throw IllegalStateException("Unable to copy source image.")
         }
         return when (stroke.mode) {
             HealMode.SPOT_HEAL -> LocalInpaintingEngine.inpaint(sourceBitmap, listOf(stroke))
@@ -69,6 +73,9 @@ object OfflineHealEngine {
         originalSourceBitmap: Bitmap,
         strokes: List<HealStroke>
     ): Bitmap {
+        if (originalSourceBitmap.isRecycled || originalSourceBitmap.width <= 0 || originalSourceBitmap.height <= 0) {
+            throw IllegalStateException("Source image unavailable for healing.")
+        }
         var current = originalSourceBitmap
         for (stroke in strokes) {
             val next = applyStroke(current, stroke)
@@ -84,10 +91,14 @@ object OfflineHealEngine {
         sourceBitmap: Bitmap,
         stroke: HealStroke
     ): Bitmap {
-        val cloneAnchor = stroke.cloneSourceNorm ?: return sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+        val cloneAnchor = stroke.cloneSourceNorm ?: return (sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            ?: throw IllegalStateException("Unable to copy source image."))
         val w = sourceBitmap.width
         val h = sourceBitmap.height
-        if (w <= 0 || h <= 0) return sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+        if (w <= 0 || h <= 0) {
+            return sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                ?: throw IllegalStateException("Unable to copy source image.")
+        }
 
         val alphaMask = LocalInpaintingEngine.rasterizeAlphaMask(
             width = w,

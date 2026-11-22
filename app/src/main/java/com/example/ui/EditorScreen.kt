@@ -1,13 +1,29 @@
 package com.example.ui
 
+import android.content.Context
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,6 +31,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,20 +42,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.automirrored.outlined.ViewList
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CropRotate
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FilterVintage
 import androidx.compose.material.icons.filled.Gradient
 import androidx.compose.material.icons.filled.Healing
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VerticalSplit
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CropRotate
 import androidx.compose.material.icons.outlined.FilterVintage
 import androidx.compose.material.icons.outlined.Gradient
@@ -46,7 +76,6 @@ import androidx.compose.material.icons.outlined.Healing
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -55,24 +84,32 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,9 +121,15 @@ import com.example.editor.EditorUiState
 import com.example.editor.EditorViewModel
 import com.example.editor.ExportFormat
 import com.example.editor.ExportOptions
+import com.example.editor.ExportStatus
+import com.example.editor.HslBandAdjustment
 import com.example.editor.ImageIoHelper
+import com.example.editor.PhotoFormatInfo
 import com.example.editor.StudioTab
 import com.example.ui.components.AdjustPanel
+import com.example.ui.components.AiCreatePanel
+import com.example.ui.components.AiModelManagerSheet
+import com.example.ui.components.AllParametersPanel
 import com.example.ui.components.CropPanel
 import com.example.ui.components.ExportBottomSheet
 import com.example.ui.components.HealPanel
@@ -95,23 +138,26 @@ import com.example.ui.components.MaskPanel
 import com.example.ui.components.PhotoViewport
 import com.example.ui.components.ProfileBrowserSheet
 import com.example.ui.components.ProfileMenuSheet
-import com.example.ui.theme.StudioAmber
+import com.example.ui.theme.StudioActiveOffWhite
 import com.example.ui.theme.StudioBackground
-import com.example.ui.theme.StudioBorderSubtle
-import com.example.ui.theme.StudioCyan
-import com.example.ui.theme.StudioEraserCrimson
+import com.example.ui.theme.StudioGlassHairline
+import com.example.ui.theme.StudioGlassHighlight
+import com.example.ui.theme.StudioGlassSurface
 import com.example.ui.theme.StudioLuxuryGold
 import com.example.ui.theme.StudioObsidian
-import com.example.ui.theme.StudioSurface
+import com.example.ui.theme.StudioSuccessGreen
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun EditorScreen(
     viewModel: EditorViewModel = viewModel()
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -121,8 +167,9 @@ fun EditorScreen(
     var isViewportZoomed by remember { mutableStateOf(false) }
     var pendingSafOptions by remember { mutableStateOf(ExportOptions()) }
 
+    // Multi-format & RAW document picker (DNG, CR2, NEF, ARW, ORF, RW2, RAF, HEIC/HEIF, TIFF, WebP, BMP, PNG, JPG)
     val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
+        contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             uri?.let { viewModel.openPhotoFromUri(it) }
         }
@@ -132,6 +179,13 @@ fun EditorScreen(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             uri?.let { viewModel.importCubeLutFromUri(it) }
+        }
+    )
+
+    val aiZipPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri ->
+            uri?.let { viewModel.importLocalAiModelZip(it) }
         }
     )
 
@@ -156,6 +210,13 @@ fun EditorScreen(
         }
     )
 
+    val createPdfLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/pdf"),
+        onResult = { uri ->
+            uri?.let { viewModel.exportToDocumentUri(it, pendingSafOptions) }
+        }
+    )
+
     LaunchedEffect(uiState.statusBannerMessage) {
         val msg = uiState.statusBannerMessage
         if (msg != null) {
@@ -164,15 +225,51 @@ fun EditorScreen(
         }
     }
 
+    // Close the export sheet right after export succeeds and auto-hide the confirmation toast after 7 seconds
+    LaunchedEffect(uiState.exportConfirmationToast) {
+        val exported = uiState.exportConfirmationToast
+        if (exported != null) {
+            if (showExportSheet) {
+                showExportSheet = false
+                viewModel.dismissExportStatus()
+            }
+            delay(7000L)
+            viewModel.dismissExportConfirmationToast()
+        }
+    }
+
+    val shareExportedAction: (ExportStatus.Success) -> Unit = { exported ->
+        launchShareExportedFile(context, exported)
+    }
+
     val openPhotoAction = {
-        photoPickerLauncher.launch(
-            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-        )
+        photoPickerLauncher.launch(ImageIoHelper.SUPPORTED_IMPORT_MIME_TYPES)
     }
 
     val importLutAction = {
         lutPickerLauncher.launch(arrayOf("*/*"))
     }
+
+    LaunchedEffect(uiState.activeTab) {
+        if (uiState.activeTab == StudioTab.AI) {
+            viewModel.refreshAiModelStatus()
+        }
+    }
+
+    val canReset = !uiState.gradingParams.isDefault ||
+        uiState.selectedLutId != null ||
+        uiState.selectedUserPresetId != null ||
+        isViewportZoomed
+
+    val isTouchAdjustPillVisible = uiState.isTouchAdjustEnabled &&
+        uiState.touchAdjustSelectedBand != null &&
+        uiState.activeTab != StudioTab.CROP &&
+        uiState.activeTab != StudioTab.HEAL &&
+        !uiState.isComparingOriginal
+
+    val canShowTouchAdjust = uiState.activeTab != StudioTab.CROP &&
+        uiState.activeTab != StudioTab.HEAL &&
+        uiState.activeEyedropperMode == com.example.editor.EyedropperMode.NONE
 
     Box(
         modifier = Modifier
@@ -181,204 +278,261 @@ fun EditorScreen(
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val isWideLayout = maxWidth >= 720.dp
+            val activeTexture = uiState.activePreviewTexture
 
-            Column(modifier = Modifier.fillMaxSize()) {
-                StudioTopBar(
-                    fullWidth = uiState.fullWidth,
-                    effectiveOutputWidth = uiState.effectiveOutputWidth,
-                    effectiveOutputHeight = uiState.effectiveOutputHeight,
-                    onOpenPhoto = openPhotoAction,
-                    onOpenExport = { showExportSheet = true }
-                )
-
-                HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-
-                val activeTexture = uiState.activePreviewTexture
-
-                if (isWideLayout) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .navigationBarsPadding()
-                    ) {
-                        PhotoViewport(
-                            previewBitmap = activeTexture,
-                            fullWidth = uiState.fullWidth,
-                            fullHeight = uiState.fullHeight,
-                            gradingParams = uiState.gradingParams,
-                            activeLut = uiState.activeLut,
-                            activeTab = uiState.activeTab,
-                            isComparingOriginal = uiState.isComparingOriginal,
-                            isSplitCompareEnabled = uiState.isSplitCompareEnabled,
-                            splitCompareRatio = uiState.splitCompareRatio,
-                            showHistogram = uiState.showHistogram,
-                            histogram = uiState.histogram,
-                            healMode = uiState.healMode,
-                            healStrokes = uiState.healStrokes,
-                            activeHealStroke = uiState.activeHealStroke,
-                            healBrushRadiusNorm = uiState.healBrushRadiusNorm,
-                            healFeather = uiState.healFeather,
-                            showHealMask = uiState.showHealMask,
-                            cloneSourcePoint = uiState.cloneSourcePoint,
-                            isPickingCloneSource = uiState.isPickingCloneSource,
-                            isHealProcessing = uiState.isHealProcessing,
-                            activeEyedropperMode = uiState.activeEyedropperMode,
-                            cropOverlayMode = uiState.cropOverlayMode,
-                            activeMask = uiState.activeMask,
-                            showMaskOverlay = uiState.showMaskOverlay,
-                            viewportResetToken = uiState.viewportResetToken,
-                            onZoomChanged = { isViewportZoomed = it },
-                            onCompareChanged = viewModel::setComparingOriginal,
-                            onSplitRatioChange = viewModel::setSplitCompareRatio,
-                            onToggleHistogram = viewModel::toggleHistogram,
-                            onStartHealStroke = viewModel::startHealStroke,
-                            onAppendHealStroke = viewModel::appendHealStroke,
-                            onFinishHealStroke = viewModel::finishHealStroke,
-                            onCancelHealStroke = viewModel::cancelHealStroke,
-                            onSetCloneSource = viewModel::setCloneSourcePoint,
-                            onEyedropperPick = viewModel::pickColorFromCanvas,
-                            onCancelEyedropper = viewModel::cancelEyedropper,
-                            onCropRectChange = viewModel::updateCropRect,
-                            onCropDragStateChanged = viewModel::setSliderDragging,
-                            onUpdateMask = viewModel::updateMask,
-                            onMaskDragStateChanged = viewModel::setSliderDragging,
-                            modifier = Modifier
-                                .weight(1.4f)
-                                .fillMaxHeight()
-                        )
-
-                        VerticalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-
-                        Column(
-                            modifier = Modifier
-                                .width(360.dp)
-                                .fillMaxHeight()
-                                .background(StudioSurface)
-                        ) {
-                            StudioHistoryBar(
-                                canUndo = uiState.canUndo,
-                                canRedo = uiState.canRedo,
-                                undoLabel = uiState.undoLabel,
-                                isSplitCompareEnabled = uiState.isSplitCompareEnabled,
-                                isComparingOriginal = uiState.isComparingOriginal,
-                                canReset = !uiState.gradingParams.isDefault || uiState.selectedLutId != null || uiState.selectedUserPresetId != null || isViewportZoomed,
-                                onUndo = viewModel::undo,
-                                onRedo = viewModel::redo,
-                                onCompareChanged = viewModel::setComparingOriginal,
-                                onToggleSplitCompare = viewModel::toggleSplitCompare,
-                                onResetAll = viewModel::resetAllAdjustments
-                            )
-                            HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-                            StudioTabBar(
-                                activeTab = uiState.activeTab,
-                                onSelectTab = viewModel::selectTab
-                            )
-                            HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth()
-                            ) {
-                                ActiveToolPanel(
-                                    uiState = uiState,
-                                    viewModel = viewModel,
-                                    onImportLut = importLutAction,
-                                    onOpenProfileMenu = { showProfileMenu = true },
-                                    onOpenProfileBrowser = { showProfileBrowser = true }
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    PhotoViewport(
-                        previewBitmap = activeTexture,
-                        fullWidth = uiState.fullWidth,
-                        fullHeight = uiState.fullHeight,
-                        gradingParams = uiState.gradingParams,
-                        activeLut = uiState.activeLut,
-                        activeTab = uiState.activeTab,
-                        isComparingOriginal = uiState.isComparingOriginal,
-                        isSplitCompareEnabled = uiState.isSplitCompareEnabled,
-                        splitCompareRatio = uiState.splitCompareRatio,
-                        showHistogram = uiState.showHistogram,
-                        histogram = uiState.histogram,
-                        healMode = uiState.healMode,
-                        healStrokes = uiState.healStrokes,
-                        activeHealStroke = uiState.activeHealStroke,
-                        healBrushRadiusNorm = uiState.healBrushRadiusNorm,
-                        healFeather = uiState.healFeather,
-                        showHealMask = uiState.showHealMask,
-                        cloneSourcePoint = uiState.cloneSourcePoint,
-                        isPickingCloneSource = uiState.isPickingCloneSource,
-                        isHealProcessing = uiState.isHealProcessing,
-                        activeEyedropperMode = uiState.activeEyedropperMode,
-                        cropOverlayMode = uiState.cropOverlayMode,
-                        activeMask = uiState.activeMask,
-                        showMaskOverlay = uiState.showMaskOverlay,
-                        viewportResetToken = uiState.viewportResetToken,
+            if (isWideLayout) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ImmersiveCanvasStage(
+                        uiState = uiState,
+                        activeTexture = activeTexture,
+                        canReset = canReset,
+                        canShowTouchAdjust = canShowTouchAdjust,
+                        isTouchAdjustPillVisible = isTouchAdjustPillVisible,
+                        viewModel = viewModel,
                         onZoomChanged = { isViewportZoomed = it },
-                        onCompareChanged = viewModel::setComparingOriginal,
-                        onSplitRatioChange = viewModel::setSplitCompareRatio,
-                        onToggleHistogram = viewModel::toggleHistogram,
-                        onStartHealStroke = viewModel::startHealStroke,
-                        onAppendHealStroke = viewModel::appendHealStroke,
-                        onFinishHealStroke = viewModel::finishHealStroke,
-                        onCancelHealStroke = viewModel::cancelHealStroke,
-                        onSetCloneSource = viewModel::setCloneSourcePoint,
-                        onEyedropperPick = viewModel::pickColorFromCanvas,
-                        onCancelEyedropper = viewModel::cancelEyedropper,
-                        onCropRectChange = viewModel::updateCropRect,
-                        onCropDragStateChanged = viewModel::setSliderDragging,
-                        onUpdateMask = viewModel::updateMask,
-                        onMaskDragStateChanged = viewModel::setSliderDragging,
+                        onOpenPhoto = openPhotoAction,
+                        onOpenExport = { showExportSheet = true },
+                        modifier = Modifier
+                            .weight(1.48f)
+                            .fillMaxHeight()
+                    )
+
+                    Column(
+                        modifier = Modifier
+                            .width(360.dp)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(StudioGlassSurface)
+                            .border(1.dp, StudioGlassHairline, RoundedCornerShape(16.dp))
+                            .padding(top = 8.dp, bottom = 10.dp),
+                        verticalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                        ) {
+                            ActiveToolPanel(
+                                uiState = uiState,
+                                viewModel = viewModel,
+                                onImportLut = importLutAction,
+                                onOpenProfileMenu = { showProfileMenu = true }
+                            )
+                        }
+
+                        FloatingCapsuleNavDock(
+                            uiState = uiState,
+                            onSelectTab = viewModel::selectTab,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            } else {
+                var allPanelFraction by remember { mutableFloatStateOf(0.48f) }
+                var isDraggingAllHandle by remember { mutableStateOf(false) }
+                val animatedAllFraction by animateFloatAsState(
+                    targetValue = allPanelFraction,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMedium
+                    ),
+                    label = "all_panel_split_fraction"
+                )
+                val activeAllFraction = if (isDraggingAllHandle) allPanelFraction else animatedAllFraction
+                val haptic = LocalHapticFeedback.current
+                val density = LocalDensity.current
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                ) {
+                    // Adaptive Split Workspace above the floating bottom navigation capsule
+                    BoxWithConstraints(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                    )
-
-                    Surface(
-                        color = StudioSurface,
-                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .navigationBarsPadding()
-                        ) {
-                            HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-                            StudioHistoryBar(
-                                canUndo = uiState.canUndo,
-                                canRedo = uiState.canRedo,
-                                undoLabel = uiState.undoLabel,
-                                isSplitCompareEnabled = uiState.isSplitCompareEnabled,
-                                isComparingOriginal = uiState.isComparingOriginal,
-                                canReset = !uiState.gradingParams.isDefault || uiState.selectedLutId != null || uiState.selectedUserPresetId != null || isViewportZoomed,
-                                onUndo = viewModel::undo,
-                                onRedo = viewModel::redo,
-                                onCompareChanged = viewModel::setComparingOriginal,
-                                onToggleSplitCompare = viewModel::toggleSplitCompare,
-                                onResetAll = viewModel::resetAllAdjustments
+                        val workspaceHeight = maxHeight
+                        val workspaceHeightPx = with(density) { workspaceHeight.toPx() }.coerceAtLeast(1f)
+                        val isAllTab = uiState.activeTab == StudioTab.ALL
+
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            // 1. Immersive Photo Canvas (>=50% height in All, ~68%+ in Adjust)
+                            ImmersiveCanvasStage(
+                                uiState = uiState,
+                                activeTexture = activeTexture,
+                                canReset = canReset,
+                                canShowTouchAdjust = canShowTouchAdjust,
+                                isTouchAdjustPillVisible = isTouchAdjustPillVisible,
+                                viewModel = viewModel,
+                                onZoomChanged = { isViewportZoomed = it },
+                                onOpenPhoto = openPhotoAction,
+                                onOpenExport = { showExportSheet = true },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 4.dp)
                             )
-                            HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
+
+                            // 2. Active Tool Panel (bounded <=50% workspaceHeight so canvas always keeps >=50% height)
+                            val maxToolPanelHeight = (workspaceHeight * 0.50f).coerceAtLeast(156.dp)
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(min = 230.dp, max = 310.dp)
+                                    .animateContentSize(
+                                        animationSpec = if (isDraggingAllHandle) {
+                                            snap()
+                                        } else {
+                                            spring(
+                                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                                stiffness = Spring.StiffnessMediumLow
+                                            )
+                                        }
+                                    )
                             ) {
-                                ActiveToolPanel(
-                                    uiState = uiState,
-                                    viewModel = viewModel,
-                                    onImportLut = importLutAction,
-                                    onOpenProfileMenu = { showProfileMenu = true },
-                                    onOpenProfileBrowser = { showProfileBrowser = true }
-                                )
+                                if (isAllTab) {
+                                    val minAllHeight = minOf(180.dp, maxToolPanelHeight)
+                                    val panelHeight = (workspaceHeight * activeAllFraction)
+                                        .coerceIn(minAllHeight, maxToolPanelHeight)
+                                    val sheetShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
+                                    val dragHandleCd = stringResource(R.string.cd_drag_resize_panel)
+
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(panelHeight)
+                                            .padding(horizontal = 8.dp)
+                                            .clip(sheetShape)
+                                            .background(StudioGlassSurface)
+                                            .border(1.dp, StudioGlassHairline, sheetShape)
+                                            .testTag("all_adaptive_sheet")
+                                    ) {
+                                        // Frosted-glass drag handle bar (48dp touch target: drag to resize, tap to cycle height)
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(48.dp)
+                                                .semantics { contentDescription = dragHandleCd }
+                                                .clickable {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    allPanelFraction = when {
+                                                        allPanelFraction < 0.38f -> 0.42f
+                                                        allPanelFraction < 0.46f -> 0.48f
+                                                        else -> 0.32f
+                                                    }
+                                                }
+                                                .pointerInput(workspaceHeightPx) {
+                                                    detectVerticalDragGestures(
+                                                        onDragStart = { isDraggingAllHandle = true },
+                                                        onVerticalDrag = { change, dragAmount ->
+                                                            change.consume()
+                                                            val deltaFraction = -dragAmount / workspaceHeightPx
+                                                            allPanelFraction = (allPanelFraction + deltaFraction)
+                                                                .coerceIn(0.28f, 0.50f)
+                                                        },
+                                                        onDragEnd = {
+                                                            isDraggingAllHandle = false
+                                                            // Soft magnetic detent near balanced 48% split
+                                                            if (kotlin.math.abs(allPanelFraction - 0.48f) < 0.03f) {
+                                                                allPanelFraction = 0.48f
+                                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                            }
+                                                        },
+                                                        onDragCancel = { isDraggingAllHandle = false }
+                                                    )
+                                                }
+                                                .testTag("all_panel_drag_handle"),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(if (isDraggingAllHandle) 48.dp else 38.dp)
+                                                    .height(4.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        if (isDraggingAllHandle) {
+                                                            StudioLuxuryGold
+                                                        } else {
+                                                            Color.White.copy(alpha = 0.24f)
+                                                        }
+                                                    )
+                                            )
+                                        }
+
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth()
+                                        ) {
+                                            ActiveToolPanel(
+                                                uiState = uiState,
+                                                viewModel = viewModel,
+                                                onImportLut = importLutAction,
+                                                onOpenProfileMenu = { showProfileMenu = true }
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    val toolPanelModifier = when (uiState.activeTab) {
+                                        StudioTab.ADJUST -> Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = maxToolPanelHeight)
+                                        StudioTab.AI -> Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = maxToolPanelHeight)
+                                            .padding(horizontal = 8.dp)
+                                        StudioTab.CROP -> Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(
+                                                min = minOf(190.dp, maxToolPanelHeight),
+                                                max = minOf(236.dp, maxToolPanelHeight)
+                                            )
+                                        else -> Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(
+                                                min = minOf(168.dp, maxToolPanelHeight),
+                                                max = minOf(216.dp, maxToolPanelHeight)
+                                            )
+                                    }
+
+                                    Box(modifier = toolPanelModifier) {
+                                        ActiveToolPanel(
+                                            uiState = uiState,
+                                            viewModel = viewModel,
+                                            onImportLut = importLutAction,
+                                            onOpenProfileMenu = { showProfileMenu = true }
+                                        )
+                                    }
+                                }
                             }
-                            HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-                            StudioTabBar(
-                                activeTab = uiState.activeTab,
-                                onSelectTab = viewModel::selectTab
-                            )
                         }
+                    }
+
+                    // 3. Floating Frosted-Glass Capsule Navigation Dock
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        FloatingCapsuleNavDock(
+                            uiState = uiState,
+                            onSelectTab = viewModel::selectTab,
+                            modifier = Modifier
+                                .widthIn(max = 500.dp)
+                                .fillMaxWidth()
+                        )
                     }
                 }
             }
@@ -389,14 +543,34 @@ fun EditorScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 60.dp, start = 16.dp, end = 16.dp)
+                .padding(top = 66.dp, start = 16.dp, end = 16.dp)
         ) { data ->
             Snackbar(
                 snackbarData = data,
                 containerColor = StudioSurfaceElevated,
                 contentColor = StudioTextPrimary,
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(14.dp)
             )
+        }
+
+        // Frosted-Glass Export Confirmation Toast with saved filename & one-tap Share button
+        AnimatedVisibility(
+            visible = uiState.exportConfirmationToast != null,
+            enter = fadeIn(tween(200)) + slideInVertically(tween(220)) { -it / 2 },
+            exit = fadeOut(tween(180)) + slideOutVertically(tween(180)) { -it / 2 },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 66.dp, start = 14.dp, end = 14.dp)
+        ) {
+            val exported = uiState.exportConfirmationToast
+            if (exported != null) {
+                ExportConfirmationToast(
+                    exported = exported,
+                    onShare = { shareExportedAction(exported) },
+                    onDismiss = viewModel::dismissExportConfirmationToast
+                )
+            }
         }
     }
 
@@ -418,8 +592,10 @@ fun EditorScreen(
                     ExportFormat.PNG -> createPngLauncher.launch(suggestedName)
                     ExportFormat.JPG -> createJpgLauncher.launch(suggestedName)
                     ExportFormat.WEBP -> createWebpLauncher.launch(suggestedName)
+                    ExportFormat.PDF -> createPdfLauncher.launch(suggestedName)
                 }
             },
+            onShareExported = shareExportedAction,
             onDismiss = {
                 viewModel.dismissExportStatus()
                 showExportSheet = false
@@ -458,6 +634,622 @@ fun EditorScreen(
         )
     }
 
+    if (uiState.isAiModelManagerVisible) {
+        AiModelManagerSheet(
+            catalog = uiState.aiModelCatalog,
+            modelProgress = uiState.aiModelProgress,
+            onSelectModel = viewModel::selectActiveAiModel,
+            onDeleteModel = viewModel::deleteAiModel,
+            onDownloadBuiltinSd15 = viewModel::startBuiltinSd15Download,
+            onDownloadCustomUrl = viewModel::downloadCustomAiModelFromUrl,
+            onPickLocalZip = {
+                aiZipPickerLauncher.launch(
+                    arrayOf(
+                        "application/zip",
+                        "application/x-zip-compressed",
+                        "application/octet-stream",
+                        "*/*"
+                    )
+                )
+            },
+            onCancelDownload = viewModel::cancelAiModelDownload,
+            onDismiss = viewModel::dismissAiModelManager
+        )
+    }
+}
+
+@Composable
+private fun ImmersiveCanvasStage(
+    uiState: EditorUiState,
+    activeTexture: android.graphics.Bitmap?,
+    canReset: Boolean,
+    canShowTouchAdjust: Boolean,
+    isTouchAdjustPillVisible: Boolean,
+    viewModel: EditorViewModel,
+    onZoomChanged: (Boolean) -> Unit,
+    onOpenPhoto: () -> Unit,
+    onOpenExport: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val frameShape = RoundedCornerShape(16.dp)
+    Box(
+        modifier = modifier
+            .clip(frameShape)
+            .background(StudioBackground)
+            .border(1.dp, StudioGlassHairline, frameShape)
+    ) {
+        PhotoViewport(
+            previewBitmap = activeTexture,
+            fullWidth = uiState.fullWidth,
+            fullHeight = uiState.fullHeight,
+            gradingParams = uiState.gradingParams,
+            activeLut = uiState.activeLut,
+            activeTab = uiState.activeTab,
+            isComparingOriginal = uiState.isComparingOriginal,
+            isSplitCompareEnabled = uiState.isSplitCompareEnabled,
+            splitCompareRatio = uiState.splitCompareRatio,
+            showHistogram = uiState.showHistogram,
+            histogram = uiState.histogram,
+            healMode = uiState.healMode,
+            healStrokes = uiState.healStrokes,
+            activeHealStroke = uiState.activeHealStroke,
+            healBrushRadiusNorm = uiState.healBrushRadiusNorm,
+            healFeather = uiState.healFeather,
+            showHealMask = uiState.showHealMask,
+            cloneSourcePoint = uiState.cloneSourcePoint,
+            isPickingCloneSource = uiState.isPickingCloneSource,
+            isHealProcessing = uiState.isHealProcessing,
+            activeEyedropperMode = uiState.activeEyedropperMode,
+            cropOverlayMode = uiState.cropOverlayMode,
+            activeMask = uiState.activeMask,
+            showMaskOverlay = uiState.showMaskOverlay,
+            viewportResetToken = uiState.viewportResetToken,
+            isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
+            touchAdjustSelectedBand = uiState.touchAdjustSelectedBand,
+            touchAdjustSwatchArgb = uiState.touchAdjustSwatchArgb,
+            touchAdjustBandAdjustment = uiState.touchAdjustSelectedBand?.let { uiState.gradingParams.hsl[it] }
+                ?: HslBandAdjustment(),
+            touchAdjustHudLabel = uiState.touchAdjustHudLabel,
+            touchAdjustHudValueText = uiState.touchAdjustHudValueText,
+            isTouchAdjustSwiping = uiState.isTouchAdjustSwiping,
+            onZoomChanged = onZoomChanged,
+            onCompareChanged = viewModel::setComparingOriginal,
+            onSplitRatioChange = viewModel::setSplitCompareRatio,
+            onToggleHistogram = viewModel::toggleHistogram,
+            onStartHealStroke = viewModel::startHealStroke,
+            onAppendHealStroke = viewModel::appendHealStroke,
+            onFinishHealStroke = viewModel::finishHealStroke,
+            onCancelHealStroke = viewModel::cancelHealStroke,
+            onSetCloneSource = viewModel::setCloneSourcePoint,
+            onEyedropperPick = viewModel::pickColorFromCanvas,
+            onCancelEyedropper = viewModel::cancelEyedropper,
+            onCropRectChange = viewModel::updateCropRect,
+            onCropDragStateChanged = viewModel::setSliderDragging,
+            onUpdateMask = viewModel::updateMask,
+            onMaskDragStateChanged = viewModel::setSliderDragging,
+            onToggleTouchAdjust = viewModel::toggleTouchAdjust,
+            onTouchAdjustTap = viewModel::onTouchAdjustTap,
+            onTouchAdjustSwipeStart = viewModel::onTouchAdjustSwipeStart,
+            onTouchAdjustSwipeUpdate = viewModel::onTouchAdjustSwipeUpdate,
+            onTouchAdjustSwipeEnd = viewModel::onTouchAdjustSwipeEnd,
+            onUpdateTouchAdjustBand = viewModel::updateTouchAdjustBand,
+            onResetTouchAdjustBand = viewModel::resetTouchAdjustBand,
+            onDismissTouchAdjustPill = viewModel::dismissTouchAdjustPill,
+            onTouchAdjustSliderDraggingChanged = viewModel::setSliderDragging,
+            topOverlayInset = 64.dp,
+            bottomOverlayInset = 62.dp,
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Top Floating Frosted-Glass Header: Emblem + Import | Undo / Redo / Before-After | Export (+ RAW/Format Badge)
+        TopFloatingGlassHeader(
+            photoFormatInfo = uiState.photoFormatInfo,
+            canExport = uiState.fullWidth > 0,
+            canUndo = uiState.canUndo,
+            canRedo = uiState.canRedo,
+            isComparingOriginal = uiState.isComparingOriginal,
+            isSplitCompareEnabled = uiState.isSplitCompareEnabled,
+            onOpenPhoto = onOpenPhoto,
+            onUndo = viewModel::undo,
+            onRedo = viewModel::redo,
+            onCompareChanged = viewModel::setComparingOriginal,
+            onToggleSplitCompare = viewModel::toggleSplitCompare,
+            onOpenExport = onOpenExport,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp)
+        )
+
+        // Tiny Frosted-Glass Histogram toggle at bottom-start corner (48dp touch target)
+        AnimatedVisibility(
+            visible = !isTouchAdjustPillVisible && !uiState.isSplitCompareEnabled && uiState.histogram != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 8.dp, bottom = 8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = viewModel::toggleHistogram)
+                    .testTag("histogram_toggle_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = StudioGlassSurface,
+                    shadowElevation = 6.dp,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .border(
+                            width = 1.dp,
+                            color = if (uiState.showHistogram) StudioActiveOffWhite.copy(alpha = 0.28f) else StudioGlassHairline,
+                            shape = CircleShape
+                        )
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BarChart,
+                            contentDescription = stringResource(R.string.cd_toggle_histogram),
+                            tint = if (uiState.showHistogram) StudioActiveOffWhite else StudioTextSecondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        if (uiState.showHistogram) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 5.dp)
+                                    .size(3.5.dp)
+                                    .clip(CircleShape)
+                                    .background(StudioLuxuryGold)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tiny On-Photo Frosted-Glass Utility Pill at Bottom-End Corner: Touch Adjust, Copy/Paste, Reset
+        AnimatedVisibility(
+            visible = !isTouchAdjustPillVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 10.dp, bottom = 10.dp)
+        ) {
+            CornerUtilityPill(
+                canShowTouchAdjust = canShowTouchAdjust,
+                isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
+                canPasteEdits = uiState.canPasteEdits,
+                canReset = canReset,
+                onToggleTouchAdjust = viewModel::toggleTouchAdjust,
+                onCopyEdits = viewModel::copyEdits,
+                onPasteEdits = viewModel::pasteEdits,
+                onResetAll = viewModel::resetAllAdjustments
+            )
+        }
+    }
+}
+
+@Composable
+private fun TopFloatingGlassHeader(
+    photoFormatInfo: PhotoFormatInfo,
+    canExport: Boolean,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    isComparingOriginal: Boolean,
+    isSplitCompareEnabled: Boolean,
+    onOpenPhoto: () -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onCompareChanged: (Boolean) -> Unit,
+    onToggleSplitCompare: () -> Unit,
+    onOpenExport: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scope = rememberCoroutineScope()
+    val currentCompareChanged by rememberUpdatedState(onCompareChanged)
+    val currentToggleSplit by rememberUpdatedState(onToggleSplitCompare)
+    val compareActive = isComparingOriginal || isSplitCompareEnabled
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val useCompactScroll = maxWidth < 312.dp
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (useCompactScroll) {
+                            Modifier.horizontalScroll(rememberScrollState())
+                        } else {
+                            Modifier
+                        }
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = if (useCompactScroll) {
+                    Arrangement.spacedBy(6.dp)
+                } else {
+                    Arrangement.SpaceBetween
+                }
+            ) {
+                // Left Smoked-Glass Pill: ZamLab Emblem + Import Photo
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = StudioGlassSurface,
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(start = 6.dp, end = 0.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = StudioObsidian,
+                            modifier = Modifier
+                                .size(25.dp)
+                                .border(1.dp, StudioGlassHairline, CircleShape)
+                                .testTag("zamlab_brand_emblem")
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_zamlab_foreground),
+                                contentDescription = stringResource(R.string.cd_zamlab_emblem),
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(2.dp)
+                                    .clip(CircleShape)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(16.dp)
+                                .background(StudioGlassHairline)
+                        )
+
+                        IconButton(
+                            onClick = onOpenPhoto,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("open_photo_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = stringResource(R.string.cd_open_photo),
+                                tint = StudioActiveOffWhite,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                    }
+                }
+
+        // Center Smoked-Glass Pill: Undo | Redo | Hold-to-Compare Before/After
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = StudioGlassSurface,
+            shadowElevation = 6.dp,
+            modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onUndo,
+                    enabled = canUndo,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("undo_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Undo,
+                        contentDescription = stringResource(R.string.cd_undo_history),
+                        tint = if (canUndo) StudioActiveOffWhite else StudioTextMuted.copy(alpha = 0.5f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(16.dp)
+                        .background(StudioGlassHairline)
+                )
+
+                IconButton(
+                    onClick = onRedo,
+                    enabled = canRedo,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("redo_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Redo,
+                        contentDescription = stringResource(R.string.cd_redo_history),
+                        tint = if (canRedo) StudioActiveOffWhite else StudioTextMuted.copy(alpha = 0.5f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(16.dp)
+                        .background(StudioGlassHairline)
+                )
+
+                // Compact Before/After hold-to-compare toggle (hold = Original, tap = Split)
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(if (compareActive) StudioGlassHighlight else Color.Transparent)
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                var holdingOriginal = false
+                                val holdJob = scope.launch {
+                                    delay(160L)
+                                    holdingOriginal = true
+                                    currentCompareChanged(true)
+                                }
+                                try {
+                                    do {
+                                        val event = awaitPointerEvent()
+                                    } while (event.changes.any { it.pressed })
+                                } finally {
+                                    holdJob.cancel()
+                                    if (holdingOriginal) {
+                                        currentCompareChanged(false)
+                                    } else {
+                                        currentToggleSplit()
+                                    }
+                                }
+                            }
+                        }
+                        .testTag("compare_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Compare,
+                        contentDescription = stringResource(R.string.cd_compare_before_after),
+                        tint = if (compareActive) StudioActiveOffWhite else StudioTextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    if (compareActive) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 7.dp)
+                                .size(3.5.dp)
+                                .clip(CircleShape)
+                                .background(StudioLuxuryGold)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Right Clean Off-White Export Pill
+        Button(
+            onClick = onOpenExport,
+            enabled = canExport,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = StudioActiveOffWhite,
+                contentColor = StudioObsidian,
+                disabledContainerColor = StudioActiveOffWhite.copy(alpha = 0.25f),
+                disabledContentColor = StudioObsidian.copy(alpha = 0.6f)
+            ),
+            shape = RoundedCornerShape(50),
+            contentPadding = PaddingValues(horizontal = 11.dp, vertical = 0.dp),
+            modifier = Modifier
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                .height(48.dp)
+                .testTag("export_button")
+        ) {
+            Icon(
+                imageVector = Icons.Default.Download,
+                contentDescription = stringResource(R.string.cd_export_photo),
+                modifier = Modifier.size(15.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = stringResource(R.string.action_export),
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.2.sp
+                ),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        }
+        }
+
+        // Subtle Format Badge in the Top Bar when a RAW / HEIC / TIFF photo is loaded
+        val formatLabel = photoFormatInfo.badgeLabel
+        if (!formatLabel.isNullOrBlank()) {
+            val isRaw = photoFormatInfo.isRaw
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = StudioGlassSurface,
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .border(
+                        width = 1.dp,
+                        color = if (isRaw) StudioLuxuryGold.copy(alpha = 0.42f) else StudioGlassHairline,
+                        shape = RoundedCornerShape(50)
+                    )
+                    .testTag("photo_format_badge")
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.5.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(if (isRaw) StudioLuxuryGold else StudioActiveOffWhite.copy(alpha = 0.8f))
+                    )
+                    Text(
+                        text = formatLabel,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.6.sp
+                        ),
+                        color = if (isRaw) StudioLuxuryGold else StudioActiveOffWhite,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Tiny frosted-glass utility pill placed at the bottom-end corner of the photo canvas:
+ * Touch Adjust toggle, Copy/Paste edits, and Reset.
+ */
+@Composable
+private fun CornerUtilityPill(
+    canShowTouchAdjust: Boolean,
+    isTouchAdjustEnabled: Boolean,
+    canPasteEdits: Boolean,
+    canReset: Boolean,
+    onToggleTouchAdjust: () -> Unit,
+    onCopyEdits: () -> Unit,
+    onPasteEdits: () -> Unit,
+    onResetAll: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = StudioGlassSurface,
+        shadowElevation = 6.dp,
+        modifier = modifier
+            .border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+            .testTag("floating_utility_pill")
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            if (canShowTouchAdjust) {
+                CornerPillIconButton(
+                    icon = Icons.Default.TouchApp,
+                    contentDescription = stringResource(R.string.cd_touch_adjust_toggle),
+                    active = isTouchAdjustEnabled,
+                    showGoldDot = isTouchAdjustEnabled,
+                    enabled = true,
+                    testTag = "touch_adjust_toggle_button",
+                    onClick = onToggleTouchAdjust
+                )
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(15.dp)
+                        .background(StudioGlassHairline)
+                )
+            }
+
+            CornerPillIconButton(
+                icon = Icons.Default.ContentCopy,
+                contentDescription = stringResource(R.string.cd_copy_edits),
+                active = false,
+                showGoldDot = false,
+                enabled = true,
+                testTag = "adjust_copy_button",
+                onClick = onCopyEdits
+            )
+
+            CornerPillIconButton(
+                icon = Icons.Default.ContentPaste,
+                contentDescription = stringResource(R.string.cd_paste_edits),
+                active = canPasteEdits,
+                showGoldDot = canPasteEdits,
+                enabled = canPasteEdits,
+                testTag = "adjust_paste_button",
+                onClick = onPasteEdits
+            )
+
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(15.dp)
+                    .background(StudioGlassHairline)
+            )
+
+            CornerPillIconButton(
+                icon = Icons.Default.RestartAlt,
+                contentDescription = stringResource(R.string.cd_reset_adjustments),
+                active = false,
+                showGoldDot = false,
+                enabled = canReset,
+                testTag = "reset_button",
+                onClick = onResetAll
+            )
+        }
+    }
+}
+
+@Composable
+private fun CornerPillIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    active: Boolean,
+    showGoldDot: Boolean,
+    enabled: Boolean,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    val tint = when {
+        !enabled -> StudioTextMuted.copy(alpha = 0.42f)
+        active -> StudioActiveOffWhite
+        else -> StudioTextSecondary
+    }
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(if (active && enabled) StudioGlassHighlight else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(17.dp)
+        )
+        if (showGoldDot && enabled) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 7.dp)
+                    .size(3.5.dp)
+                    .clip(CircleShape)
+                    .background(StudioLuxuryGold)
+            )
+        }
+    }
 }
 
 @Composable
@@ -465,28 +1257,35 @@ private fun ActiveToolPanel(
     uiState: EditorUiState,
     viewModel: EditorViewModel,
     onImportLut: () -> Unit,
-    onOpenProfileMenu: () -> Unit,
-    onOpenProfileBrowser: () -> Unit
+    onOpenProfileMenu: () -> Unit
 ) {
     when (uiState.activeTab) {
         StudioTab.ADJUST -> AdjustPanel(
             params = uiState.gradingParams,
             histogram = uiState.histogram,
-            canPasteEdits = uiState.canPasteEdits,
-            hasActiveLut = uiState.selectedLutId != null,
             activeEyedropperMode = uiState.activeEyedropperMode,
             onParamsChange = viewModel::updateGradingParams,
             onDraggingChanged = viewModel::setSliderDragging,
             onOpenProfileMenu = onOpenProfileMenu,
-            onOpenProfileBrowser = onOpenProfileBrowser,
-            onProfileAmountChange = viewModel::updateProfileAmount,
+            onSelectWhiteBalancePreset = viewModel::selectWhiteBalancePreset,
+            onToggleEyedropper = viewModel::toggleEyedropperMode,
+            onAutoTone = viewModel::applyAutoTone,
+            onToggleBlackAndWhite = viewModel::toggleBlackAndWhite
+        )
+
+        StudioTab.ALL -> AllParametersPanel(
+            params = uiState.gradingParams,
+            histogram = uiState.histogram,
+            activeEyedropperMode = uiState.activeEyedropperMode,
+            savedRecipeCount = uiState.userPresets.size,
+            onParamsChange = viewModel::updateGradingParams,
+            onDraggingChanged = viewModel::setSliderDragging,
+            onOpenProfileMenu = onOpenProfileMenu,
             onSelectWhiteBalancePreset = viewModel::selectWhiteBalancePreset,
             onToggleEyedropper = viewModel::toggleEyedropperMode,
             onAutoTone = viewModel::applyAutoTone,
             onToggleBlackAndWhite = viewModel::toggleBlackAndWhite,
-            onResetAll = viewModel::resetAllAdjustments,
-            onCopyEdits = viewModel::copyEdits,
-            onPasteEdits = viewModel::pasteEdits
+            onSaveRecipe = viewModel::saveCurrentLookAsPreset
         )
 
         StudioTab.LUTS -> LutPanel(
@@ -508,6 +1307,18 @@ private fun ActiveToolPanel(
             onDeleteUserPreset = viewModel::deleteUserPreset
         )
 
+        StudioTab.AI -> AiCreatePanel(
+            catalog = uiState.aiModelCatalog,
+            modelProgress = uiState.aiModelProgress,
+            generationState = uiState.aiGenerationState,
+            onOpenModelManager = viewModel::openAiModelManager,
+            onDownloadBuiltinSd15 = viewModel::startBuiltinSd15Download,
+            onCancelModelDownload = viewModel::cancelAiModelDownload,
+            onGenerate = viewModel::generateAiPhoto,
+            onCancelGeneration = viewModel::cancelAiGeneration,
+            onClearError = viewModel::clearAiGenerationError
+        )
+
         StudioTab.CROP -> CropPanel(
             crop = uiState.gradingParams.crop,
             overlayMode = uiState.cropOverlayMode,
@@ -525,6 +1336,8 @@ private fun ActiveToolPanel(
                 viewModel.updateGradingParams { gp -> gp.copy(crop = transform(gp.crop)) }
             },
             onDraggingChanged = viewModel::setSliderDragging,
+            onApplyCrop = viewModel::applyCrop,
+            onResetAllCrop = viewModel::resetAllCrop,
             onResetCropOrientation = viewModel::resetCropAndOrientation,
             onResetGeometry = viewModel::resetGeometryPerspective
         )
@@ -568,240 +1381,123 @@ private fun ActiveToolPanel(
     }
 }
 
+/**
+ * Compact 7-tab floating frosted-glass capsule bottom navigation:
+ * Adjust | All | LUTs | AI | Crop | Heal | Masks.
+ */
 @Composable
-private fun StudioTopBar(
-    fullWidth: Int,
-    effectiveOutputWidth: Int,
-    effectiveOutputHeight: Int,
-    onOpenPhoto: () -> Unit,
-    onOpenExport: () -> Unit
+private fun FloatingCapsuleNavDock(
+    uiState: EditorUiState,
+    onSelectTab: (StudioTab) -> Unit,
+    modifier: Modifier = Modifier
 ) {
+    val capsuleShape = RoundedCornerShape(30.dp)
+    val gp = uiState.gradingParams
+    val hasAdjustEdits = gp.hasLightEdits || gp.hasColorEdits || gp.hasEffectsEdits || gp.hasDetailEdits || gp.hasProfileEdits
+    val hasLutEdits = uiState.selectedLutId != null || uiState.selectedUserPresetId != null
+    val hasAiReady = uiState.isAiModelReady
+    val hasCropEdits = !gp.crop.isDefault
+    val hasHealEdits = uiState.hasHealEdits
+    val hasMaskEdits = gp.hasMaskEdits
+
     Surface(
-        color = StudioSurface,
-        modifier = Modifier.fillMaxWidth()
+        shape = capsuleShape,
+        color = StudioGlassSurface,
+        shadowElevation = 10.dp,
+        modifier = modifier
+            .border(1.dp, StudioGlassHairline, capsuleShape)
+            .testTag("floating_capsule_nav")
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val useHorizontalScroll = maxWidth < 392.dp
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(9.dp),
-                    color = StudioObsidian,
-                    modifier = Modifier
-                        .size(34.dp)
-                        .border(1.dp, StudioLuxuryGold.copy(alpha = 0.55f), RoundedCornerShape(9.dp))
-                        .testTag("zamlab_brand_emblem")
-                ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.ic_zamlab_foreground),
-                        contentDescription = stringResource(R.string.cd_zamlab_emblem),
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(2.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.app_name),
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 0.4.sp
-                        ),
-                        color = StudioTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.testTag("top_bar_brand_title")
-                    )
-                    if (fullWidth > 0) {
-                        Text(
-                            text = "${effectiveOutputWidth}×${effectiveOutputHeight}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = StudioTextMuted,
-                            maxLines = 1
-                        )
-                    }
-                }
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-
-                IconButton(
-                    onClick = onOpenPhoto,
-                    modifier = Modifier.testTag("open_photo_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AddPhotoAlternate,
-                        contentDescription = stringResource(R.string.cd_open_photo),
-                        tint = StudioCyan
-                    )
-                }
-
-                Button(
-                    onClick = onOpenExport,
-                    enabled = fullWidth > 0,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = StudioAmber,
-                        contentColor = StudioBackground
-                    ),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    modifier = Modifier
-                        .height(38.dp)
-                        .testTag("export_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Download,
-                        contentDescription = stringResource(R.string.cd_export_photo),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = stringResource(R.string.action_export),
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StudioHistoryBar(
-    canUndo: Boolean,
-    canRedo: Boolean,
-    undoLabel: String?,
-    isSplitCompareEnabled: Boolean,
-    isComparingOriginal: Boolean,
-    canReset: Boolean,
-    onUndo: () -> Unit,
-    onRedo: () -> Unit,
-    onCompareChanged: (Boolean) -> Unit,
-    onToggleSplitCompare: () -> Unit,
-    onResetAll: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFF12151C))
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(
-            modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            IconButton(
-                onClick = onUndo,
-                enabled = canUndo,
-                modifier = Modifier.testTag("undo_button")
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Undo,
-                    contentDescription = stringResource(R.string.cd_undo_history),
-                    tint = if (canUndo) StudioTextPrimary else StudioTextMuted,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            IconButton(
-                onClick = onRedo,
-                enabled = canRedo,
-                modifier = Modifier.testTag("redo_button")
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Redo,
-                    contentDescription = stringResource(R.string.cd_redo_history),
-                    tint = if (canRedo) StudioTextPrimary else StudioTextMuted,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            if (undoLabel != null) {
-                Text(
-                    text = undoLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StudioTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 4.dp)
-                )
-            }
-        }
-
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            // Split-screen Before/After wipe slider toggle
-            IconButton(
-                onClick = onToggleSplitCompare,
-                modifier = Modifier.testTag("split_compare_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.VerticalSplit,
-                    contentDescription = stringResource(R.string.cd_split_compare),
-                    tint = if (isSplitCompareEnabled) StudioAmber else StudioTextSecondary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            // Hold to compare Original vs Graded
-            Box(
                 modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(
-                        if (isComparingOriginal) StudioAmber.copy(alpha = 0.2f) else Color.Transparent
+                    .fillMaxWidth()
+                    .then(
+                        if (useHorizontalScroll) {
+                            Modifier.horizontalScroll(rememberScrollState())
+                        } else {
+                            Modifier
+                        }
                     )
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onPress = {
-                                onCompareChanged(true)
-                                tryAwaitRelease()
-                                onCompareChanged(false)
-                            }
-                        )
-                    }
-                    .padding(10.dp)
-                    .testTag("compare_button"),
-                contentAlignment = Alignment.Center
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.Compare,
-                    contentDescription = stringResource(R.string.cd_compare_before_after),
-                    tint = if (isComparingOriginal) StudioAmber else StudioTextSecondary,
-                    modifier = Modifier.size(20.dp)
+                val itemModifier = if (useHorizontalScroll) {
+                    Modifier.widthIn(min = 52.dp)
+                } else {
+                    Modifier.weight(1f)
+                }
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_adjust),
+                    selectedIcon = Icons.Filled.Tune,
+                    unselectedIcon = Icons.Outlined.Tune,
+                    selected = uiState.activeTab == StudioTab.ADJUST,
+                    hasEdits = hasAdjustEdits,
+                    testTag = "tab_adjust",
+                    onClick = { onSelectTab(StudioTab.ADJUST) },
+                    modifier = itemModifier
                 )
-            }
-
-            IconButton(
-                onClick = onResetAll,
-                enabled = canReset,
-                modifier = Modifier.testTag("reset_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.RestartAlt,
-                    contentDescription = stringResource(R.string.cd_reset_adjustments),
-                    tint = if (canReset) {
-                        StudioTextPrimary
-                    } else {
-                        StudioTextMuted
-                    },
-                    modifier = Modifier.size(20.dp)
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_all),
+                    selectedIcon = Icons.AutoMirrored.Filled.ViewList,
+                    unselectedIcon = Icons.AutoMirrored.Outlined.ViewList,
+                    selected = uiState.activeTab == StudioTab.ALL,
+                    hasEdits = hasAdjustEdits,
+                    testTag = "tab_all",
+                    onClick = { onSelectTab(StudioTab.ALL) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_luts),
+                    selectedIcon = Icons.Filled.FilterVintage,
+                    unselectedIcon = Icons.Outlined.FilterVintage,
+                    selected = uiState.activeTab == StudioTab.LUTS,
+                    hasEdits = hasLutEdits,
+                    testTag = "tab_luts",
+                    onClick = { onSelectTab(StudioTab.LUTS) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_ai),
+                    selectedIcon = Icons.Filled.AutoAwesome,
+                    unselectedIcon = Icons.Outlined.AutoAwesome,
+                    selected = uiState.activeTab == StudioTab.AI,
+                    hasEdits = hasAiReady,
+                    testTag = "tab_ai",
+                    onClick = { onSelectTab(StudioTab.AI) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_crop),
+                    selectedIcon = Icons.Filled.CropRotate,
+                    unselectedIcon = Icons.Outlined.CropRotate,
+                    selected = uiState.activeTab == StudioTab.CROP,
+                    hasEdits = hasCropEdits,
+                    testTag = "tab_crop",
+                    onClick = { onSelectTab(StudioTab.CROP) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_heal),
+                    selectedIcon = Icons.Filled.Healing,
+                    unselectedIcon = Icons.Outlined.Healing,
+                    selected = uiState.activeTab == StudioTab.HEAL,
+                    hasEdits = hasHealEdits,
+                    testTag = "tab_heal",
+                    onClick = { onSelectTab(StudioTab.HEAL) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_mask),
+                    selectedIcon = Icons.Filled.Gradient,
+                    unselectedIcon = Icons.Outlined.Gradient,
+                    selected = uiState.activeTab == StudioTab.MASK,
+                    hasEdits = hasMaskEdits,
+                    testTag = "tab_mask",
+                    onClick = { onSelectTab(StudioTab.MASK) },
+                    modifier = itemModifier
                 )
             }
         }
@@ -809,125 +1505,185 @@ private fun StudioHistoryBar(
 }
 
 @Composable
-private fun StudioTabBar(
-    activeTab: StudioTab,
-    onSelectTab: (StudioTab) -> Unit
-) {
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(StudioSurface)
-            .padding(horizontal = 4.dp, vertical = 6.dp)
-    ) {
-        val compactTabs = maxWidth < 400.dp
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            StudioTabItem(
-                label = stringResource(R.string.tab_adjust),
-                selectedIcon = Icons.Filled.Tune,
-                unselectedIcon = Icons.Outlined.Tune,
-                selected = activeTab == StudioTab.ADJUST,
-                accentColor = StudioAmber,
-                compact = compactTabs,
-                testTag = "tab_adjust",
-                onClick = { onSelectTab(StudioTab.ADJUST) },
-                modifier = Modifier.weight(0.94f)
-            )
-            StudioTabItem(
-                label = stringResource(R.string.tab_luts),
-                selectedIcon = Icons.Filled.FilterVintage,
-                unselectedIcon = Icons.Outlined.FilterVintage,
-                selected = activeTab == StudioTab.LUTS,
-                accentColor = StudioCyan,
-                compact = compactTabs,
-                testTag = "tab_luts",
-                onClick = { onSelectTab(StudioTab.LUTS) },
-                modifier = Modifier.weight(0.84f)
-            )
-            StudioTabItem(
-                label = stringResource(R.string.tab_crop),
-                selectedIcon = Icons.Filled.CropRotate,
-                unselectedIcon = Icons.Outlined.CropRotate,
-                selected = activeTab == StudioTab.CROP,
-                accentColor = StudioAmber,
-                compact = compactTabs,
-                testTag = "tab_crop",
-                onClick = { onSelectTab(StudioTab.CROP) },
-                modifier = Modifier.weight(1.40f)
-            )
-            StudioTabItem(
-                label = stringResource(R.string.tab_heal),
-                selectedIcon = Icons.Filled.Healing,
-                unselectedIcon = Icons.Outlined.Healing,
-                selected = activeTab == StudioTab.HEAL,
-                accentColor = StudioEraserCrimson,
-                compact = compactTabs,
-                testTag = "tab_heal",
-                onClick = { onSelectTab(StudioTab.HEAL) },
-                modifier = Modifier.weight(0.86f)
-            )
-            StudioTabItem(
-                label = stringResource(R.string.tab_mask),
-                selectedIcon = Icons.Filled.Gradient,
-                unselectedIcon = Icons.Outlined.Gradient,
-                selected = activeTab == StudioTab.MASK,
-                accentColor = StudioAmber,
-                compact = compactTabs,
-                testTag = "tab_mask",
-                onClick = { onSelectTab(StudioTab.MASK) },
-                modifier = Modifier.weight(0.96f)
-            )
-        }
-    }
-}
-
-@Composable
-private fun StudioTabItem(
+private fun CapsuleNavTabItem(
     label: String,
     selectedIcon: ImageVector,
     unselectedIcon: ImageVector,
     selected: Boolean,
-    accentColor: Color,
-    compact: Boolean,
+    hasEdits: Boolean,
     testTag: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val labelStyle = if (compact) {
-        MaterialTheme.typography.labelSmall.copy(
-            fontSize = 10.sp,
-            letterSpacing = (-0.2).sp
-        )
-    } else {
-        MaterialTheme.typography.labelSmall
-    }
-    Column(
+    val bgColor by animateColorAsState(
+        targetValue = if (selected) StudioGlassHighlight else Color.Transparent,
+        animationSpec = tween(durationMillis = 150),
+        label = "capsule_tab_bg"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (selected) StudioActiveOffWhite.copy(alpha = 0.16f) else Color.Transparent,
+        animationSpec = tween(durationMillis = 150),
+        label = "capsule_tab_border"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (selected) StudioActiveOffWhite else StudioTextSecondary,
+        animationSpec = tween(durationMillis = 150),
+        label = "capsule_tab_tint"
+    )
+
+    val pillShape = RoundedCornerShape(24.dp)
+    Box(
         modifier = modifier
             .heightIn(min = 48.dp)
             .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (selected) accentColor.copy(alpha = 0.14f) else Color.Transparent)
+            .clip(pillShape)
+            .background(bgColor)
+            .border(1.dp, borderColor, pillShape)
             .clickable(onClick = onClick)
-            .padding(vertical = 7.dp, horizontal = 1.dp)
+            .padding(vertical = 5.dp, horizontal = 1.dp)
             .testTag(testTag),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(3.dp)
+        contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = if (selected) selectedIcon else unselectedIcon,
-            contentDescription = label,
-            tint = if (selected) accentColor else StudioTextSecondary,
-            modifier = Modifier.size(20.dp)
-        )
-        Text(
-            text = label,
-            style = labelStyle,
-            color = if (selected) accentColor else StudioTextSecondary,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis
-        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Icon(
+                imageVector = if (selected) selectedIcon else unselectedIcon,
+                contentDescription = label,
+                tint = contentColor,
+                modifier = Modifier.size(17.dp)
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 9.5.sp,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                    letterSpacing = (-0.2).sp
+                ),
+                color = contentColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip
+            )
+        }
+        if (hasEdits) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 5.dp, end = 6.dp)
+                    .size(4.dp)
+                    .clip(CircleShape)
+                    .background(StudioLuxuryGold)
+            )
+        }
+    }
+}
+
+/**
+ * Sleek frosted-glass post-export confirmation toast showing the saved filename,
+ * destination/resolution metadata, and a one-tap Share button.
+ */
+@Composable
+private fun ExportConfirmationToast(
+    exported: ExportStatus.Success,
+    onShare: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = StudioGlassSurface.copy(alpha = 0.95f),
+        shadowElevation = 10.dp,
+        modifier = modifier
+            .widthIn(max = 440.dp)
+            .fillMaxWidth()
+            .border(1.dp, StudioGlassHighlight, RoundedCornerShape(16.dp))
+            .testTag("export_confirmation_toast")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = StudioSuccessGreen,
+                modifier = Modifier.size(20.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Saved ${exported.filename}",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = StudioActiveOffWhite,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${exported.format.label} • ${exported.width}×${exported.height} • ${exported.destinationLabel}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StudioTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (exported.uri != null) {
+                Button(
+                    onClick = onShare,
+                    shape = RoundedCornerShape(50),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StudioActiveOffWhite,
+                        contentColor = StudioObsidian
+                    ),
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .testTag("toast_share_exported_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = stringResource(R.string.cd_share_exported_file),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = stringResource(R.string.action_share),
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("dismiss_export_toast_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = stringResource(R.string.cd_dismiss_export_toast),
+                    tint = StudioTextSecondary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    }
+}
+
+private fun launchShareExportedFile(context: Context, exported: ExportStatus.Success) {
+    val uri = exported.uri ?: return
+    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+        type = exported.mimeType
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, exported.filename)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val chooser = Intent.createChooser(sendIntent, "Share ${exported.filename}")
+    runCatching {
+        context.startActivity(chooser)
     }
 }

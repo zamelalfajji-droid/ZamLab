@@ -82,6 +82,33 @@ data class ToneCurveData(
         }
     }
 
+    /**
+     * Packs R, G, B (row 0) and Master (row 1) into a 512-entry fully-opaque (alpha = 0xFF)
+     * ARGB_8888 array for a 256x2 OpenGL texture. Keeps alpha at 0xFF so Android Bitmap
+     * premultiplication never crushes RGB curve values.
+     */
+    fun buildPackedRgba512(): IntArray {
+        val out = IntArray(512)
+        buildPackedRgba512Into(out)
+        return out
+    }
+
+    fun buildPackedRgba512Into(out: IntArray) {
+        val mLut = buildMasterLut()
+        val rLut = buildRedLut()
+        val gLut = buildGreenLut()
+        val bLut = buildBlueLut()
+        for (i in 0 until 256) {
+            val r = (rLut[i] * 255f + 0.5f).toInt().coerceIn(0, 255)
+            val g = (gLut[i] * 255f + 0.5f).toInt().coerceIn(0, 255)
+            val b = (bLut[i] * 255f + 0.5f).toInt().coerceIn(0, 255)
+            out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+
+            val m = (mLut[i] * 255f + 0.5f).toInt().coerceIn(0, 255)
+            out[256 + i] = (0xFF shl 24) or (m shl 16) or (m shl 8) or m
+        }
+    }
+
     companion object {
         val DEFAULT_POINTS: List<ToneCurvePoint> = listOf(
             ToneCurvePoint(0f, 0f),
@@ -215,7 +242,24 @@ enum class HslBand(
     AQUA("Aqua", 180f, 55f, 0xFF06B6D4),
     BLUE("Blue", 240f, 55f, 0xFF3B82F6),
     PURPLE("Purple", 285f, 55f, 0xFF8B5CF6),
-    MAGENTA("Magenta", 330f, 55f, 0xFFEC4899)
+    MAGENTA("Magenta", 330f, 55f, 0xFFEC4899);
+
+    companion object {
+        fun closestToHue(hueDeg: Float): HslBand {
+            val normHue = ((hueDeg % 360f) + 360f) % 360f
+            return entries.minByOrNull { band ->
+                var d = abs(normHue - band.centerHueDeg)
+                if (d > 180f) d = 360f - d
+                d
+            } ?: RED
+        }
+    }
+}
+
+enum class TouchToneZone(val label: String) {
+    SHADOWS("Shadows"),
+    MIDTONES("Midtones"),
+    HIGHLIGHTS("Highlights")
 }
 
 @Immutable

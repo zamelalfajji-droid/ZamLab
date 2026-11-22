@@ -1,16 +1,25 @@
 package com.example
 
+import android.content.ContentResolver
+import android.content.Intent
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.core.content.IntentCompat
+import com.example.editor.EditorViewModel
 import com.example.ui.EditorScreen
 import com.example.ui.theme.ZamLabTheme
 
 class MainActivity : ComponentActivity() {
+
+    private val editorViewModel: EditorViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -21,11 +30,71 @@ class MainActivity : ComponentActivity() {
 
         requestHighRefreshRateDisplayMode()
 
+        // Only consume launch intent on fresh creation so configuration changes never overwrite active edits
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
+
         setContent {
             ZamLabTheme {
-                EditorScreen()
+                EditorScreen(viewModel = editorViewModel)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(incoming: Intent?) {
+        val uri = extractIncomingImageUri(incoming) ?: return
+        val flags = incoming?.flags ?: 0
+        if (uri.scheme == ContentResolver.SCHEME_CONTENT &&
+            (flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) != 0 &&
+            (flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0
+        ) {
+            runCatching {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        }
+        editorViewModel.openIncomingPhotoFromIntent(uri)
+    }
+
+    private fun extractIncomingImageUri(incoming: Intent?): Uri? {
+        if (incoming == null) return null
+        if ((incoming.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return null
+        val candidate: Uri? = when (incoming.action) {
+            Intent.ACTION_SEND -> {
+                IntentCompat.getParcelableExtra(incoming, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?: incoming.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            }
+            Intent.ACTION_EDIT, Intent.ACTION_VIEW -> {
+                incoming.data
+                    ?: incoming.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            }
+            else -> null
+        }
+
+        val uri = candidate ?: return null
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != ContentResolver.SCHEME_CONTENT && scheme != ContentResolver.SCHEME_FILE) {
+            return null
+        }
+
+        val resolvedType = incoming.type ?: runCatching { contentResolver.getType(uri) }.getOrNull()
+        val isImageMime = resolvedType == null ||
+            resolvedType.startsWith("image/") ||
+            resolvedType == "*/*"
+        if (!isImageMime && !com.example.editor.ImageIoHelper.isSupportedImageUri(this, uri)) {
+            return null
+        }
+
+        return uri
     }
 
     /**

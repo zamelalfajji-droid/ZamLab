@@ -337,24 +337,25 @@ class EditorHistoryRobolectricTest {
 
         val xmpPreset = vm.uiState.value.lutFolders.first { it.name == xmpFolder }.items.first()
         val xmpSettings = requireNotNull(xmpPreset.lut?.xmpSettings)
-        val expectedFull = GradingParams.fromXmpSettings(xmpSettings, 1f)
+        val expectedDefault = GradingParams.fromXmpSettings(xmpSettings, 0.75f)
 
         vm.selectLut(xmpPreset.id)
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(xmpPreset.id, vm.uiState.value.selectedLutId)
         assertNotNull(vm.uiState.value.activeLut)
-        assertEquals(expectedFull.exposure, vm.uiState.value.gradingParams.exposure, 0.001f)
-        assertEquals(expectedFull.contrast, vm.uiState.value.gradingParams.contrast, 0.001f)
-        assertEquals(expectedFull.clarity, vm.uiState.value.gradingParams.clarity, 0.001f)
-        assertEquals(expectedFull.grain, vm.uiState.value.gradingParams.grain, 0.001f)
+        assertEquals(0.75f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+        assertEquals(expectedDefault.exposure, vm.uiState.value.gradingParams.exposure, 0.001f)
+        assertEquals(expectedDefault.contrast, vm.uiState.value.gradingParams.contrast, 0.001f)
+        assertEquals(expectedDefault.clarity, vm.uiState.value.gradingParams.clarity, 0.001f)
+        assertEquals(expectedDefault.grain, vm.uiState.value.gradingParams.grain, 0.001f)
 
         // Fine-tune one slider after applying the XMP preset without losing the preset's other sliders
         vm.setSliderDragging(true)
         vm.updateGradingParams { it.copy(exposure = 0.77f) }
         vm.setSliderDragging(false)
         assertEquals(0.77f, vm.uiState.value.gradingParams.exposure, 0.001f)
-        assertEquals(expectedFull.grain, vm.uiState.value.gradingParams.grain, 0.001f)
+        assertEquals(expectedDefault.grain, vm.uiState.value.gradingParams.grain, 0.001f)
 
         // Scaling preset intensity rescales from xmpSettings
         vm.setSliderDragging(true)
@@ -1903,6 +1904,200 @@ class EditorHistoryRobolectricTest {
             assertEquals(targetMaskId, vm.uiState.value.gradingParams.masks.firstOrNull()?.id)
         } finally {
             photo2File.delete()
+        }
+    }
+
+    @Test
+    fun toneCurve512_packsFullyOpaque256x2WithoutAlphaPremultiplicationCrush() {
+        val curve = ToneCurveData(
+            master = listOf(
+                ToneCurvePoint(0f, 34f / 255f),
+                ToneCurvePoint(56f / 255f, 53f / 255f),
+                ToneCurvePoint(130f / 255f, 127f / 255f),
+                ToneCurvePoint(1f, 241f / 255f)
+            ),
+            red = listOf(
+                ToneCurvePoint(0f, 0f),
+                ToneCurvePoint(0.5f, 0.56f),
+                ToneCurvePoint(1f, 1f)
+            )
+        )
+        val packed = curve.buildPackedRgba512()
+        assertEquals(512, packed.size)
+
+        for (i in packed.indices) {
+            val alpha = (packed[i] ushr 24) and 0xFF
+            assertEquals("Pixel $i must have opaque 0xFF alpha", 0xFF, alpha)
+        }
+
+        val rMid = (packed[128] ushr 16) and 0xFF
+        val gMid = (packed[128] ushr 8) and 0xFF
+        assertTrue("Red midtone should be lifted above 138, got $rMid", rMid in 138..148)
+        assertTrue("Green midtone should remain near linear ~128, got $gMid", gMid in 125..131)
+
+        val masterBlack = (packed[256 + 0] ushr 16) and 0xFF
+        val masterWhite = (packed[256 + 255] ushr 16) and 0xFF
+        assertEquals(34, masterBlack)
+        assertEquals(241, masterWhite)
+    }
+
+    @Test
+    fun ninetiesVibesXmpAndBuiltInCubeLut_renderBalancedTonesAndDefaultTo75Percent() = runTest(testDispatcher) {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+
+        val vibesFolder = "presets/90s Vibes - Desktop Presets"
+        val vibesAsset = app.assets.list(vibesFolder)?.firstOrNull { it.endsWith(".xmp", ignoreCase = true) }
+        assertNotNull("Expected bundled 90s Vibes .xmp preset", vibesAsset)
+        val vibesLut = app.assets.open("$vibesFolder/$vibesAsset").use { stream ->
+            XmpPresetParser.parseToCubeLut(
+                inputStream = stream,
+                id = "test_90s_vibes",
+                fallbackTitle = "90's Vibes 01",
+                fallbackCategory = "90s Vibes",
+                bakeTable = true
+            )
+        }
+        val settings = requireNotNull(vibesLut.xmpSettings)
+        val params75 = GradingParams.fromXmpSettings(settings, 0.75f)
+
+        val src = Bitmap.createBitmap(16, 8, Bitmap.Config.ARGB_8888).apply {
+            for (y in 0 until 8) {
+                for (x in 0 until 8) setPixel(x, y, Color.rgb(128, 128, 128))
+                for (x in 8 until 16) setPixel(x, y, Color.rgb(55, 55, 55))
+            }
+        }
+        val graded = ColorGradingEngine.processFullResolution(src, params75, null)
+        val midPx = graded.getPixel(4, 4)
+        val shadowPx = graded.getPixel(12, 4)
+        val midLuma = 0.2126f * Color.red(midPx) + 0.7152f * Color.green(midPx) + 0.0722f * Color.blue(midPx)
+        val shadowLuma = 0.2126f * Color.red(shadowPx) + 0.7152f * Color.green(shadowPx) + 0.0722f * Color.blue(shadowPx)
+
+        assertTrue("90's Vibes midtone must NOT crush to dark shadows (got luma=$midLuma)", midLuma > 75f)
+        assertTrue("90's Vibes shadows must retain detail and not crush to 0 (got luma=$shadowLuma)", shadowLuma > 24f)
+
+        val vm = EditorViewModel(app)
+        awaitInitialLoad(vm)
+        val cubeFolder = vm.uiState.value.lutFolders.first { folder ->
+            folder.descriptors.any { it.sourceFormat == LutSourceFormat.CUBE }
+        }.name
+        vm.toggleLutFolder(cubeFolder)
+        awaitFolderLoaded(vm, cubeFolder)
+        val cubeItem = vm.uiState.value.lutFolders.first { it.name == cubeFolder }.items
+            .first { it.sourceFormat == LutSourceFormat.CUBE }
+        vm.selectLut(cubeItem.id)
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(0.75f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+        val cubeGraded = ColorGradingEngine.processFullResolution(src, vm.uiState.value.gradingParams, vm.uiState.value.activeLut)
+        val cubeMidPx = cubeGraded.getPixel(4, 4)
+        val cubeMidLuma = 0.2126f * Color.red(cubeMidPx) + 0.7152f * Color.green(cubeMidPx) + 0.0722f * Color.blue(cubeMidPx)
+        assertTrue("Built-in .cube LUT midtone must stay balanced (got luma=$cubeMidLuma)", cubeMidLuma in 65f..200f)
+
+        src.recycle()
+        graded.recycle()
+        cubeGraded.recycle()
+    }
+
+    @Test
+    fun touchAdjust_tapDetectsColorHslBandAndSwipesAdjustToneZoneAndSaturationWithUndo() = runTest(testDispatcher) {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = EditorViewModel(app)
+        awaitInitialLoad(vm)
+
+        val syntheticFile = java.io.File(app.cacheDir, "test_touch_adjust_zones.png")
+        val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply {
+            for (y in 0 until 64) {
+                for (x in 0 until 64) {
+                    val c = when {
+                        x < 32 && y < 32 -> Color.rgb(28, 30, 34)
+                        x >= 32 && y < 32 -> Color.rgb(225, 222, 218)
+                        x < 32 && y >= 32 -> Color.rgb(35, 110, 235)
+                        else -> Color.rgb(225, 42, 38)
+                    }
+                    setPixel(x, y, c)
+                }
+            }
+        }
+        syntheticFile.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        bmp.recycle()
+
+        try {
+            val startToken = vm.uiState.value.viewportResetToken
+            vm.openPhotoFromUri(Uri.fromFile(syntheticFile))
+            val loadDeadline = System.currentTimeMillis() + 5_000L
+            while (System.currentTimeMillis() < loadDeadline && vm.uiState.value.viewportResetToken <= startToken) {
+                testDispatcher.scheduler.advanceUntilIdle()
+                Thread.sleep(20)
+            }
+
+            assertFalse(vm.uiState.value.isTouchAdjustEnabled)
+            vm.toggleTouchAdjust()
+            assertTrue(vm.uiState.value.isTouchAdjustEnabled)
+
+            vm.onTouchAdjustTap(0.25f, 0.75f)
+            val blueDeadline = System.currentTimeMillis() + 5_000L
+            while (System.currentTimeMillis() < blueDeadline && vm.uiState.value.touchAdjustSelectedBand == null) {
+                testDispatcher.scheduler.advanceUntilIdle()
+                Thread.sleep(20)
+            }
+            assertEquals(com.example.editor.HslBand.BLUE, vm.uiState.value.touchAdjustSelectedBand)
+            assertNotNull(vm.uiState.value.touchAdjustSwatchArgb)
+
+            vm.setSliderDragging(true)
+            vm.updateTouchAdjustBand { it.copy(hue = -24f, saturation = 30f, luminance = -15f) }
+            vm.setSliderDragging(false)
+            val blueAdj = vm.uiState.value.gradingParams.hsl[com.example.editor.HslBand.BLUE]
+            assertEquals(-24f, blueAdj.hue, 0.01f)
+            assertEquals(30f, blueAdj.saturation, 0.01f)
+            assertEquals(-15f, blueAdj.luminance, 0.01f)
+            assertTrue(vm.uiState.value.canUndo)
+
+            vm.resetTouchAdjustBand()
+            assertTrue(vm.uiState.value.gradingParams.hsl[com.example.editor.HslBand.BLUE].isDefault)
+
+            vm.onTouchAdjustTap(0.75f, 0.75f)
+            val redDeadline = System.currentTimeMillis() + 5_000L
+            while (System.currentTimeMillis() < redDeadline &&
+                vm.uiState.value.touchAdjustSelectedBand != com.example.editor.HslBand.RED
+            ) {
+                testDispatcher.scheduler.advanceUntilIdle()
+                Thread.sleep(20)
+            }
+            assertEquals(com.example.editor.HslBand.RED, vm.uiState.value.touchAdjustSelectedBand)
+
+            vm.onTouchAdjustSwipeStart(0.20f, 0.20f)
+            vm.onTouchAdjustSwipeUpdate(isVertical = true, totalFraction = 0.25f)
+            assertTrue(vm.uiState.value.isTouchAdjustSwiping)
+            assertEquals("Shadows", vm.uiState.value.touchAdjustHudLabel)
+            assertTrue(vm.uiState.value.gradingParams.shadows > 20f)
+            vm.onTouchAdjustSwipeEnd(commit = true)
+            assertFalse(vm.uiState.value.isTouchAdjustSwiping)
+            assertNull(vm.uiState.value.touchAdjustHudLabel)
+            val committedShadows = vm.uiState.value.gradingParams.shadows
+
+            vm.onTouchAdjustSwipeStart(0.80f, 0.20f)
+            vm.onTouchAdjustSwipeUpdate(isVertical = true, totalFraction = -0.30f)
+            assertEquals("Highlights", vm.uiState.value.touchAdjustHudLabel)
+            assertTrue(vm.uiState.value.gradingParams.highlights < -20f)
+            vm.onTouchAdjustSwipeEnd(commit = false)
+            assertEquals(0f, vm.uiState.value.gradingParams.highlights, 0.01f)
+            assertEquals(committedShadows, vm.uiState.value.gradingParams.shadows, 0.01f)
+
+            vm.onTouchAdjustSwipeStart(0.50f, 0.50f)
+            vm.onTouchAdjustSwipeUpdate(isVertical = false, totalFraction = 0.25f)
+            assertEquals("Saturation", vm.uiState.value.touchAdjustHudLabel)
+            assertTrue(vm.uiState.value.gradingParams.saturation > 20f)
+            vm.onTouchAdjustSwipeEnd(commit = true)
+            assertTrue(vm.uiState.value.gradingParams.saturation > 20f)
+
+            vm.undo()
+            assertEquals(0f, vm.uiState.value.gradingParams.saturation, 0.01f)
+
+            vm.selectTab(StudioTab.CROP)
+            assertFalse(vm.uiState.value.isTouchAdjustEnabled)
+            assertNull(vm.uiState.value.touchAdjustSelectedBand)
+        } finally {
+            syntheticFile.delete()
         }
     }
 }

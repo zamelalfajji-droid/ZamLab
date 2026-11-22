@@ -148,9 +148,9 @@ class GlPhotoRenderController(
     private var currentPackedLut: GlGradingShaders.PackedLutTexture? = null
     private var lastRenderedState: GlRenderState? = null
 
-    // Reusable 256x1 tone-curve upload buffer (zero Bitmap/IntArray allocation during curve drags)
+    // Reusable 256x2 opaque tone-curve upload buffer (zero Bitmap/IntArray allocation during curve drags)
     private var reusableCurveBitmap: Bitmap? = null
-    private val reusableCurvePixels = IntArray(256)
+    private val reusableCurvePixels = IntArray(512)
     private var curveTextureAllocated = false
 
     private val dirtyGate = DirtyRenderGate()
@@ -241,12 +241,18 @@ class GlPhotoRenderController(
 
     private fun initEgl(surface: SurfaceTexture, width: Int, height: Int) {
         try {
-            viewportW = width
-            viewportH = height
+            viewportW = width.coerceAtLeast(1)
+            viewportH = height.coerceAtLeast(1)
 
-            eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            if (display == null || display == EGL14.EGL_NO_DISPLAY) {
+                throw IllegalStateException("eglGetDisplay returned EGL_NO_DISPLAY")
+            }
+            eglDisplay = display
             val version = IntArray(2)
-            EGL14.eglInitialize(eglDisplay, version, 0, version, 1)
+            if (!EGL14.eglInitialize(display, version, 0, version, 1)) {
+                throw IllegalStateException("eglInitialize failed")
+            }
 
             val attribList = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
@@ -258,7 +264,9 @@ class GlPhotoRenderController(
             )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(eglDisplay, attribList, 0, configs, 0, 1, numConfigs, 0)
+            if (!EGL14.eglChooseConfig(display, attribList, 0, configs, 0, 1, numConfigs, 0)) {
+                throw IllegalStateException("eglChooseConfig failed")
+            }
             val config = configs[0] ?: throw IllegalStateException("No EGLConfig found")
             eglConfig = config
 
@@ -266,18 +274,30 @@ class GlPhotoRenderController(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
                 EGL14.EGL_NONE
             )
-            eglContext = EGL14.eglCreateContext(eglDisplay, config, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
-            eglSurface = EGL14.eglCreateWindowSurface(
-                eglDisplay,
+            val context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
+            if (context == null || context == EGL14.EGL_NO_CONTEXT) {
+                throw IllegalStateException("eglCreateContext failed")
+            }
+            eglContext = context
+
+            val windowSurface = EGL14.eglCreateWindowSurface(
+                display,
                 config,
                 surface,
                 intArrayOf(EGL14.EGL_NONE),
                 0
             )
+            if (windowSurface == null || windowSurface == EGL14.EGL_NO_SURFACE) {
+                throw IllegalStateException("eglCreateWindowSurface failed")
+            }
+            eglSurface = windowSurface
 
-            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-            // Keep swap interval at 1 for tear-free vsync on 120Hz panels
-            EGL14.eglSwapInterval(eglDisplay, 1)
+            if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, context)) {
+                throw IllegalStateException("eglMakeCurrent failed")
+            }
+            // TextureView's SurfaceTexture consumer is already VSync-paced by HWUI RenderThread;
+            // swap interval 0 eliminates double-VSync drag latency while DirtyRenderGate coalesces ticks
+            EGL14.eglSwapInterval(display, 0)
 
             program = GlGradingShaders.compileProgram()
             uniformHandles = GlGradingShaders.ShaderUniformHandles(program)
@@ -294,8 +314,8 @@ class GlPhotoRenderController(
             GLES20.glGenFramebuffers(1, fbos, 0)
             reusableFboId = fbos[0]
 
-            // Pre-allocate reusable 256x1 tone-curve bitmap & GPU storage once
-            val curveBmp = createBitmap(256, 1)
+            // Pre-allocate reusable 256x2 opaque tone-curve bitmap & GPU storage once
+            val curveBmp = createBitmap(256, 2)
             reusableCurveBitmap = curveBmp
             GlGradingShaders.packToneCurveInto(ToneCurveData(), reusableCurvePixels, curveBmp)
             GlGradingShaders.uploadTexture(curveTexId, curveBmp)
@@ -312,19 +332,22 @@ class GlPhotoRenderController(
 
             GLES20.glViewport(0, 0, viewportW, viewportH)
             isSurfaceReady = true
-        } catch (e: Exception) {
-            Log.e(TAG, "EGL initialization failed", e)
+        } catch (t: Throwable) {
+            Log.e(TAG, "EGL initialization failed", t)
             isSurfaceReady = false
+            releaseGl()
         }
     }
 
     private fun drainDirtyFrameOnGlThread() {
         val state = dirtyGate.consumeForRender() ?: return
-        if (!isSurfaceReady || eglDisplay == null || eglDisplay == EGL14.EGL_NO_DISPLAY ||
+        if (!isSurfaceReady ||
+            eglDisplay == null || eglDisplay == EGL14.EGL_NO_DISPLAY ||
+            eglContext == null || eglContext == EGL14.EGL_NO_CONTEXT ||
             eglSurface == null || eglSurface == EGL14.EGL_NO_SURFACE
         ) return
         val img = state.imageBitmap ?: return
-        if (img.isRecycled) return
+        if (img.isRecycled || img.width <= 0 || img.height <= 0) return
         val handles = uniformHandles ?: return
         val buf = quadBuffer ?: return
 
@@ -333,35 +356,41 @@ class GlPhotoRenderController(
             return
         }
 
-        // 1. Proxy image texture — uploaded once per bitmap, or updated in-place via texSubImage2D
-        if (img !== lastUploadedImage) {
-            if (lastUploadedImageW == img.width && lastUploadedImageH == img.height && lastUploadedImageW > 0) {
-                GlGradingShaders.uploadTextureSubImage(imageTexId, img)
-            } else {
-                GlGradingShaders.uploadTexture(imageTexId, img)
-                lastUploadedImageW = img.width
-                lastUploadedImageH = img.height
+        try {
+            // 1. Proxy image texture — uploaded once per bitmap, or updated in-place via texSubImage2D
+            if (img !== lastUploadedImage) {
+                if (lastUploadedImageW == img.width && lastUploadedImageH == img.height && lastUploadedImageW > 0) {
+                    GlGradingShaders.uploadTextureSubImage(imageTexId, img)
+                } else {
+                    GlGradingShaders.uploadTexture(imageTexId, img)
+                    lastUploadedImageW = img.width
+                    lastUploadedImageH = img.height
+                }
+                lastUploadedImage = img
             }
-            lastUploadedImage = img
-        }
 
-        // 2. 3D/1D .cube LUT texture — uploaded only when selected LUT ID changes
-        val effectiveLut = if (state.lut?.sourceFormat == LutSourceFormat.XMP) null else state.lut
-        if (effectiveLut?.id != lastLutId) {
-            lastLutId = effectiveLut?.id
-            currentPackedLut?.bitmap?.recycle()
-            currentPackedLut = effectiveLut?.let {
-                val packed = GlGradingShaders.packLutToTiledBitmap(it)
-                GlGradingShaders.uploadTexture(lutTexId, packed.bitmap)
-                packed
+            // 2. 3D/1D .cube LUT texture — uploaded only when selected LUT ID changes
+            val effectiveLut = if (state.lut?.sourceFormat == LutSourceFormat.XMP) null else state.lut
+            if (effectiveLut?.id != lastLutId) {
+                val prevPacked = currentPackedLut
+                val nextPacked = effectiveLut?.let {
+                    val packed = GlGradingShaders.packLutToTiledBitmap(it)
+                    GlGradingShaders.uploadTexture(lutTexId, packed.bitmap)
+                    packed
+                }
+                currentPackedLut = nextPacked
+                lastLutId = effectiveLut?.id
+                prevPacked?.bitmap?.let { oldBmp ->
+                    if (oldBmp !== nextPacked?.bitmap && !oldBmp.isRecycled) {
+                        oldBmp.recycle()
+                    }
+                }
             }
-        }
 
-        // 3. Tone Curve 256x1 LUT — zero-allocation in-place texSubImage2D update
-        val curve = state.params.toneCurve
-        if (curve != lastToneCurve) {
-            lastToneCurve = curve
-            if (!curve.isDefault) {
+            // 3. Tone Curve 256x2 opaque LUT — zero-allocation in-place texSubImage2D update
+            val curve = state.params.toneCurve
+            if (curve != lastToneCurve) {
+                lastToneCurve = curve
                 val curveBmp = reusableCurveBitmap
                 if (curveBmp != null && !curveBmp.isRecycled) {
                     GlGradingShaders.packToneCurveInto(curve, reusableCurvePixels, curveBmp)
@@ -373,64 +402,68 @@ class GlPhotoRenderController(
                     }
                 }
             }
-        }
 
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        GLES20.glClearColor(0.05f, 0.06f, 0.075f, 1f)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            GLES20.glClearColor(0.05f, 0.06f, 0.075f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-        GLES20.glUseProgram(program)
+            GLES20.glUseProgram(program)
 
-        buf.position(0)
-        GLES20.glEnableVertexAttribArray(handles.aPosition)
-        GLES20.glVertexAttribPointer(handles.aPosition, 2, GLES20.GL_FLOAT, false, 16, buf)
+            buf.position(0)
+            GLES20.glEnableVertexAttribArray(handles.aPosition)
+            GLES20.glVertexAttribPointer(handles.aPosition, 2, GLES20.GL_FLOAT, false, 16, buf)
 
-        buf.position(2)
-        GLES20.glEnableVertexAttribArray(handles.aTexCoord)
-        GLES20.glVertexAttribPointer(handles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, buf)
+            buf.position(2)
+            GLES20.glEnableVertexAttribArray(handles.aTexCoord)
+            GLES20.glVertexAttribPointer(handles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, buf)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTexId)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTexId)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTexId)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTexId)
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curveTexId)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, curveTexId)
 
-        val (outW, outH) = if (state.applyCrop) {
-            GeometryMath.computeOutputDimensions(img.width, img.height, state.params.crop)
-        } else {
-            GeometryMath.orientedDimensions(img.width, img.height, state.params.crop)
-        }
+            val (outW, outH) = if (state.applyCrop) {
+                GeometryMath.computeOutputDimensions(img.width, img.height, state.params.crop)
+            } else {
+                GeometryMath.orientedDimensions(img.width, img.height, state.params.crop)
+            }
 
-        GlGradingShaders.bindUniforms(
-            handles = handles,
-            params = state.params,
-            lut = effectiveLut,
-            packedLut = currentPackedLut,
-            imageWidth = img.width,
-            imageHeight = img.height,
-            isOriginal = state.isOriginal,
-            splitRatio = state.splitRatio,
-            applyCrop = state.applyCrop,
-            outputWidth = outW,
-            outputHeight = outH
-        )
+            GlGradingShaders.bindUniforms(
+                handles = handles,
+                params = state.params,
+                lut = effectiveLut,
+                packedLut = currentPackedLut,
+                imageWidth = img.width,
+                imageHeight = img.height,
+                isOriginal = state.isOriginal,
+                splitRatio = state.splitRatio,
+                applyCrop = state.applyCrop,
+                outputWidth = outW,
+                outputHeight = outH
+            )
 
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-        GLES20.glDisableVertexAttribArray(handles.aPosition)
-        GLES20.glDisableVertexAttribArray(handles.aTexCoord)
+            GLES20.glDisableVertexAttribArray(handles.aPosition)
+            GLES20.glDisableVertexAttribArray(handles.aTexCoord)
 
-        EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            // Force immediate TextureView layer composition on next VSync during live slider drags
+            textureView.postInvalidateOnAnimation()
 
-        lastRenderedState = state
-        lastRenderedEpoch = surfaceEpoch
+            lastRenderedState = state
+            lastRenderedEpoch = surfaceEpoch
 
-        // If a newer slider tick arrived mid-render, immediately drain the latest dirty frame
-        if (dirtyGate.shouldRescheduleAfterDraw()) {
-            glHandler?.post(renderRunnable)
+            // If a newer slider tick arrived mid-render, immediately drain the latest dirty frame
+            if (dirtyGate.shouldRescheduleAfterDraw()) {
+                glHandler?.post(renderRunnable)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "GL frame render failed", t)
         }
     }
 

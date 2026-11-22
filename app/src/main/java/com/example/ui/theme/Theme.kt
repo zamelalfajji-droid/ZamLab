@@ -8,16 +8,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
 
 private val StudioDarkColorScheme = darkColorScheme(
-    primary = StudioAmber,
+    primary = StudioActiveOffWhite,
     onPrimary = StudioBackground,
-    primaryContainer = StudioAmberContainer,
-    onPrimaryContainer = StudioAmber,
-    secondary = StudioCyan,
+    primaryContainer = StudioSurfaceElevated,
+    onPrimaryContainer = StudioActiveOffWhite,
+    secondary = StudioLuxuryGold,
     onSecondary = StudioBackground,
-    secondaryContainer = StudioCyanContainer,
-    onSecondaryContainer = StudioCyan,
-    tertiary = StudioEraserCrimson,
-    onTertiary = StudioTextPrimary,
+    secondaryContainer = StudioAmberContainer,
+    onSecondaryContainer = StudioLuxuryGold,
+    tertiary = StudioCyan,
+    onTertiary = StudioBackground,
     background = StudioBackground,
     onBackground = StudioTextPrimary,
     surface = StudioSurface,
@@ -29,16 +29,16 @@ private val StudioDarkColorScheme = darkColorScheme(
     surfaceContainer = StudioSurfaceElevated,
     surfaceContainerHigh = StudioSurfaceHighest,
     outline = StudioBorder,
-    outlineVariant = StudioBorderSubtle,
+    outlineVariant = StudioGlassHairline,
     error = StudioEraserCrimson,
     onError = StudioTextPrimary
 )
 
 private val StudioShapes = Shapes(
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(12.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
     large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(24.dp)
+    extraLarge = RoundedCornerShape(28.dp)
 )
 
 @Composable

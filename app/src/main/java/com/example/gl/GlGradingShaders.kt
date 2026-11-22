@@ -263,6 +263,22 @@ object GlGradingShaders {
             return t * t * (3.0 - 2.0 * t);
         }
 
+        vec3 srgbToLinear(vec3 c) {
+            vec3 cc = clamp(c, 0.0, 1.0);
+            vec3 low = cc / 12.92;
+            vec3 high = pow(max((cc + 0.055) / 1.055, vec3(0.0001)), vec3(2.4));
+            vec3 mask = step(vec3(0.04045), cc);
+            return mix(low, high, mask);
+        }
+
+        vec3 linearToSrgb(vec3 c) {
+            vec3 cc = max(c, vec3(0.0));
+            vec3 low = cc * 12.92;
+            vec3 high = 1.055 * pow(max(cc, vec3(0.0031308)), vec3(1.0 / 2.4)) - 0.055;
+            vec3 mask = step(vec3(0.0031308), cc);
+            return clamp(mix(low, high, mask), 0.0, 1.0);
+        }
+
         vec3 applyPointColor(vec3 c) {
             vec3 hsl = rgbToHsl(c);
             if (hsl.y <= 0.01) return c;
@@ -470,26 +486,28 @@ object GlGradingShaders {
             float w = evaluateMaskWeight(viewUv, geomA, geomB);
             if (w <= 0.001) return cIn;
             vec3 mc = cIn;
-            // Exposure EV shift inside mask
+            // Exposure EV shift inside mask in linear light
             if (abs(adjA.x) > 0.001) {
-                mc = clamp(mc * pow(2.0, adjA.x * w), 0.0, 1.0);
+                mc = linearToSrgb(srgbToLinear(mc) * pow(2.0, adjA.x * 1.15 * w));
             }
             // Local Warmth
             if (abs(adjA.z) > 0.001) {
                 float wn = adjA.z * w;
-                mc.r = clamp(mc.r * (1.0 + wn * 0.24), 0.0, 1.0);
-                mc.g = clamp(mc.g * (1.0 + wn * 0.03), 0.0, 1.0);
-                mc.b = clamp(mc.b * (1.0 - wn * 0.26), 0.0, 1.0);
+                mc.r = clamp(mc.r * max(0.15, 1.0 + wn * 0.44), 0.0, 1.0);
+                mc.g = clamp(mc.g * max(0.15, 1.0 + wn * 0.06), 0.0, 1.0);
+                mc.b = clamp(mc.b * max(0.15, 1.0 - wn * 0.46), 0.0, 1.0);
             }
             // Local Contrast
             if (abs(adjA.y) > 0.001) {
-                float cFac = 1.0 + adjA.y * 0.75 * w;
+                float cScale = (adjA.y >= 0.0) ? 1.25 : 0.85;
+                float cFac = max(0.15, 1.0 + adjA.y * cScale * w);
                 mc = clamp((mc - 0.5) * cFac + 0.5, 0.0, 1.0);
             }
             // Local Saturation
             if (abs(adjA.w) > 0.001) {
                 float lum = lumaRec709(mc);
-                float satFac = max(0.0, 1.0 + adjA.w * w);
+                float satScale = (adjA.w >= 0.0) ? 1.40 : 1.0;
+                float satFac = max(0.0, 1.0 + adjA.w * satScale * w);
                 mc = clamp(mix(vec3(lum), mc, satFac), 0.0, 1.0);
             }
             // Local Sharpness (only samples neighbors for masked pixels)
@@ -501,7 +519,7 @@ object GlGradingShaders {
                 float lU = lumaRec709(sampleSourceClamped(viewUv - vec2(0.0, sOff.y)));
                 float lD = lumaRec709(sampleSourceClamped(viewUv + vec2(0.0, sOff.y)));
                 float avgNearL = (lL + lR + lU + lD) * 0.25;
-                mc = clamp(mc + vec3((lC - avgNearL) * sharpNorm * 1.35 * w), 0.0, 1.0);
+                mc = clamp(mc + vec3((lC - avgNearL) * sharpNorm * 1.55 * w), 0.0, 1.0);
             }
             return mc;
         }
@@ -676,7 +694,7 @@ object GlGradingShaders {
                         float thresh = uSharpenParams.w * 0.18;
                         edgeMask = smoothRamp(thresh * 0.45, max(thresh * 1.45, 0.002), edgeMag);
                     }
-                    localDelta += sharpSignal * uSharpenParams.x * 1.15 * edgeMask;
+                    localDelta += sharpSignal * uSharpenParams.x * 1.45 * edgeMask;
                 }
 
                 if (uClarityAmount != 0.0) {
@@ -697,23 +715,29 @@ object GlGradingShaders {
                 c = applyCameraProfile(c);
             }
 
-            // 1. Exposure + Temperature + Tint
-            c *= uExposureMult;
+            // 1. Exposure (in linear light) + Temperature + Tint
+            if (abs(uExposureMult - 1.0) > 0.0005) {
+                c = linearToSrgb(srgbToLinear(c) * uExposureMult);
+            }
             c *= uTempMult;
             c = clamp(c, 0.0, 1.0);
 
             // 2. Dehaze
             if (uDehazeNorm != 0.0) {
-                float dContrast = 1.0 + uDehazeNorm * 0.28;
-                float dShift = -uDehazeNorm * 0.06;
+                float dContrast = max(0.25, 1.0 + uDehazeNorm * 0.48);
+                float dShift = -uDehazeNorm * 0.11;
                 c = clamp((c - 0.5) * dContrast + 0.5 + dShift, 0.0, 1.0);
                 float luma = lumaRec709(c);
-                c = clamp(mix(vec3(luma), c, 1.0 + uDehazeNorm * 0.22), 0.0, 1.0);
+                c = clamp(mix(vec3(luma), c, max(0.0, 1.0 + uDehazeNorm * 0.36)), 0.0, 1.0);
             }
 
-            // 3. Whites & Blacks
+            // 3. Whites & Blacks (tonally tapered so negative Whites don't crush shadows)
             if (uBlackLift != 0.0 || uWhiteGain != 1.0) {
-                c = clamp(c * uWhiteGain + vec3(uBlackLift), 0.0, 1.0);
+                float wbLuma = lumaRec709(c);
+                float hiMask = smoothRamp(0.28, 0.96, wbLuma);
+                float shMask = 1.0 - smoothRamp(0.0, 0.62, wbLuma);
+                vec3 whiteAdj = mix(c, c * uWhiteGain, hiMask) + vec3((uWhiteGain - 1.0) * 0.22 * hiMask * hiMask);
+                c = clamp(whiteAdj + vec3(uBlackLift * shMask), 0.0, 1.0);
             }
 
             // 4. Highlights, Shadows & Parametric Tones
@@ -721,12 +745,12 @@ object GlGradingShaders {
                 float luma = lumaRec709(c);
                 float delta = 0.0;
                 if (uShadowsStrength != 0.0) {
-                    float shT = clamp((0.55 - luma) / 0.55, 0.0, 1.0);
-                    delta += uShadowsStrength * (shT * shT * (3.0 - 2.0 * shT)) * 0.5;
+                    float shT = clamp((0.64 - luma) / 0.64, 0.0, 1.0);
+                    delta += uShadowsStrength * (shT * shT * (3.0 - 2.0 * shT)) * 0.56;
                 }
                 if (uHighlightsStrength != 0.0) {
-                    float hiT = clamp((luma - 0.45) / 0.55, 0.0, 1.0);
-                    delta += uHighlightsStrength * (hiT * hiT * (3.0 - 2.0 * hiT)) * 0.5;
+                    float hiT = clamp((luma - 0.36) / 0.64, 0.0, 1.0);
+                    delta += uHighlightsStrength * (hiT * hiT * (3.0 - 2.0 * hiT)) * 0.56;
                 }
                 if (uHasParametric > 0.5) {
                     delta += (
@@ -734,7 +758,7 @@ object GlGradingShaders {
                         uParametric.y * bandWeight(luma, 0.35, 0.26) +
                         uParametric.z * bandWeight(luma, 0.65, 0.26) +
                         uParametric.w * bandWeight(luma, 0.88, 0.28)
-                    ) * 0.18;
+                    ) * 0.22;
                 }
                 c = clamp(c + vec3(delta), 0.0, 1.0);
             }
@@ -742,24 +766,36 @@ object GlGradingShaders {
             // 5. Contrast
             c = clamp((c - 0.5) * uContrastFactor + 0.5, 0.0, 1.0);
 
-            // 6. Tone Curves (Master in .a, R/G/B in .rgb)
+            // 6. Tone Curves (Master in row 1 v=0.75, R/G/B in row 0 v=0.25)
             if (uHasCurve > 0.5) {
-                float mR = texture2D(uCurveTex, vec2((0.5 + c.r * 255.0) / 256.0, 0.5)).a;
-                float mG = texture2D(uCurveTex, vec2((0.5 + c.g * 255.0) / 256.0, 0.5)).a;
-                float mB = texture2D(uCurveTex, vec2((0.5 + c.b * 255.0) / 256.0, 0.5)).a;
-                c.r = texture2D(uCurveTex, vec2((0.5 + mR * 255.0) / 256.0, 0.5)).r;
-                c.g = texture2D(uCurveTex, vec2((0.5 + mG * 255.0) / 256.0, 0.5)).g;
-                c.b = texture2D(uCurveTex, vec2((0.5 + mB * 255.0) / 256.0, 0.5)).b;
+                float mR = texture2D(uCurveTex, vec2((0.5 + c.r * 255.0) / 256.0, 0.75)).r;
+                float mG = texture2D(uCurveTex, vec2((0.5 + c.g * 255.0) / 256.0, 0.75)).r;
+                float mB = texture2D(uCurveTex, vec2((0.5 + c.b * 255.0) / 256.0, 0.75)).r;
+                c.r = texture2D(uCurveTex, vec2((0.5 + mR * 255.0) / 256.0, 0.25)).r;
+                c.g = texture2D(uCurveTex, vec2((0.5 + mG * 255.0) / 256.0, 0.25)).g;
+                c.b = texture2D(uCurveTex, vec2((0.5 + mB * 255.0) / 256.0, 0.25)).b;
             }
 
-            // 7. RGB Primary Calibration
+            // 7. RGB Primary Calibration (row-normalized to preserve neutral grays)
             if (uHasCal > 0.5) {
                 float rShift = uCalHue.r * 0.18;
                 float gShift = uCalHue.g * 0.18;
                 float bShift = uCalHue.b * 0.18;
-                float nr = c.r * (1.0 - abs(rShift) * 0.25) + c.g * max(0.0, -gShift) + c.b * max(0.0, bShift);
-                float ng = c.g * (1.0 - abs(gShift) * 0.25) + c.r * max(0.0, rShift) + c.b * max(0.0, -bShift);
-                float nb = c.b * (1.0 - abs(bShift) * 0.25) + c.r * max(0.0, -rShift) + c.g * max(0.0, gShift);
+                float r00 = 1.0 - abs(rShift) * 0.25;
+                float r01 = max(0.0, -gShift);
+                float r02 = max(0.0, bShift);
+                float nr = (c.r * r00 + c.g * r01 + c.b * r02) / max(r00 + r01 + r02, 0.001);
+
+                float g10 = max(0.0, rShift);
+                float g11 = 1.0 - abs(gShift) * 0.25;
+                float g12 = max(0.0, -bShift);
+                float ng = (c.r * g10 + c.g * g11 + c.b * g12) / max(g10 + g11 + g12, 0.001);
+
+                float b20 = max(0.0, -rShift);
+                float b21 = max(0.0, gShift);
+                float b22 = 1.0 - abs(bShift) * 0.25;
+                float nb = (c.r * b20 + c.g * b21 + c.b * b22) / max(b20 + b21 + b22, 0.001);
+
                 vec3 calRgb = vec3(nr, ng, nb);
                 float luma = lumaRec709(calRgb);
                 c = clamp(vec3(luma) + (calRgb - vec3(luma)) * uCalSat, 0.0, 1.0);
@@ -782,7 +818,7 @@ object GlGradingShaders {
                 if (uVibranceNorm != 0.0) {
                     float maxC = max(c.r, max(c.g, c.b));
                     float minC = min(c.r, min(c.g, c.b));
-                    float vibMult = 1.0 + uVibranceNorm * (1.0 - (maxC - minC)) * 0.85;
+                    float vibMult = max(0.0, 1.0 + uVibranceNorm * (1.0 - (maxC - minC) * 0.75) * 1.35);
                     float luma = lumaRec709(c);
                     c = clamp(mix(vec3(luma), c, vibMult), 0.0, 1.0);
                 }
@@ -972,15 +1008,24 @@ object GlGradingShaders {
     )
 
     fun packLutToTiledBitmap(lut: CubeLut): PackedLutTexture {
-        val n = lut.size
+        val n = lut.size.coerceAtLeast(2)
+        val t = lut.table
         if (lut.type == LutType.LUT_1D) {
             val pixels = IntArray(n)
-            val t = lut.table
             for (i in 0 until n) {
-                val r = (t[i * 3] * 255f + 0.5f).toInt().coerceIn(0, 255)
-                val g = (t[i * 3 + 1] * 255f + 0.5f).toInt().coerceIn(0, 255)
-                val b = (t[i * 3 + 2] * 255f + 0.5f).toInt().coerceIn(0, 255)
-                pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                val baseIdx = i * 3
+                if (baseIdx + 2 < t.size) {
+                    val rf = t[baseIdx].takeIf { it.isFinite() } ?: 0f
+                    val gf = t[baseIdx + 1].takeIf { it.isFinite() } ?: 0f
+                    val bf = t[baseIdx + 2].takeIf { it.isFinite() } ?: 0f
+                    val r = (rf * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    val g = (gf * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    val b = (bf * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                } else {
+                    val v = ((i.toFloat() / (n - 1).coerceAtLeast(1)) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    pixels[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+                }
             }
             val bmp = createBitmap(n, 1)
             bmp.setPixels(pixels, 0, n, 0, 0, n, 1)
@@ -992,7 +1037,6 @@ object GlGradingShaders {
         val texW = cols * n
         val texH = rows * n
         val pixels = IntArray(texW * texH)
-        val t = lut.table
         val s2 = n * n
 
         for (b in 0 until n) {
@@ -1004,10 +1048,15 @@ object GlGradingShaders {
                 val rowOffset = (baseY + g) * texW + baseX
                 for (r in 0 until n) {
                     val idx = (r + g * n + b * s2) * 3
-                    val ri = (t[idx] * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    val gi = (t[idx + 1] * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    val bi = (t[idx + 2] * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    pixels[rowOffset + r] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+                    if (idx + 2 < t.size) {
+                        val rf = t[idx].takeIf { it.isFinite() } ?: 0f
+                        val gf = t[idx + 1].takeIf { it.isFinite() } ?: 0f
+                        val bf = t[idx + 2].takeIf { it.isFinite() } ?: 0f
+                        val ri = (rf * 255f + 0.5f).toInt().coerceIn(0, 255)
+                        val gi = (gf * 255f + 0.5f).toInt().coerceIn(0, 255)
+                        val bi = (bf * 255f + 0.5f).toInt().coerceIn(0, 255)
+                        pixels[rowOffset + r] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+                    }
                 }
             }
         }
@@ -1132,21 +1181,22 @@ object GlGradingShaders {
     }
 
     fun packToneCurveBitmap(curve: ToneCurveData): Bitmap {
-        val pixels = curve.buildPackedRgba256()
-        val bmp = createBitmap(256, 1)
-        bmp.setPixels(pixels, 0, 256, 0, 0, 256, 1)
+        val pixels = curve.buildPackedRgba512()
+        val bmp = createBitmap(256, 2)
+        bmp.setPixels(pixels, 0, 256, 0, 0, 256, 2)
         return bmp
     }
 
     /**
-     * Zero-allocation tone curve packer into caller-owned 256-entry pixel array and 256x1 bitmap.
+     * Zero-allocation tone curve packer into caller-owned 512-entry pixel array and 256x2 bitmap.
      */
     fun packToneCurveInto(curve: ToneCurveData, pixelBuffer: IntArray, targetBitmap: Bitmap) {
-        curve.buildPackedRgba256Into(pixelBuffer)
-        targetBitmap.setPixels(pixelBuffer, 0, 256, 0, 0, 256, 1)
+        curve.buildPackedRgba512Into(pixelBuffer)
+        targetBitmap.setPixels(pixelBuffer, 0, 256, 0, 0, 256, 2)
     }
 
     fun uploadTexture(texId: Int, bitmap: Bitmap) {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
@@ -1159,6 +1209,7 @@ object GlGradingShaders {
      * Updates an already-allocated GPU texture in-place without reallocating GPU storage.
      */
     fun uploadTextureSubImage(texId: Int, bitmap: Bitmap) {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
         GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
     }
@@ -1262,8 +1313,8 @@ object GlGradingShaders {
             params.noiseReduction > 0f ||
             params.colorNoiseReduction > 0f
         GLES20.glUniform1f(handles.uHasSpatial, if (hasSpatial) 1f else 0f)
-        GLES20.glUniform1f(handles.uTextureAmount, (params.texture / 100f) * 0.55f)
-        GLES20.glUniform1f(handles.uClarityAmount, (params.clarity / 100f) * 0.65f)
+        GLES20.glUniform1f(handles.uTextureAmount, (params.texture / 100f) * 0.85f)
+        GLES20.glUniform1f(handles.uClarityAmount, (params.clarity / 100f) * 1.05f)
         GLES20.glUniform4f(
             handles.uSharpenParams,
             (params.sharpening / 150f).coerceIn(0f, 1f),
@@ -1329,22 +1380,22 @@ object GlGradingShaders {
             profile.skyDepth
         )
 
-        // Light & Color Basics
-        val expMult = 2.0.pow(params.exposure.toDouble()).toFloat()
+        // Light & Color Basics (calibrated for Lightroom-style strength at ±50 and full range at ±100)
+        val expMult = 2.0.pow(params.exposure.toDouble() * 1.15).toFloat()
         val tempNorm = params.temperature / 100f
         val tintNorm = params.tint / 100f
         GLES20.glUniform1f(handles.uExposureMult, expMult)
         GLES20.glUniform3f(
             handles.uTempMult,
-            1f + tempNorm * 0.24f + tintNorm * 0.06f,
-            1f + tempNorm * 0.03f - tintNorm * 0.14f,
-            1f - tempNorm * 0.26f + tintNorm * 0.06f
+            (1f + tempNorm * 0.44f + tintNorm * 0.16f).coerceAtLeast(0.15f),
+            (1f + tempNorm * 0.06f - tintNorm * 0.34f).coerceAtLeast(0.15f),
+            (1f - tempNorm * 0.46f + tintNorm * 0.16f).coerceAtLeast(0.15f)
         )
         GLES20.glUniform1f(handles.uDehazeNorm, params.dehaze / 100f)
-        GLES20.glUniform1f(handles.uWhiteGain, 1f + (params.whites / 100f) * 0.15f)
-        GLES20.glUniform1f(handles.uBlackLift, (params.blacks / 100f) * 0.12f)
-        GLES20.glUniform1f(handles.uHighlightsStrength, (params.highlights / 100f) * 0.55f)
-        GLES20.glUniform1f(handles.uShadowsStrength, (params.shadows / 100f) * 0.55f)
+        GLES20.glUniform1f(handles.uWhiteGain, 1f + (params.whites / 100f) * 0.45f)
+        GLES20.glUniform1f(handles.uBlackLift, (params.blacks / 100f) * 0.28f)
+        GLES20.glUniform1f(handles.uHighlightsStrength, (params.highlights / 100f) * 0.88f)
+        GLES20.glUniform1f(handles.uShadowsStrength, (params.shadows / 100f) * 0.88f)
 
         val hasParametric = params.parametricShadows != 0f ||
             params.parametricDarks != 0f ||
@@ -1358,7 +1409,13 @@ object GlGradingShaders {
             params.parametricLights / 100f,
             params.parametricHighlights / 100f
         )
-        GLES20.glUniform1f(handles.uContrastFactor, 1f + (params.contrast / 100f) * 0.75f)
+        val contrastNorm = params.contrast / 100f
+        val contrastFactor = if (contrastNorm >= 0f) {
+            1f + contrastNorm * 1.25f
+        } else {
+            (1f + contrastNorm * 0.85f).coerceAtLeast(0.15f)
+        }
+        GLES20.glUniform1f(handles.uContrastFactor, contrastFactor)
 
         // Tone Curve
         GLES20.glUniform1f(handles.uHasCurve, if (!params.toneCurve.isDefault) 1f else 0f)
@@ -1385,7 +1442,13 @@ object GlGradingShaders {
         // Grayscale, Vibrance, Saturation
         GLES20.glUniform1f(handles.uIsGrayscale, if (params.isGrayscale) 1f else 0f)
         GLES20.glUniform1f(handles.uVibranceNorm, params.vibrance / 100f)
-        GLES20.glUniform1f(handles.uSaturationFactor, (1f + params.saturation / 100f).coerceAtLeast(0f))
+        val satNorm = params.saturation / 100f
+        val satFactor = if (satNorm >= 0f) {
+            1f + satNorm * 1.40f
+        } else {
+            (1f + satNorm).coerceAtLeast(0f)
+        }
+        GLES20.glUniform1f(handles.uSaturationFactor, satFactor)
 
         // Split Toning (zero allocations using scratch array)
         val tintScratch = handles.tintScratch

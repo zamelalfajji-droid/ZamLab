@@ -129,7 +129,9 @@ object XmpPresetParser {
             runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
         }
         val doc = factory.newDocumentBuilder().parse(inputStream)
-        doc.documentElement.normalize()
+        val root = doc.documentElement
+            ?: throw IllegalArgumentException("Invalid or empty XMP document.")
+        root.normalize()
 
         var name = fallbackTitle
         var group = ""
@@ -423,7 +425,7 @@ object XmpPresetParser {
             }
         }
 
-        inspectElement(doc.documentElement)
+        inspectElement(root)
 
         val resolvedVignette = when {
             postCropVignette != null && postCropVignette != 0f -> postCropVignette
@@ -519,11 +521,14 @@ object XmpPresetParser {
         }
     }
 
+    private fun String.toFiniteFloatOrNull(): Float? =
+        toFloatOrNull()?.takeIf { it.isFinite() }
+
     private fun parseCurvePoint(raw: String): Pair<Float, Float>? {
         val parts = raw.split(',')
         if (parts.size < 2) return null
-        val x = parts[0].trim().toFloatOrNull() ?: return null
-        val y = parts[1].trim().toFloatOrNull() ?: return null
+        val x = parts[0].trim().toFiniteFloatOrNull() ?: return null
+        val y = parts[1].trim().toFiniteFloatOrNull() ?: return null
         return (x / 255f).coerceIn(0f, 1f) to (y / 255f).coerceIn(0f, 1f)
     }
 
@@ -622,14 +627,23 @@ object XmpPresetParser {
                 for (ri in 0 until n) {
                     val rIn = ri / (n - 1f)
 
-                    var r = (rIn * expMult * rTemp).coerceIn(0f, 1f)
-                    var g = (gIn * expMult * gTemp).coerceIn(0f, 1f)
-                    var b = (bIn * expMult * bTemp).coerceIn(0f, 1f)
+                    var r = if (abs(expMult - 1f) > 0.0005f) linearToSrgbChan(srgbToLinearChan(rIn) * expMult) else rIn
+                    var g = if (abs(expMult - 1f) > 0.0005f) linearToSrgbChan(srgbToLinearChan(gIn) * expMult) else gIn
+                    var b = if (abs(expMult - 1f) > 0.0005f) linearToSrgbChan(srgbToLinearChan(bIn) * expMult) else bIn
+                    r = (r * rTemp).coerceIn(0f, 1f)
+                    g = (g * gTemp).coerceIn(0f, 1f)
+                    b = (b * bTemp).coerceIn(0f, 1f)
 
                     if (blackLift != 0f || whiteGain != 1f) {
-                        r = (r * whiteGain + blackLift).coerceIn(0f, 1f)
-                        g = (g * whiteGain + blackLift).coerceIn(0f, 1f)
-                        b = (b * whiteGain + blackLift).coerceIn(0f, 1f)
+                        val wbLuma = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                        val hiMask = smoothRamp(0.28f, 1.0f, wbLuma)
+                        val shMask = 1f - smoothRamp(0.0f, 0.68f, wbLuma)
+                        val wr = r + (r * whiteGain - r) * hiMask
+                        val wg = g + (g * whiteGain - g) * hiMask
+                        val wb = b + (b * whiteGain - b) * hiMask
+                        r = (wr + blackLift * shMask).coerceIn(0f, 1f)
+                        g = (wg + blackLift * shMask).coerceIn(0f, 1f)
+                        b = (wb + blackLift * shMask).coerceIn(0f, 1f)
                     }
 
                     if (hiStrength != 0f || shStrength != 0f) {
@@ -850,29 +864,27 @@ object XmpPresetParser {
         }
     }
 
-    private fun buildCurveLut(points: List<Pair<Float, Float>>): FloatArray? {
-        if (points.size < 2) return null
-        val lut = FloatArray(256)
-        for (i in 0..255) {
-            val x = i / 255f
-            lut[i] = interpolatePoints(points, x)
-        }
-        return lut
+    private fun smoothRamp(edge0: Float, edge1: Float, x: Float): Float {
+        val t = ((x - edge0) / (edge1 - edge0).coerceAtLeast(1e-4f)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
     }
 
-    private fun interpolatePoints(points: List<Pair<Float, Float>>, x: Float): Float {
-        if (x <= points.first().first) return points.first().second
-        if (x >= points.last().first) return points.last().second
-        for (i in 0 until points.size - 1) {
-            val p0 = points[i]
-            val p1 = points[i + 1]
-            if (x >= p0.first && x <= p1.first) {
-                val span = (p1.first - p0.first).coerceAtLeast(1e-5f)
-                val t = (x - p0.first) / span
-                return (p0.second + (p1.second - p0.second) * t).coerceIn(0f, 1f)
-            }
-        }
-        return x
+    private fun srgbToLinearChan(c: Float): Float {
+        val cc = c.coerceIn(0f, 1f)
+        return if (cc <= 0.04045f) cc / 12.92f else ((cc + 0.055f) / 1.055f).pow(2.4f)
+    }
+
+    private fun linearToSrgbChan(c: Float): Float {
+        val cc = c.coerceAtLeast(0f)
+        val s = if (cc <= 0.0031308f) cc * 12.92f else 1.055f * cc.pow(1f / 2.4f) - 0.055f
+        return s.coerceIn(0f, 1f)
+    }
+
+    private fun buildCurveLut(points: List<Pair<Float, Float>>): FloatArray? {
+        if (points.size < 2) return null
+        return com.example.editor.ToneCurveData.buildLut(
+            points.map { com.example.editor.ToneCurvePoint(it.first, it.second) }
+        )
     }
 
     private fun sampleCurve(lut: FloatArray, v: Float): Float {

@@ -54,9 +54,18 @@ object GlOffscreenRenderer {
         params: GradingParams,
         lut: CubeLut?
     ): Bitmap {
+        if (source.isRecycled) {
+            throw IllegalStateException("Source bitmap is recycled")
+        }
         val srcW = source.width
         val srcH = source.height
+        if (srcW <= 0 || srcH <= 0) {
+            throw IllegalArgumentException("Invalid source dimensions ${srcW}x$srcH")
+        }
         val (w, h) = GeometryMath.computeOutputDimensions(srcW, srcH, params.crop)
+        if (w <= 0 || h <= 0) {
+            throw IllegalArgumentException("Invalid output dimensions ${w}x$h")
+        }
         var display: EGLDisplay? = EGL14.EGL_NO_DISPLAY
         var context: EGLContext? = EGL14.EGL_NO_CONTEXT
         var surface: EGLSurface? = EGL14.EGL_NO_SURFACE
@@ -68,6 +77,9 @@ object GlOffscreenRenderer {
 
         try {
             display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            if (display == null || display == EGL14.EGL_NO_DISPLAY) {
+                throw IllegalStateException("eglGetDisplay returned EGL_NO_DISPLAY")
+            }
             val version = IntArray(2)
             if (!EGL14.eglInitialize(display, version, 0, version, 1)) {
                 throw IllegalStateException("eglInitialize failed")
@@ -84,11 +96,16 @@ object GlOffscreenRenderer {
             )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+            if (!EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)) {
+                throw IllegalStateException("eglChooseConfig failed")
+            }
             val config = configs[0] ?: throw IllegalStateException("No Pbuffer EGLConfig")
 
             val ctxAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
             context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
+            if (context == null || context == EGL14.EGL_NO_CONTEXT) {
+                throw IllegalStateException("eglCreateContext failed")
+            }
 
             val pbufferAttribs = intArrayOf(
                 EGL14.EGL_WIDTH, w,
@@ -96,15 +113,17 @@ object GlOffscreenRenderer {
                 EGL14.EGL_NONE
             )
             surface = EGL14.eglCreatePbufferSurface(display, config, pbufferAttribs, 0)
-            if (surface == EGL14.EGL_NO_SURFACE) {
+            if (surface == null || surface == EGL14.EGL_NO_SURFACE) {
                 throw IllegalStateException("eglCreatePbufferSurface failed")
             }
 
-            EGL14.eglMakeCurrent(display, surface, surface, context)
+            if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
+                throw IllegalStateException("eglMakeCurrent failed")
+            }
 
             val maxTexSize = IntArray(1)
             GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTexSize, 0)
-            if (max(max(srcW, srcH), max(w, h)) > maxTexSize[0]) {
+            if (maxTexSize[0] <= 0 || max(max(srcW, srcH), max(w, h)) > maxTexSize[0]) {
                 throw IllegalStateException("Bitmap ${srcW}x${srcH} -> ${w}x$h exceeds GL_MAX_TEXTURE_SIZE=${maxTexSize[0]}")
             }
 
@@ -165,7 +184,11 @@ object GlOffscreenRenderer {
             GLES20.glDisableVertexAttribArray(handles.aTexCoord)
             GLES20.glFinish()
 
-            val pixelBuffer = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+            val byteCount = w.toLong() * h.toLong() * 4L
+            if (byteCount <= 0L || byteCount > Int.MAX_VALUE) {
+                throw IllegalStateException("Output readback buffer too large for ${w}x$h")
+            }
+            val pixelBuffer = ByteBuffer.allocateDirect(byteCount.toInt()).order(ByteOrder.nativeOrder())
             GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixelBuffer)
             pixelBuffer.rewind()
 

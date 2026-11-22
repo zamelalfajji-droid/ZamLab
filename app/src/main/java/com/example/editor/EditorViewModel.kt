@@ -1,7 +1,9 @@
 package com.example.editor
 
 import android.app.Application
+import android.content.ContentResolver
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
@@ -11,6 +13,14 @@ import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.R
+import com.example.ai.AiAspectRatio
+import com.example.ai.AiGenerationException
+import com.example.ai.AiModelCatalogState
+import com.example.ai.InstalledAiModel
+import com.example.ai.ModelDownloadProgress
+import com.example.ai.ModelInstallPhase
+import com.example.ai.OnDeviceImageGenerator
+import com.example.ai.SdModelManager
 import com.example.gl.GlOffscreenRenderer
 import com.example.lut.CubeLut
 import com.example.lut.LutImporter
@@ -19,6 +29,7 @@ import com.example.lut.PresetDescriptor
 import com.example.lut.PresetLocationType
 import com.example.lut.UserPreset
 import com.example.lut.UserPresetStore
+import java.io.FileOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,10 +45,12 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
@@ -45,7 +58,9 @@ private const val TAG = "EditorViewModel"
 
 enum class StudioTab {
     ADJUST,
+    ALL,
     LUTS,
+    AI,
     CROP,
     HEAL,
     MASK
@@ -85,8 +100,26 @@ data class LutFolderGroup(
 sealed interface ExportStatus {
     data object Idle : ExportStatus
     data object Exporting : ExportStatus
-    data class Success(val filename: String, val width: Int, val height: Int) : ExportStatus
+    data class Success(
+        val filename: String,
+        val width: Int,
+        val height: Int,
+        val uri: Uri?,
+        val mimeType: String,
+        val format: ExportFormat,
+        val destinationLabel: String
+    ) : ExportStatus
     data class Error(val message: String) : ExportStatus
+}
+
+@Immutable
+sealed interface AiGenerationState {
+    data object Idle : AiGenerationState
+    data class Generating(val currentStep: Int, val totalSteps: Int) : AiGenerationState {
+        val progressFraction: Float
+            get() = if (totalSteps > 0) (currentStep.toFloat() / totalSteps.toFloat()).coerceIn(0f, 1f) else 0f
+    }
+    data class Error(val message: String) : AiGenerationState
 }
 
 data class EditorSnapshot(
@@ -107,6 +140,7 @@ data class CopiedEdits(
 data class EditorUiState(
     val activeTab: StudioTab = StudioTab.ADJUST,
     val photoName: String = "Lisbon Terrace (Sample)",
+    val photoFormatInfo: PhotoFormatInfo = PhotoFormatInfo(),
     val fullWidth: Int = 0,
     val fullHeight: Int = 0,
     val previewIdleBitmap: Bitmap? = null,
@@ -152,8 +186,25 @@ data class EditorUiState(
     val redoLabel: String? = null,
     val viewportResetToken: Long = 0L,
     val exportStatus: ExportStatus = ExportStatus.Idle,
-    val statusBannerMessage: String? = null
+    val exportConfirmationToast: ExportStatus.Success? = null,
+    val statusBannerMessage: String? = null,
+    val isTouchAdjustEnabled: Boolean = false,
+    val touchAdjustSelectedBand: HslBand? = null,
+    val touchAdjustSwatchArgb: Long? = null,
+    val touchAdjustHudLabel: String? = null,
+    val touchAdjustHudValueText: String? = null,
+    val isTouchAdjustSwiping: Boolean = false,
+    val isAiModelManagerVisible: Boolean = false,
+    val aiModelCatalog: AiModelCatalogState = AiModelCatalogState(),
+    val aiModelProgress: ModelDownloadProgress = ModelDownloadProgress(),
+    val aiGenerationState: AiGenerationState = AiGenerationState.Idle
 ) {
+    val activeAiModel: InstalledAiModel?
+        get() = aiModelCatalog.activeModel
+
+    val isAiModelReady: Boolean
+        get() = aiModelCatalog.activeModel != null
+
     val healBrushRadiusNorm: Float
         get() = OfflineHealEngine.brushSizePxToRadiusNorm(healBrushSizePx)
 
@@ -213,6 +264,7 @@ class EditorViewModel(
 
     // Dual-resolution proxy pipeline state: untouched full-res source ref + <=2048px GPU proxy
     private var activePhotoSourceRef: PhotoSourceRef? = null
+    private var activeCachedImportFile: File? = null
     private var nativePhotoWidth: Int = 0
     private var nativePhotoHeight: Int = 0
     private val fullSourceBitmap = MutableStateFlow<Bitmap?>(null) // <=2048px proxy for real-time editing
@@ -240,11 +292,26 @@ class EditorViewModel(
     private var userPresetThumbJob: Job? = null
     private var histPrepareJob: Job? = null
     private val photoGeneration = AtomicLong(0L)
+    private val photoLoadRequestSeq = AtomicLong(0L)
+    private val hasExternalOrUserPhoto = AtomicBoolean(false)
     private val maskIdCounter = AtomicLong(0L)
+    private val touchSwipeSeq = AtomicLong(0L)
+    private var touchSwipeTouchLocked = false
+    private var touchSwipeZone: TouchToneZone = TouchToneZone.MIDTONES
+    private var touchSwipeStartVal: Float = 0f
+    private var touchSwipeStartSat: Float = 0f
+    private var touchSwipeSnapshot: EditorSnapshot? = null
+    private var aiModelDownloadJob: Job? = null
+    private var aiGenerationJob: Job? = null
 
     init {
-        loadProfilePreferences()
-        loadClipboardPreferences()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                loadProfilePreferences()
+                loadClipboardPreferences()
+            }
+        }
+        refreshAiModelStatus()
         loadStarterLutsAndSamplePhoto()
         observeHistogramPipeline()
     }
@@ -259,6 +326,10 @@ class EditorViewModel(
         userPresetThumbJob = null
         histPrepareJob?.cancel()
         histPrepareJob = null
+        aiModelDownloadJob?.cancel()
+        aiModelDownloadJob = null
+        aiGenerationJob?.cancel()
+        aiGenerationJob = null
 
         val toRecycle = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
         toRecycle.addAll(thumbnailCache.values)
@@ -290,6 +361,19 @@ class EditorViewModel(
                 bmp.recycle()
             }
         }
+
+        activeCachedImportFile?.let { file ->
+            runCatching { file.delete() }
+        }
+        activeCachedImportFile = null
+    }
+
+    private fun replaceActiveCachedImportFile(nextFile: File?) {
+        val prev = activeCachedImportFile
+        if (prev != null && prev != nextFile) {
+            runCatching { prev.delete() }
+        }
+        activeCachedImportFile = nextFile
     }
 
     private fun profilePrefs() =
@@ -359,6 +443,13 @@ class EditorViewModel(
 
             sampleDeferred.await()
                 .onSuccess { decoded ->
+                    // Never overwrite a photo opened via Share sheet / "Open with" / Photo Picker
+                    if (hasExternalOrUserPhoto.get() || photoLoadRequestSeq.get() > 0L) {
+                        if (!decoded.proxyBitmap.isRecycled) {
+                            decoded.proxyBitmap.recycle()
+                        }
+                        return@onSuccess
+                    }
                     activePhotoSourceRef = starterRef
                     nativePhotoWidth = decoded.nativeWidth
                     nativePhotoHeight = decoded.nativeHeight
@@ -455,11 +546,7 @@ class EditorViewModel(
                 else ImageIoHelper.createPreviewBitmap(proxyBitmap, ImageIoHelper.HISTOGRAM_DIMENSION)
             }
             if (hist != null && photoGeneration.get() == expectedToken) {
-                val prevHist = histSourceBitmap.value
                 histSourceBitmap.value = hist
-                if (prevHist != null && prevHist !== hist && prevHist !== proxyBitmap && !prevHist.isRecycled) {
-                    prevHist.recycle()
-                }
             } else if (hist != null && hist !== proxyBitmap && !hist.isRecycled) {
                 hist.recycle()
             }
@@ -474,12 +561,7 @@ class EditorViewModel(
         nativeWidth: Int = nativePhotoWidth.takeIf { it > 0 } ?: bitmap.width,
         nativeHeight: Int = nativePhotoHeight.takeIf { it > 0 } ?: bitmap.height
     ) {
-        val staleCacheBitmaps = ArrayList<Bitmap>(
-            thumbnailCache.size + userPresetThumbnailCache.size + profileThumbnailCache.size
-        )
-        staleCacheBitmaps.addAll(thumbnailCache.values)
-        staleCacheBitmaps.addAll(userPresetThumbnailCache.values)
-        staleCacheBitmaps.addAll(profileThumbnailCache.values)
+        if (bitmap.isRecycled) return
 
         if (clearHealSession) {
             healUndoStack.clear()
@@ -560,19 +642,18 @@ class EditorViewModel(
                 canRedo = redoStack.isNotEmpty(),
                 undoLabel = undoStack.lastOrNull()?.label,
                 redoLabel = redoStack.lastOrNull()?.label,
-                viewportResetToken = if (clearHealSession) state.viewportResetToken + 1L else state.viewportResetToken
+                viewportResetToken = if (clearHealSession) state.viewportResetToken + 1L else state.viewportResetToken,
+                isTouchAdjustEnabled = if (clearHealSession) false else state.isTouchAdjustEnabled,
+                touchAdjustSelectedBand = if (clearHealSession) null else state.touchAdjustSelectedBand,
+                touchAdjustSwatchArgb = if (clearHealSession) null else state.touchAdjustSwatchArgb,
+                touchAdjustHudLabel = null,
+                touchAdjustHudValueText = null,
+                isTouchAdjustSwiping = false
             )
         }
 
         // Prepare 160px histogram source on Dispatchers.Default (never blocking Main thread)
         scheduleHistogramSourcePrep(proxyTexture, token)
-
-        // Safely recycle detached cache thumbnails now that UI state no longer references them
-        staleCacheBitmaps.forEach { oldThumb ->
-            if (oldThumb !== proxyTexture && oldThumb !== initialPhotoSourceBitmap && !oldThumb.isRecycled) {
-                oldThumb.recycle()
-            }
-        }
 
         if (_uiState.value.activeTab == StudioTab.LUTS) {
             ensureUserPresetThumbnailsLoaded()
@@ -607,7 +688,7 @@ class EditorViewModel(
 
     private fun loadFolderThumbnailsIfNeeded(folderName: String, expectedPhotoToken: Long) {
         val folder = _uiState.value.lutFolders.firstOrNull { it.name == folderName } ?: return
-        val dragSource = _uiState.value.previewDragBitmap
+        val dragSource = _uiState.value.previewDragBitmap?.takeIf { !it.isRecycled }
 
         // Fast memory-cache hit: if all LUTs and thumbnails for this photo are already cached, use them immediately
         val allLutsCached = folder.descriptors.all { parsedLutCache.containsKey(it.id) }
@@ -654,39 +735,49 @@ class EditorViewModel(
         val job = viewModelScope.launch {
             try {
                 val loadedItems = withContext(Dispatchers.IO) {
-                    val thumbBase = dragSource?.let { ImageIoHelper.createThumbnailBitmap(it) }
-                    coroutineScope {
-                        folder.descriptors.map { desc ->
-                            async(Dispatchers.IO) {
-                                val lut = parsedLutCache[desc.id] ?: runCatching {
-                                    LutImporter.loadPreset(ctx, desc, bakeXmpTable = false)
-                                }.onFailure { err ->
-                                    Log.e(TAG, "Failed lazy load for ${desc.locationPath}", err)
-                                }.getOrNull()?.also { parsed ->
-                                    parsedLutCache[desc.id] = parsed
-                                }
-
-                                val thumb = thumbnailCache[desc.id] ?: if (thumbBase != null && lut != null) {
-                                    renderPresetThumbnail(thumbBase, lut).also { rendered ->
-                                        if (photoGeneration.get() == expectedPhotoToken) {
-                                            thumbnailCache[desc.id] = rendered
-                                        }
+                    val thumbBase = dragSource?.takeIf { !it.isRecycled }?.let {
+                        ImageIoHelper.createThumbnailBitmap(it)
+                    }
+                    try {
+                        coroutineScope {
+                            folder.descriptors.map { desc ->
+                                async(Dispatchers.IO) {
+                                    val lut = parsedLutCache[desc.id] ?: runCatching {
+                                        LutImporter.loadPreset(ctx, desc, bakeXmpTable = false)
+                                    }.onFailure { err ->
+                                        Log.e(TAG, "Failed lazy load for ${desc.locationPath}", err)
+                                    }.getOrNull()?.also { parsed ->
+                                        parsedLutCache[desc.id] = parsed
                                     }
-                                } else {
-                                    null
-                                }
 
-                                LutPresetItem(
-                                    id = desc.id,
-                                    title = lut?.title ?: desc.title,
-                                    category = folder.name,
-                                    sourceFormat = desc.sourceFormat,
-                                    isCustom = desc.isCustom,
-                                    lut = lut,
-                                    previewThumbnail = thumb
-                                )
-                            }
-                        }.awaitAll()
+                                    val thumb = thumbnailCache[desc.id] ?: if (thumbBase != null && !thumbBase.isRecycled && lut != null) {
+                                        runCatching {
+                                            renderPresetThumbnail(thumbBase, lut)
+                                        }.getOrNull()?.also { rendered ->
+                                            if (photoGeneration.get() == expectedPhotoToken) {
+                                                thumbnailCache[desc.id] = rendered
+                                            }
+                                        }
+                                    } else {
+                                        null
+                                    }
+
+                                    LutPresetItem(
+                                        id = desc.id,
+                                        title = lut?.title ?: desc.title,
+                                        category = folder.name,
+                                        sourceFormat = desc.sourceFormat,
+                                        isCustom = desc.isCustom,
+                                        lut = lut,
+                                        previewThumbnail = thumb
+                                    )
+                                }
+                            }.awaitAll()
+                        }
+                    } finally {
+                        if (thumbBase != null && thumbBase !== dragSource && !thumbBase.isRecycled) {
+                            thumbBase.recycle()
+                        }
                     }
                 }
 
@@ -707,8 +798,8 @@ class EditorViewModel(
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Folder thumbnail load failed for $folderName", e)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Folder thumbnail load failed for $folderName", t)
                 _uiState.update { state ->
                     state.copy(
                         lutFolders = state.lutFolders.map { f ->
@@ -726,13 +817,13 @@ class EditorViewModel(
         return if (xmp != null) {
             ColorGradingEngine.processFullResolution(
                 thumbBase,
-                GradingParams.fromXmpSettings(xmp, 1f),
+                GradingParams.fromXmpSettings(xmp, 0.75f),
                 null
             )
         } else {
             ColorGradingEngine.processFullResolution(
                 thumbBase,
-                GradingParams(lutIntensity = 1f),
+                GradingParams(lutIntensity = 0.75f),
                 lut
             )
         }
@@ -771,16 +862,67 @@ class EditorViewModel(
     }
 
     fun openPhotoFromUri(uri: Uri) {
+        hasExternalOrUserPhoto.set(true)
+        val requestToken = photoLoadRequestSeq.incrementAndGet()
         viewModelScope.launch {
             val ctx = getApplication<Application>()
             runCatching {
-                val decoded = ImageIoHelper.loadProxyFromUri(ctx, uri, ImageIoHelper.PROXY_MAX_DIMENSION)
+                val hasPersistableGrant = runCatching {
+                    ctx.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                    true
+                }.getOrDefault(false)
+
+                // If provider does not support persistable URI grants, immediately cache locally so full-res export stays valid
+                val cachedFile = if (!hasPersistableGrant && uri.scheme == ContentResolver.SCHEME_CONTENT) {
+                    runCatching { ImageIoHelper.cacheIncomingPhotoToAppStorage(ctx, uri) }.getOrNull()
+                } else {
+                    null
+                }
+
                 val displayName = withContext(Dispatchers.IO) {
                     ImageIoHelper.queryDisplayName(ctx, uri, "Imported Photo")
                 }
-                decoded to displayName
-            }.onSuccess { (decoded, name) ->
-                activePhotoSourceRef = PhotoSourceRef.ContentUri(uri)
+                val formatInfo = withContext(Dispatchers.IO) {
+                    ImageIoHelper.detectPhotoFormat(ctx, uri, displayName)
+                }
+
+                val (decoded, sourceRef, resolvedCachedFile) = if (cachedFile != null) {
+                    val fileResult = runCatching {
+                        ImageIoHelper.loadProxyFromFile(cachedFile, ImageIoHelper.PROXY_MAX_DIMENSION)
+                    }
+                    if (fileResult.isSuccess) {
+                        Triple(fileResult.getOrThrow(), PhotoSourceRef.LocalFile(cachedFile), cachedFile)
+                    } else {
+                        runCatching { cachedFile.delete() }
+                        Triple(
+                            ImageIoHelper.loadProxyFromUri(ctx, uri, ImageIoHelper.PROXY_MAX_DIMENSION),
+                            PhotoSourceRef.ContentUri(uri),
+                            null
+                        )
+                    }
+                } else {
+                    Triple(
+                        ImageIoHelper.loadProxyFromUri(ctx, uri, ImageIoHelper.PROXY_MAX_DIMENSION),
+                        PhotoSourceRef.ContentUri(uri),
+                        null
+                    )
+                }
+                Pair(Triple(decoded, displayName, formatInfo), sourceRef to resolvedCachedFile)
+            }.onSuccess { (triple, refAndCache) ->
+                val (decoded, name, formatInfo) = triple
+                val (sourceRef, resolvedCachedFile) = refAndCache
+                if (photoLoadRequestSeq.get() != requestToken) {
+                    if (!decoded.proxyBitmap.isRecycled) {
+                        decoded.proxyBitmap.recycle()
+                    }
+                    resolvedCachedFile?.let { runCatching { it.delete() } }
+                    return@onSuccess
+                }
+                replaceActiveCachedImportFile(resolvedCachedFile)
+                activePhotoSourceRef = sourceRef
                 nativePhotoWidth = decoded.nativeWidth
                 nativePhotoHeight = decoded.nativeHeight
                 applyLoadedSourceBitmap(
@@ -790,15 +932,127 @@ class EditorViewModel(
                     nativeWidth = decoded.nativeWidth,
                     nativeHeight = decoded.nativeHeight
                 )
+                val statusMsg = if (formatInfo.isEmbeddedPreviewOnly) {
+                    "Loaded ${formatInfo.badgeLabel} ($name, ${decoded.nativeWidth}×${decoded.nativeHeight}) — embedded JPEG preview"
+                } else {
+                    val badgeTag = formatInfo.badgeLabel?.let { " [$it]" }.orEmpty()
+                    "Loaded $name$badgeTag (${decoded.nativeWidth}×${decoded.nativeHeight})"
+                }
                 _uiState.update {
                     it.copy(
-                        statusBannerMessage = "Loaded $name (${decoded.nativeWidth}×${decoded.nativeHeight})"
+                        photoFormatInfo = formatInfo,
+                        statusBannerMessage = statusMsg
                     )
                 }
             }.onFailure { e ->
                 Log.e(TAG, "Failed to open photo from URI", e)
+                val msg = if (e is OutOfMemoryError) {
+                    "Image resolution exceeded device memory."
+                } else {
+                    e.localizedMessage ?: "Could not open image: Unsupported format"
+                }
                 _uiState.update {
-                    it.copy(statusBannerMessage = "Could not open image: ${e.localizedMessage ?: "Unsupported format"}")
+                    it.copy(statusBannerMessage = msg)
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads a photo delivered from Android's Share sheet (`ACTION_SEND`) or "Open with" / "Edit"
+     * (`ACTION_EDIT`, `ACTION_VIEW`). Immediately claims photo-load priority so the starter sample
+     * never overwrites the incoming photo, and copies `content://` streams to app cache as the
+     * very first I/O step so full-resolution export never throws `SecurityException` after
+     * configuration changes or backgrounding.
+     */
+    fun openIncomingPhotoFromIntent(uri: Uri) {
+        hasExternalOrUserPhoto.set(true)
+        val requestToken = photoLoadRequestSeq.incrementAndGet()
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            runCatching {
+                // Immediately copy transient content:// streams before querying metadata so temporary intent grants cannot expire mid-flight
+                val cachedFile = if (uri.scheme == ContentResolver.SCHEME_CONTENT) {
+                    runCatching {
+                        ImageIoHelper.cacheIncomingPhotoToAppStorage(ctx, uri)
+                    }.getOrNull()
+                } else {
+                    null
+                }
+
+                val displayName = withContext(Dispatchers.IO) {
+                    ImageIoHelper.queryDisplayName(ctx, uri, "Shared Photo")
+                }
+                val formatInfo = withContext(Dispatchers.IO) {
+                    ImageIoHelper.detectPhotoFormat(ctx, uri, displayName)
+                }
+
+                val (decoded, sourceRef, resolvedCachedFile) = if (cachedFile != null) {
+                    val fileResult = runCatching {
+                        ImageIoHelper.loadProxyFromFile(cachedFile, ImageIoHelper.PROXY_MAX_DIMENSION)
+                    }
+                    if (fileResult.isSuccess) {
+                        Triple(fileResult.getOrThrow(), PhotoSourceRef.LocalFile(cachedFile), cachedFile)
+                    } else {
+                        runCatching { cachedFile.delete() }
+                        Triple(
+                            ImageIoHelper.loadProxyFromUri(ctx, uri, ImageIoHelper.PROXY_MAX_DIMENSION),
+                            PhotoSourceRef.ContentUri(uri),
+                            null
+                        )
+                    }
+                } else {
+                    Triple(
+                        ImageIoHelper.loadProxyFromUri(ctx, uri, ImageIoHelper.PROXY_MAX_DIMENSION),
+                        PhotoSourceRef.ContentUri(uri),
+                        null
+                    )
+                }
+                Pair(Triple(decoded, displayName, formatInfo), sourceRef to resolvedCachedFile)
+            }.onSuccess { (triple, refAndCache) ->
+                val (decoded, name, formatInfo) = triple
+                val (sourceRef, resolvedCachedFile) = refAndCache
+                if (photoLoadRequestSeq.get() != requestToken) {
+                    if (!decoded.proxyBitmap.isRecycled) {
+                        decoded.proxyBitmap.recycle()
+                    }
+                    resolvedCachedFile?.let { runCatching { it.delete() } }
+                    return@onSuccess
+                }
+                replaceActiveCachedImportFile(resolvedCachedFile)
+                activePhotoSourceRef = sourceRef
+                nativePhotoWidth = decoded.nativeWidth
+                nativePhotoHeight = decoded.nativeHeight
+                applyLoadedSourceBitmap(
+                    bitmap = decoded.proxyBitmap,
+                    name = name,
+                    clearHealSession = true,
+                    nativeWidth = decoded.nativeWidth,
+                    nativeHeight = decoded.nativeHeight
+                )
+                val statusMsg = if (formatInfo.isEmbeddedPreviewOnly) {
+                    "Loaded ${formatInfo.badgeLabel} ($name, ${decoded.nativeWidth}×${decoded.nativeHeight}) — embedded JPEG preview"
+                } else {
+                    val badgeTag = formatInfo.badgeLabel?.let { " [$it]" }.orEmpty()
+                    "Loaded $name$badgeTag (${decoded.nativeWidth}×${decoded.nativeHeight})"
+                }
+                _uiState.update {
+                    it.copy(
+                        activeTab = StudioTab.ADJUST,
+                        isComparingOriginal = false,
+                        photoFormatInfo = formatInfo,
+                        statusBannerMessage = statusMsg
+                    )
+                }
+            }.onFailure { e ->
+                Log.e(TAG, "Failed to open shared/external photo from intent", e)
+                val msg = if (e is OutOfMemoryError) {
+                    "Shared image exceeded device memory."
+                } else {
+                    e.localizedMessage ?: "Could not open shared image: Unsupported format"
+                }
+                _uiState.update {
+                    it.copy(statusBannerMessage = msg)
                 }
             }
         }
@@ -844,15 +1098,13 @@ class EditorViewModel(
                     )
                     val xmp = firstLut.xmpSettings
                     val updatedParams = if (xmp != null) {
-                        GradingParams.fromXmpSettings(xmp, 1f).copy(
+                        GradingParams.fromXmpSettings(xmp, 0.75f).copy(
                             profileId = state.gradingParams.profileId,
                             profileAmount = state.gradingParams.profileAmount,
                             crop = state.gradingParams.crop
                         )
                     } else {
-                        state.gradingParams.copy(
-                            lutIntensity = if (state.selectedLutId == null) 1f else state.gradingParams.lutIntensity
-                        )
+                        state.gradingParams.copy(lutIntensity = 0.75f)
                     }
                     gradingInput.value = updatedParams to firstLut
                     val statusMsg = if (summary.importedLuts.size == 1) {
@@ -922,11 +1174,18 @@ class EditorViewModel(
     }
 
     fun selectTab(tab: StudioTab) {
-        _uiState.update {
-            it.copy(
+        _uiState.update { state ->
+            val disableTouchAdjust = tab == StudioTab.CROP || tab == StudioTab.HEAL
+            state.copy(
                 activeTab = tab,
                 activeEyedropperMode = EyedropperMode.NONE,
-                isPickingCloneSource = false
+                isPickingCloneSource = false,
+                isTouchAdjustEnabled = if (disableTouchAdjust) false else state.isTouchAdjustEnabled,
+                touchAdjustSelectedBand = if (disableTouchAdjust) null else state.touchAdjustSelectedBand,
+                touchAdjustSwatchArgb = if (disableTouchAdjust) null else state.touchAdjustSwatchArgb,
+                touchAdjustHudLabel = if (disableTouchAdjust) null else state.touchAdjustHudLabel,
+                touchAdjustHudValueText = if (disableTouchAdjust) null else state.touchAdjustHudValueText,
+                isTouchAdjustSwiping = if (disableTouchAdjust) false else state.isTouchAdjustSwiping
             )
         }
         if (tab == StudioTab.LUTS) {
@@ -941,14 +1200,15 @@ class EditorViewModel(
         if (presets.isEmpty()) return
         if (presets.all { userPresetThumbnailCache.containsKey(it.id) }) return
 
-        val source = fullSourceBitmap.value ?: return
+        val source = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
         val token = photoGeneration.get()
         if (userPresetThumbJob?.isActive == true) return
 
         userPresetThumbJob = viewModelScope.launch {
             val thumbBase = withContext(Dispatchers.Default) {
-                ImageIoHelper.createPreviewBitmap(source, ImageIoHelper.THUMBNAIL_DIMENSION)
-            }
+                if (source.isRecycled) null
+                else ImageIoHelper.createPreviewBitmap(source, ImageIoHelper.THUMBNAIL_DIMENSION)
+            } ?: return@launch
             val ctx = getApplication<Application>()
             try {
                 for (preset in presets) {
@@ -976,10 +1236,10 @@ class EditorViewModel(
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "User preset thumbnail rendering failed", e)
+            } catch (t: Throwable) {
+                Log.e(TAG, "User preset thumbnail rendering failed", t)
             } finally {
-                if (!thumbBase.isRecycled) thumbBase.recycle()
+                if (thumbBase !== source && !thumbBase.isRecycled) thumbBase.recycle()
             }
         }
     }
@@ -1067,7 +1327,7 @@ class EditorViewModel(
     }
 
     fun deleteUserPreset(presetId: String) {
-        val removed = userPresetThumbnailCache.remove(presetId)
+        userPresetThumbnailCache.remove(presetId)
         val current = _uiState.value
         val nextPresets = current.userPresets.filterNot { it.id == presetId }
         _uiState.update { state ->
@@ -1077,9 +1337,6 @@ class EditorViewModel(
                 selectedUserPresetId = if (state.selectedUserPresetId == presetId) null else state.selectedUserPresetId,
                 statusBannerMessage = "Deleted saved preset"
             )
-        }
-        if (removed != null && !removed.isRecycled) {
-            removed.recycle()
         }
         viewModelScope.launch {
             UserPresetStore.savePresets(getApplication(), nextPresets)
@@ -1392,6 +1649,39 @@ class EditorViewModel(
         }
     }
 
+    fun applyCrop() {
+        setSliderDragging(false)
+        val state = _uiState.value
+        val hasCropChanges = !state.gradingParams.crop.isDefault
+        _uiState.update { current ->
+            current.copy(
+                activeTab = StudioTab.ADJUST,
+                activeEyedropperMode = EyedropperMode.NONE,
+                isPickingCloneSource = false,
+                viewportResetToken = current.viewportResetToken + 1L,
+                statusBannerMessage = if (hasCropChanges) "Crop applied" else null
+            )
+        }
+        // Re-trigger live histogram for the newly cropped region
+        gradingInput.value = state.gradingParams to state.activeLut
+    }
+
+    fun resetAllCrop() {
+        val state = _uiState.value
+        if (state.gradingParams.crop.isDefault) return
+        pushUndoSnapshot(captureCurrentSnapshot("Reset Crop"))
+        val updated = state.gradingParams.copy(crop = CropGeometryParams())
+        gradingInput.value = updated to state.activeLut
+        _uiState.update {
+            syncHistoryFlags(
+                it.copy(
+                    gradingParams = updated,
+                    statusBannerMessage = "Crop reset"
+                )
+            )
+        }
+    }
+
     fun resetCropAndOrientation() {
         val state = _uiState.value
         if (!state.gradingParams.crop.hasCropOrOrientationEdits &&
@@ -1477,7 +1767,10 @@ class EditorViewModel(
             val next = if (state.activeEyedropperMode == mode) EyedropperMode.NONE else mode
             state.copy(
                 activeEyedropperMode = next,
-                isComparingOriginal = false
+                isComparingOriginal = false,
+                isTouchAdjustEnabled = if (next != EyedropperMode.NONE) false else state.isTouchAdjustEnabled,
+                touchAdjustSelectedBand = if (next != EyedropperMode.NONE) null else state.touchAdjustSelectedBand,
+                touchAdjustSwatchArgb = if (next != EyedropperMode.NONE) null else state.touchAdjustSwatchArgb
             )
         }
     }
@@ -1486,11 +1779,278 @@ class EditorViewModel(
         _uiState.update { it.copy(activeEyedropperMode = EyedropperMode.NONE) }
     }
 
+    // --- Interactive On-Photo Touch Color & Tone Editing ---
+
+    fun toggleTouchAdjust() {
+        _uiState.update { state ->
+            val next = !state.isTouchAdjustEnabled
+            state.copy(
+                isTouchAdjustEnabled = next,
+                activeEyedropperMode = if (next) EyedropperMode.NONE else state.activeEyedropperMode,
+                isComparingOriginal = false,
+                touchAdjustSelectedBand = if (next) state.touchAdjustSelectedBand else null,
+                touchAdjustSwatchArgb = if (next) state.touchAdjustSwatchArgb else null,
+                touchAdjustHudLabel = if (next) state.touchAdjustHudLabel else null,
+                touchAdjustHudValueText = if (next) state.touchAdjustHudValueText else null,
+                isTouchAdjustSwiping = if (next) state.isTouchAdjustSwiping else false
+            )
+        }
+    }
+
+    fun dismissTouchAdjustPill() {
+        _uiState.update {
+            it.copy(
+                touchAdjustSelectedBand = null,
+                touchAdjustSwatchArgb = null
+            )
+        }
+    }
+
+    fun updateTouchAdjustBand(transform: (HslBandAdjustment) -> HslBandAdjustment) {
+        val currentState = _uiState.value
+        val band = currentState.touchAdjustSelectedBand ?: return
+        val updated = currentState.gradingParams.copy(
+            hsl = currentState.gradingParams.hsl.withBand(band, transform)
+        )
+        if (!currentState.isDraggingSlider && updated != currentState.gradingParams) {
+            pushUndoSnapshot(captureCurrentSnapshot("Touch HSL: ${band.label}"))
+        }
+        gradingInput.value = updated to currentState.activeLut
+        _uiState.update { syncHistoryFlags(it.copy(gradingParams = updated)) }
+    }
+
+    fun resetTouchAdjustBand() {
+        val currentState = _uiState.value
+        val band = currentState.touchAdjustSelectedBand ?: return
+        if (currentState.gradingParams.hsl[band].isDefault) return
+        pushUndoSnapshot(captureCurrentSnapshot("Reset ${band.label} HSL"))
+        val updated = currentState.gradingParams.copy(
+            hsl = currentState.gradingParams.hsl.withBand(band) { HslBandAdjustment() }
+        )
+        gradingInput.value = updated to currentState.activeLut
+        _uiState.update { syncHistoryFlags(it.copy(gradingParams = updated)) }
+    }
+
+    fun onTouchAdjustTap(viewportNx: Float, viewportNy: Float) {
+        val state = _uiState.value
+        if (!state.isTouchAdjustEnabled) return
+        val sampleSource = (state.previewIdleBitmap ?: fullSourceBitmap.value)?.takeIf { !it.isRecycled } ?: return
+
+        viewModelScope.launch {
+            val sample = withContext(Dispatchers.Default) {
+                if (sampleSource.isRecycled) return@withContext null
+                val mappedCoords = GeometryMath.mapOutputUvToSourceUv(
+                    u = viewportNx,
+                    v = viewportNy,
+                    srcW = sampleSource.width,
+                    srcH = sampleSource.height,
+                    crop = state.gradingParams.crop,
+                    applyCrop = state.activeTab != StudioTab.CROP
+                ) ?: (viewportNx to viewportNy)
+                ColorGradingEngine.sampleNormalizedPatch(
+                    source = sampleSource,
+                    nx = mappedCoords.first,
+                    ny = mappedCoords.second,
+                    paramsForRenderedSample = state.gradingParams
+                )
+            } ?: return@launch
+
+            val latest = _uiState.value
+            if (!latest.isTouchAdjustEnabled) return@launch
+            val band = HslBand.closestToHue(sample.hueDeg)
+            _uiState.update {
+                it.copy(
+                    touchAdjustSelectedBand = band,
+                    touchAdjustSwatchArgb = sample.swatchArgb
+                )
+            }
+        }
+    }
+
+    fun onTouchAdjustSwipeStart(viewportNx: Float, viewportNy: Float) {
+        val state = _uiState.value
+        if (!state.isTouchAdjustEnabled) return
+        val swipeToken = touchSwipeSeq.incrementAndGet()
+        touchSwipeTouchLocked = false
+        touchSwipeZone = TouchToneZone.MIDTONES
+        touchSwipeStartVal = state.gradingParams.exposure
+        touchSwipeStartSat = state.gradingParams.saturation
+        touchSwipeSnapshot = captureCurrentSnapshot("Touch Tone")
+        isDraggingFlow.value = true
+        _uiState.update {
+            it.copy(
+                isDraggingSlider = true,
+                isTouchAdjustSwiping = true
+            )
+        }
+
+        val sampleSource = (histSourceBitmap.value ?: state.previewIdleBitmap ?: fullSourceBitmap.value)
+            ?.takeIf { !it.isRecycled } ?: return
+        viewModelScope.launch {
+            val luma = withContext(Dispatchers.Default) {
+                if (sampleSource.isRecycled || sampleSource.width <= 0 || sampleSource.height <= 0) {
+                    0.5f
+                } else {
+                    val mapped = GeometryMath.mapOutputUvToSourceUv(
+                        u = viewportNx.coerceIn(0f, 1f),
+                        v = viewportNy.coerceIn(0f, 1f),
+                        srcW = sampleSource.width,
+                        srcH = sampleSource.height,
+                        crop = state.gradingParams.crop,
+                        applyCrop = state.activeTab != StudioTab.CROP
+                    ) ?: (viewportNx.coerceIn(0f, 1f) to viewportNy.coerceIn(0f, 1f))
+                    val px = (mapped.first.coerceIn(0f, 1f) * (sampleSource.width - 1)).toInt()
+                        .coerceIn(0, sampleSource.width - 1)
+                    val py = (mapped.second.coerceIn(0f, 1f) * (sampleSource.height - 1)).toInt()
+                        .coerceIn(0, sampleSource.height - 1)
+                    val c = sampleSource.getPixel(px, py)
+                    val r = ((c ushr 16) and 0xFF) / 255f
+                    val g = ((c ushr 8) and 0xFF) / 255f
+                    val b = (c and 0xFF) / 255f
+                    (0.2126f * r + 0.7152f * g + 0.0722f * b).coerceIn(0f, 1f)
+                }
+            }
+            if (touchSwipeSeq.get() != swipeToken || touchSwipeTouchLocked || touchSwipeSnapshot == null) {
+                return@launch
+            }
+            val zone = when {
+                luma < 0.36f -> TouchToneZone.SHADOWS
+                luma > 0.66f -> TouchToneZone.HIGHLIGHTS
+                else -> TouchToneZone.MIDTONES
+            }
+            val baseParams = touchSwipeSnapshot?.gradingParams ?: state.gradingParams
+            touchSwipeZone = zone
+            touchSwipeStartVal = when (zone) {
+                TouchToneZone.SHADOWS -> baseParams.shadows
+                TouchToneZone.MIDTONES -> baseParams.exposure
+                TouchToneZone.HIGHLIGHTS -> baseParams.highlights
+            }
+            touchSwipeSnapshot = touchSwipeSnapshot?.copy(label = "Touch ${zone.label}")
+        }
+    }
+
+    fun onTouchAdjustSwipeUpdate(isVertical: Boolean, totalFraction: Float) {
+        val state = _uiState.value
+        if (!state.isTouchAdjustEnabled || touchSwipeSnapshot == null) return
+        touchSwipeTouchLocked = true
+
+        val (updated, label, valueText) = if (isVertical) {
+            when (touchSwipeZone) {
+                TouchToneZone.MIDTONES -> {
+                    val nextExp = com.example.ui.components.SliderStepMath.quantize(
+                        raw = touchSwipeStartVal + totalFraction * 1.8f,
+                        valueRange = -2f..2f,
+                        step = 0.05f
+                    )
+                    Triple(
+                        state.gradingParams.copy(exposure = nextExp),
+                        TouchToneZone.MIDTONES.label,
+                        String.format(Locale.US, "%+.2f EV", nextExp)
+                    )
+                }
+                TouchToneZone.SHADOWS -> {
+                    val nextSh = com.example.ui.components.SliderStepMath.quantize(
+                        raw = touchSwipeStartVal + totalFraction * 100f,
+                        valueRange = -100f..100f,
+                        step = 1f
+                    )
+                    Triple(
+                        state.gradingParams.copy(shadows = nextSh),
+                        TouchToneZone.SHADOWS.label,
+                        String.format(Locale.US, "%+.0f", nextSh)
+                    )
+                }
+                TouchToneZone.HIGHLIGHTS -> {
+                    val nextHi = com.example.ui.components.SliderStepMath.quantize(
+                        raw = touchSwipeStartVal + totalFraction * 100f,
+                        valueRange = -100f..100f,
+                        step = 1f
+                    )
+                    Triple(
+                        state.gradingParams.copy(highlights = nextHi),
+                        TouchToneZone.HIGHLIGHTS.label,
+                        String.format(Locale.US, "%+.0f", nextHi)
+                    )
+                }
+            }
+        } else {
+            val nextSat = com.example.ui.components.SliderStepMath.quantize(
+                raw = touchSwipeStartSat + totalFraction * 100f,
+                valueRange = -100f..100f,
+                step = 1f
+            )
+            Triple(
+                state.gradingParams.copy(saturation = nextSat),
+                "Saturation",
+                String.format(Locale.US, "%+.0f", nextSat)
+            )
+        }
+
+        gradingInput.value = updated to state.activeLut
+        _uiState.update {
+            it.copy(
+                gradingParams = updated,
+                touchAdjustHudLabel = label,
+                touchAdjustHudValueText = valueText
+            )
+        }
+    }
+
+    fun onTouchAdjustSwipeEnd(commit: Boolean) {
+        touchSwipeSeq.incrementAndGet()
+        touchSwipeTouchLocked = false
+        val baseline = touchSwipeSnapshot
+        touchSwipeSnapshot = null
+        isDraggingFlow.value = false
+        if (baseline == null) {
+            _uiState.update {
+                it.copy(
+                    isDraggingSlider = false,
+                    isTouchAdjustSwiping = false,
+                    touchAdjustHudLabel = null,
+                    touchAdjustHudValueText = null
+                )
+            }
+            return
+        }
+
+        val currentState = _uiState.value
+        if (commit) {
+            if (baseline.gradingParams != currentState.gradingParams) {
+                val label = currentState.touchAdjustHudLabel?.let { "Touch $it" } ?: baseline.label
+                pushUndoSnapshot(baseline.copy(label = label))
+            }
+            _uiState.update {
+                syncHistoryFlags(
+                    it.copy(
+                        isDraggingSlider = false,
+                        isTouchAdjustSwiping = false,
+                        touchAdjustHudLabel = null,
+                        touchAdjustHudValueText = null
+                    )
+                )
+            }
+        } else {
+            gradingInput.value = baseline.gradingParams to currentState.activeLut
+            _uiState.update {
+                syncHistoryFlags(
+                    it.copy(
+                        gradingParams = baseline.gradingParams,
+                        isDraggingSlider = false,
+                        isTouchAdjustSwiping = false,
+                        touchAdjustHudLabel = null,
+                        touchAdjustHudValueText = null
+                    )
+                )
+            }
+        }
+    }
+
     fun pickColorFromCanvas(nx: Float, ny: Float) {
         val state = _uiState.value
         val mode = state.activeEyedropperMode
         if (mode == EyedropperMode.NONE) return
-        val sampleSource = state.previewIdleBitmap ?: fullSourceBitmap.value ?: return
+        val sampleSource = (state.previewIdleBitmap ?: fullSourceBitmap.value)?.takeIf { !it.isRecycled } ?: return
 
         viewModelScope.launch {
             val mappedCoords = GeometryMath.mapOutputUvToSourceUv(
@@ -1506,7 +2066,10 @@ class EditorViewModel(
 
             when (mode) {
                 EyedropperMode.WHITE_BALANCE -> {
-                    val sample = ColorGradingEngine.sampleNormalizedPatch(sampleSource, sampleNx, sampleNy, null)
+                    val sample = withContext(Dispatchers.Default) {
+                        if (sampleSource.isRecycled) null
+                        else ColorGradingEngine.sampleNormalizedPatch(sampleSource, sampleNx, sampleNy, null)
+                    } ?: return@launch
                     val avgGray = ((sample.r + sample.g + sample.b) / 3f).coerceAtLeast(0.05f)
                     val targetTemp = (((sample.b - sample.r) / avgGray) * 115f).coerceIn(-80f, 80f)
                     val targetTint = (((sample.g - (sample.r + sample.b) * 0.5f) / avgGray) * 90f).coerceIn(-65f, 65f)
@@ -1531,12 +2094,15 @@ class EditorViewModel(
 
                 EyedropperMode.POINT_COLOR -> {
                     val latest = _uiState.value
-                    val sample = ColorGradingEngine.sampleNormalizedPatch(
-                        source = sampleSource,
-                        nx = sampleNx,
-                        ny = sampleNy,
-                        paramsForRenderedSample = latest.gradingParams
-                    )
+                    val sample = withContext(Dispatchers.Default) {
+                        if (sampleSource.isRecycled) null
+                        else ColorGradingEngine.sampleNormalizedPatch(
+                            source = sampleSource,
+                            nx = sampleNx,
+                            ny = sampleNy,
+                            paramsForRenderedSample = latest.gradingParams
+                        )
+                    } ?: return@launch
                     pushUndoSnapshot(captureCurrentSnapshot("Point Color Pick"))
                     val updated = latest.gradingParams.copy(
                         pointColor = latest.gradingParams.pointColor.copy(
@@ -1621,7 +2187,7 @@ class EditorViewModel(
     }
 
     fun ensureProfileThumbnailsLoaded() {
-        val dragSource = _uiState.value.previewDragBitmap ?: return
+        val dragSource = _uiState.value.previewDragBitmap?.takeIf { !it.isRecycled } ?: return
         if (profileThumbnailCache.size == CameraProfiles.ALL.size) {
             _uiState.update {
                 it.copy(
@@ -1639,23 +2205,30 @@ class EditorViewModel(
         profileThumbJob = viewModelScope.launch {
             try {
                 val renderedMap = withContext(Dispatchers.Default) {
+                    if (dragSource.isRecycled) return@withContext emptyMap()
                     val thumbBase = ImageIoHelper.createThumbnailBitmap(dragSource)
-                    coroutineScope {
-                        CameraProfiles.ALL.map { profile ->
-                            async(Dispatchers.Default) {
-                                val existing = profileThumbnailCache[profile.id]
-                                val bmp = existing ?: ColorGradingEngine.processFullResolution(
-                                    thumbBase,
-                                    GradingParams(profileId = profile.id, profileAmount = 1f),
-                                    null
-                                ).also { created ->
-                                    if (photoGeneration.get() == expectedToken) {
-                                        profileThumbnailCache[profile.id] = created
+                    try {
+                        coroutineScope {
+                            CameraProfiles.ALL.map { profile ->
+                                async(Dispatchers.Default) {
+                                    val existing = profileThumbnailCache[profile.id]
+                                    val bmp = existing ?: ColorGradingEngine.processFullResolution(
+                                        thumbBase,
+                                        GradingParams(profileId = profile.id, profileAmount = 1f),
+                                        null
+                                    ).also { created ->
+                                        if (photoGeneration.get() == expectedToken) {
+                                            profileThumbnailCache[profile.id] = created
+                                        }
                                     }
+                                    profile.id to bmp
                                 }
-                                profile.id to bmp
-                            }
-                        }.awaitAll().toMap()
+                            }.awaitAll().toMap()
+                        }
+                    } finally {
+                        if (thumbBase !== dragSource && !thumbBase.isRecycled) {
+                            thumbBase.recycle()
+                        }
                     }
                 }
                 if (photoGeneration.get() != expectedToken) return@launch
@@ -1667,8 +2240,8 @@ class EditorViewModel(
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Profile thumbnail generation failed", e)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Profile thumbnail generation failed", t)
                 _uiState.update { it.copy(isLoadingProfileThumbnails = false) }
             }
         }
@@ -1732,12 +2305,8 @@ class EditorViewModel(
         } ?: "LUT: Off"
         pushUndoSnapshot(captureCurrentSnapshot(label))
 
-        val targetIntensity = if (
-            lutId != null &&
-            (currentState.selectedLutId == null || currentState.gradingParams.lutIntensity <= 0.001f)
-        ) {
-            if (currentState.gradingParams.lutIntensity == 0f || currentState.selectedLutId == null) 1f
-            else currentState.gradingParams.lutIntensity
+        val targetIntensity = if (lutId != null) {
+            0.75f
         } else {
             currentState.gradingParams.lutIntensity
         }
@@ -1883,6 +2452,11 @@ class EditorViewModel(
                     activeLut = null,
                     selectedUserPresetId = null,
                     selectedMaskId = null,
+                    touchAdjustSelectedBand = null,
+                    touchAdjustSwatchArgb = null,
+                    touchAdjustHudLabel = null,
+                    touchAdjustHudValueText = null,
+                    isTouchAdjustSwiping = false,
                     viewportResetToken = it.viewportResetToken + 1L,
                     statusBannerMessage = "Color adjustments and LUT reset"
                 )
@@ -1916,10 +2490,6 @@ class EditorViewModel(
         isDraggingFlow.value = false
 
         if (bitmapChanged) {
-            val staleCacheBitmaps = ArrayList<Bitmap>(thumbnailCache.size + profileThumbnailCache.size)
-            staleCacheBitmaps.addAll(thumbnailCache.values)
-            staleCacheBitmaps.addAll(profileThumbnailCache.values)
-
             val token = photoGeneration.incrementAndGet()
             folderLoadJobs.values.forEach { it.cancel() }
             folderLoadJobs.clear()
@@ -1961,11 +2531,6 @@ class EditorViewModel(
                 )
             }
             scheduleHistogramSourcePrep(proxyTexture, token)
-            staleCacheBitmaps.forEach { oldThumb ->
-                if (oldThumb !== proxyTexture && oldThumb !== initialPhotoSourceBitmap && !oldThumb.isRecycled) {
-                    oldThumb.recycle()
-                }
-            }
             _uiState.value.lutFolders
                 .filter { it.isExpanded }
                 .forEach { loadFolderThumbnailsIfNeeded(it.name, token) }
@@ -2095,7 +2660,7 @@ class EditorViewModel(
     fun finishHealStroke() {
         val state = _uiState.value
         val finishedViewportStroke = state.activeHealStroke ?: return
-        val source = fullSourceBitmap.value
+        val source = fullSourceBitmap.value?.takeIf { !it.isRecycled }
         if (source == null) {
             _uiState.update { it.copy(activeHealStroke = null) }
             return
@@ -2145,6 +2710,15 @@ class EditorViewModel(
                 )
             } catch (e: CancellationException) {
                 throw e
+            } catch (oom: OutOfMemoryError) {
+                Log.e(TAG, "Offline heal stroke ran out of memory", oom)
+                _uiState.update {
+                    it.copy(
+                        activeHealStroke = null,
+                        isHealProcessing = false,
+                        statusBannerMessage = "Heal skipped: insufficient device memory"
+                    )
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Offline heal stroke failed", e)
                 _uiState.update {
@@ -2289,8 +2863,8 @@ class EditorViewModel(
         lut: CubeLut?,
         healStrokes: List<HealStroke>,
         options: ExportOptions,
-        saveBlock: suspend (Bitmap) -> String
-    ): Triple<String, Int, Int> {
+        saveBlock: suspend (Bitmap) -> ExportSaveResult
+    ): Triple<ExportSaveResult, Int, Int> {
         var decodedNative: Bitmap? = null
         var healedNative: Bitmap? = null
         var scaledTarget: Bitmap? = null
@@ -2299,20 +2873,36 @@ class EditorViewModel(
         try {
             val baseSource = if (sourceRef != null) {
                 val maxDecodeDim = computeExportDecodeMaxDim(nativeW, nativeH, params, options)
-                val decoded = ImageIoHelper.loadNativeForExport(
-                    context = getApplication(),
-                    sourceRef = sourceRef,
-                    targetMaxSourceDim = maxDecodeDim
-                )
-                decodedNative = decoded
-                if (healStrokes.isNotEmpty()) {
-                    val healed = withContext(Dispatchers.Default) {
-                        OfflineHealEngine.applyAllStrokes(decoded, healStrokes)
+                val decoded = try {
+                    ImageIoHelper.loadNativeForExport(
+                        context = getApplication(),
+                        sourceRef = sourceRef,
+                        targetMaxSourceDim = maxDecodeDim
+                    )
+                } catch (sec: SecurityException) {
+                    Log.w(TAG, "URI read grant expired before export; falling back to 2048px proxy", sec)
+                    null
+                } catch (ise: IllegalStateException) {
+                    if (ise.cause is SecurityException) {
+                        Log.w(TAG, "URI permission revoked before export; falling back to 2048px proxy", ise)
+                        null
+                    } else {
+                        throw ise
                     }
-                    healedNative = healed
-                    healed
+                }
+                if (decoded != null) {
+                    decodedNative = decoded
+                    if (healStrokes.isNotEmpty()) {
+                        val healed = withContext(Dispatchers.Default) {
+                            OfflineHealEngine.applyAllStrokes(decoded, healStrokes)
+                        }
+                        healedNative = healed
+                        healed
+                    } else {
+                        decoded
+                    }
                 } else {
-                    decoded
+                    proxyFallback
                 }
             } else {
                 proxyFallback
@@ -2329,8 +2919,8 @@ class EditorViewModel(
             gradedOutput = rendered
             val outW = rendered.width
             val outH = rendered.height
-            val filename = saveBlock(rendered)
-            return Triple(filename, outW, outH)
+            val saved = saveBlock(rendered)
+            return Triple(saved, outW, outH)
         } finally {
             val ownedTemps = listOfNotNull(gradedOutput, scaledTarget, healedNative, decodedNative)
             ownedTemps.forEach { bmp ->
@@ -2342,7 +2932,7 @@ class EditorViewModel(
     }
 
     fun exportToGallery(options: ExportOptions) {
-        val proxyFallback = fullSourceBitmap.value ?: return
+        val proxyFallback = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
         val sourceRef = activePhotoSourceRef
         val nativeW = nativePhotoWidth
         val nativeH = nativePhotoHeight
@@ -2354,7 +2944,7 @@ class EditorViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(exportStatus = ExportStatus.Exporting) }
             try {
-                val (filename, outW, outH) = renderNativeExportBitmap(
+                val (saved, outW, outH) = renderNativeExportBitmap(
                     proxyFallback = proxyFallback,
                     sourceRef = sourceRef,
                     nativeW = nativeW,
@@ -2370,14 +2960,32 @@ class EditorViewModel(
                         options = options
                     )
                 }
+                val success = ExportStatus.Success(
+                    filename = saved.filename,
+                    width = outW,
+                    height = outH,
+                    uri = saved.uri,
+                    mimeType = saved.mimeType,
+                    format = saved.format,
+                    destinationLabel = saved.destinationLabel
+                )
                 _uiState.update {
                     it.copy(
-                        exportStatus = ExportStatus.Success(filename, outW, outH),
-                        statusBannerMessage = "Exported $filename (${outW}×${outH})"
+                        exportStatus = success,
+                        exportConfirmationToast = success
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (oom: OutOfMemoryError) {
+                Log.e(TAG, "Gallery export out of memory", oom)
+                _uiState.update {
+                    it.copy(
+                        exportStatus = ExportStatus.Error(
+                            "Insufficient memory for full-resolution export. Try 2048 px or 1080 px resolution."
+                        )
+                    )
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Gallery export failed", e)
                 _uiState.update {
@@ -2388,7 +2996,7 @@ class EditorViewModel(
     }
 
     fun exportToDocumentUri(uri: Uri, options: ExportOptions) {
-        val proxyFallback = fullSourceBitmap.value ?: return
+        val proxyFallback = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
         val sourceRef = activePhotoSourceRef
         val nativeW = nativePhotoWidth
         val nativeH = nativePhotoHeight
@@ -2400,7 +3008,7 @@ class EditorViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(exportStatus = ExportStatus.Exporting) }
             try {
-                val (filename, outW, outH) = renderNativeExportBitmap(
+                val (saved, outW, outH) = renderNativeExportBitmap(
                     proxyFallback = proxyFallback,
                     sourceRef = sourceRef,
                     nativeW = nativeW,
@@ -2417,14 +3025,32 @@ class EditorViewModel(
                         options = options
                     )
                 }
+                val success = ExportStatus.Success(
+                    filename = saved.filename,
+                    width = outW,
+                    height = outH,
+                    uri = saved.uri,
+                    mimeType = saved.mimeType,
+                    format = saved.format,
+                    destinationLabel = saved.destinationLabel
+                )
                 _uiState.update {
                     it.copy(
-                        exportStatus = ExportStatus.Success(filename, outW, outH),
-                        statusBannerMessage = "Saved $filename (${outW}×${outH})"
+                        exportStatus = success,
+                        exportConfirmationToast = success
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (oom: OutOfMemoryError) {
+                Log.e(TAG, "Document export out of memory", oom)
+                _uiState.update {
+                    it.copy(
+                        exportStatus = ExportStatus.Error(
+                            "Insufficient memory for full-resolution export. Try 2048 px or 1080 px resolution."
+                        )
+                    )
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Document export failed", e)
                 _uiState.update {
@@ -2438,7 +3064,318 @@ class EditorViewModel(
         _uiState.update { it.copy(exportStatus = ExportStatus.Idle) }
     }
 
+    fun dismissExportConfirmationToast() {
+        _uiState.update { it.copy(exportConfirmationToast = null) }
+    }
+
     fun dismissStatusBanner() {
         _uiState.update { it.copy(statusBannerMessage = null) }
+    }
+
+    // --- Offline MediaPipe Stable Diffusion AI Studio & Multi-Model Manager ---
+
+    fun openAiModelManager() {
+        refreshAiModelStatus()
+        _uiState.update {
+            it.copy(
+                isAiModelManagerVisible = true,
+                aiModelProgress = if (it.aiModelProgress.phase == ModelInstallPhase.ERROR) {
+                    ModelDownloadProgress()
+                } else {
+                    it.aiModelProgress
+                }
+            )
+        }
+    }
+
+    fun dismissAiModelManager() {
+        _uiState.update { it.copy(isAiModelManagerVisible = false) }
+    }
+
+    fun refreshAiModelStatus() {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val catalog = withContext(Dispatchers.IO) {
+                SdModelManager.loadCatalog(ctx)
+            }
+            _uiState.update { state ->
+                val isBusy = state.aiModelProgress.phase == ModelInstallPhase.DOWNLOADING ||
+                    state.aiModelProgress.phase == ModelInstallPhase.EXTRACTING
+                state.copy(
+                    aiModelCatalog = catalog,
+                    aiModelProgress = if (isBusy) state.aiModelProgress else ModelDownloadProgress()
+                )
+            }
+        }
+    }
+
+    fun startBuiltinSd15Download() {
+        launchModelInstall(label = SdModelManager.BUILTIN_SD15_NAME) { ctx, onProgress ->
+            SdModelManager.downloadAndInstallBuiltinSd15(ctx, onProgress)
+        }
+    }
+
+    fun downloadCustomAiModelFromUrl(displayName: String, rawUrl: String) {
+        val label = displayName.trim().ifEmpty { "Custom Model" }
+        launchModelInstall(label = label) { ctx, onProgress ->
+            SdModelManager.downloadAndInstallFromUrl(
+                context = ctx,
+                displayName = displayName,
+                rawUrl = rawUrl,
+                onProgress = onProgress
+            )
+        }
+    }
+
+    fun importLocalAiModelZip(uri: Uri) {
+        launchModelInstall(label = "Local ZIP Model", initialPhase = ModelInstallPhase.EXTRACTING) { ctx, onProgress ->
+            SdModelManager.importLocalZip(
+                context = ctx,
+                uri = uri,
+                onProgress = onProgress
+            )
+        }
+    }
+
+    private fun launchModelInstall(
+        label: String,
+        initialPhase: ModelInstallPhase = ModelInstallPhase.DOWNLOADING,
+        installBlock: suspend (Application, (ModelDownloadProgress) -> Unit) -> AiModelCatalogState
+    ) {
+        if (aiModelDownloadJob?.isActive == true) return
+        val ctx = getApplication<Application>()
+        aiModelDownloadJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    aiModelProgress = ModelDownloadProgress(
+                        phase = initialPhase,
+                        targetLabel = label,
+                        bytesProcessed = 0L,
+                        totalBytes = SdModelManager.APPROXIMATE_MODEL_BYTES
+                    )
+                )
+            }
+            try {
+                val updatedCatalog = installBlock(ctx) { progress ->
+                    _uiState.update { state ->
+                        state.copy(aiModelProgress = progress)
+                    }
+                }
+                val installedName = updatedCatalog.activeModel?.displayName ?: label
+                _uiState.update {
+                    it.copy(
+                        aiModelCatalog = updatedCatalog,
+                        aiModelProgress = ModelDownloadProgress(),
+                        statusBannerMessage = "Installed offline AI model: $installedName"
+                    )
+                }
+            } catch (e: CancellationException) {
+                _uiState.update {
+                    it.copy(aiModelProgress = ModelDownloadProgress(phase = ModelInstallPhase.IDLE))
+                }
+                throw e
+            } catch (t: Throwable) {
+                Log.e(TAG, "AI model install failed", t)
+                _uiState.update {
+                    it.copy(
+                        aiModelProgress = ModelDownloadProgress(
+                            phase = ModelInstallPhase.ERROR,
+                            targetLabel = label,
+                            errorMessage = t.localizedMessage ?: "Failed to install offline AI model."
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelAiModelDownload() {
+        aiModelDownloadJob?.cancel()
+        aiModelDownloadJob = null
+        _uiState.update {
+            it.copy(aiModelProgress = ModelDownloadProgress(phase = ModelInstallPhase.IDLE))
+        }
+    }
+
+    fun selectActiveAiModel(modelId: String) {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val updated = withContext(Dispatchers.IO) {
+                SdModelManager.setActiveModel(ctx, modelId)
+            }
+            val selectedName = updated.activeModel?.displayName
+            _uiState.update {
+                it.copy(
+                    aiModelCatalog = updated,
+                    aiGenerationState = AiGenerationState.Idle,
+                    statusBannerMessage = selectedName?.let { name -> "Active AI model: $name" }
+                )
+            }
+        }
+    }
+
+    fun deleteAiModel(modelId: String) {
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val targetName = _uiState.value.aiModelCatalog.models
+                .firstOrNull { it.id == modelId }
+                ?.displayName
+            val updated = withContext(Dispatchers.IO) {
+                SdModelManager.deleteModel(ctx, modelId)
+            }
+            _uiState.update {
+                it.copy(
+                    aiModelCatalog = updated,
+                    aiGenerationState = AiGenerationState.Idle,
+                    statusBannerMessage = targetName?.let { name -> "Deleted AI model: $name" }
+                )
+            }
+        }
+    }
+
+    fun generateAiPhoto(
+        prompt: String,
+        aspectRatio: AiAspectRatio,
+        steps: Int
+    ) {
+        if (aiGenerationJob?.isActive == true) return
+        val trimmedPrompt = prompt.trim()
+        if (trimmedPrompt.isEmpty()) {
+            _uiState.update {
+                it.copy(aiGenerationState = AiGenerationState.Error("Enter a prompt to create a photo."))
+            }
+            return
+        }
+
+        val ctx = getApplication<Application>()
+        val clampedSteps = SdModelManager.clampInferenceSteps(steps)
+        aiGenerationJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(aiGenerationState = AiGenerationState.Generating(currentStep = 0, totalSteps = clampedSteps))
+            }
+            try {
+                val activeEntry = _uiState.value.activeAiModel
+                val modelDir = withContext(Dispatchers.IO) {
+                    if (activeEntry != null) {
+                        SdModelManager.resolveModelDirectoryForId(ctx, activeEntry.id)
+                    } else {
+                        SdModelManager.resolveActiveModelDirectory(ctx)
+                    }
+                }
+                if (modelDir == null) {
+                    val refreshed = withContext(Dispatchers.IO) { SdModelManager.loadCatalog(ctx) }
+                    _uiState.update {
+                        it.copy(
+                            aiModelCatalog = refreshed,
+                            aiGenerationState = AiGenerationState.Error(
+                                "No offline AI model installed. Download SD v1.5 or add a model in Models."
+                            )
+                        )
+                    }
+                    return@launch
+                }
+
+                val generatedBitmap = OnDeviceImageGenerator.generate(
+                    context = ctx,
+                    modelDir = modelDir,
+                    prompt = trimmedPrompt,
+                    aspectRatio = aspectRatio,
+                    steps = clampedSteps,
+                    onStepProgress = { step, total ->
+                        _uiState.update { state ->
+                            state.copy(aiGenerationState = AiGenerationState.Generating(step, total))
+                        }
+                    }
+                )
+
+                val cachedPngFile = withContext(Dispatchers.IO) {
+                    val outDir = File(ctx.cacheDir, "ai_generated").apply { mkdirs() }
+                    val outFile = File(outDir, "zamlab_ai_${System.currentTimeMillis()}.png")
+                    FileOutputStream(outFile).use { fos ->
+                        generatedBitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                        fos.flush()
+                    }
+                    outFile
+                }
+
+                hasExternalOrUserPhoto.set(true)
+                photoLoadRequestSeq.incrementAndGet()
+                replaceActiveCachedImportFile(cachedPngFile)
+                activePhotoSourceRef = PhotoSourceRef.LocalFile(cachedPngFile)
+                nativePhotoWidth = generatedBitmap.width
+                nativePhotoHeight = generatedBitmap.height
+
+                val shortTitle = trimmedPrompt.take(28).let {
+                    if (trimmedPrompt.length > 28) "$it…" else it
+                }
+                val modelBadge = activeEntry?.displayName?.take(14) ?: "SD 1.5"
+                applyLoadedSourceBitmap(
+                    bitmap = generatedBitmap,
+                    name = "AI • $shortTitle",
+                    clearHealSession = true,
+                    nativeWidth = generatedBitmap.width,
+                    nativeHeight = generatedBitmap.height
+                )
+
+                _uiState.update {
+                    it.copy(
+                        photoFormatInfo = PhotoFormatInfo(
+                            badgeLabel = "AI · $modelBadge",
+                            isRaw = false,
+                            isEmbeddedPreviewOnly = false,
+                            extension = "png"
+                        ),
+                        aiGenerationState = AiGenerationState.Idle,
+                        statusBannerMessage = "Generated offline AI photo (${generatedBitmap.width}×${generatedBitmap.height})"
+                    )
+                }
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(aiGenerationState = AiGenerationState.Idle) }
+                throw e
+            } catch (e: AiGenerationException) {
+                _uiState.update {
+                    it.copy(
+                        aiGenerationState = AiGenerationState.Error(
+                            e.message ?: "Offline image generation failed."
+                        )
+                    )
+                }
+            } catch (oom: OutOfMemoryError) {
+                Log.e(TAG, "AI generation OOM", oom)
+                Runtime.getRuntime().gc()
+                _uiState.update {
+                    it.copy(
+                        aiGenerationState = AiGenerationState.Error(
+                            "Insufficient memory for AI generation. Try closing other apps or lowering steps."
+                        )
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Unexpected AI generation failure", t)
+                _uiState.update {
+                    it.copy(
+                        aiGenerationState = AiGenerationState.Error(
+                            t.localizedMessage ?: "Offline image generation failed."
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelAiGeneration() {
+        aiGenerationJob?.cancel()
+        aiGenerationJob = null
+        _uiState.update { it.copy(aiGenerationState = AiGenerationState.Idle) }
+    }
+
+    fun clearAiGenerationError() {
+        _uiState.update { state ->
+            if (state.aiGenerationState is AiGenerationState.Error) {
+                state.copy(aiGenerationState = AiGenerationState.Idle)
+            } else {
+                state
+            }
+        }
     }
 }
