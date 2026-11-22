@@ -94,6 +94,16 @@ enum class ExportFormat(
         defaultSaveLabel = "Save to Photos",
         defaultFolderDescription = "Pictures/ZamLab"
     ),
+    TIFF(
+        label = "TIFF (16-Bit)",
+        subtitle = "Uncompressed 16-Bit",
+        mimeType = "image/tiff",
+        extension = "tiff",
+        supportsQuality = false,
+        defaultSaveLabel = "Save to Photos",
+        defaultFolderDescription = "Pictures/ZamLab"
+    ),
+
     PDF(
         label = "PDF",
         subtitle = "Print-Ready",
@@ -113,8 +123,11 @@ enum class ExportFormat(
             } else {
                 @Suppress("DEPRECATION")
                 Bitmap.CompressFormat.WEBP
+
             }
             PDF -> Bitmap.CompressFormat.PNG
+            TIFF -> Bitmap.CompressFormat.PNG
+
         }
     }
 }
@@ -914,7 +927,7 @@ object ImageIoHelper {
                 }
                 Triple(collection, "${Environment.DIRECTORY_DOCUMENTS}/ZamLab", "Documents/ZamLab")
             }
-            ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP -> {
+            ExportFormat.TIFF ,ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP -> {
                 Triple(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     "${Environment.DIRECTORY_PICTURES}/ZamLab",
@@ -983,7 +996,7 @@ object ImageIoHelper {
     private fun encodeExportBitmap(bitmap: Bitmap, options: ExportOptions, out: OutputStream) {
         when (options.format) {
             ExportFormat.PDF -> encodePdfToStream(bitmap, out)
-            ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP -> compressBitmap(bitmap, options, out)
+            ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP , ExportFormat.TIFF  -> compressBitmap(bitmap, options, out)
         }
     }
 
@@ -1010,12 +1023,28 @@ object ImageIoHelper {
     }
 
     private fun compressBitmap(bitmap: Bitmap, options: ExportOptions, out: OutputStream) {
+        if (options.format == ExportFormat.TIFF) {
+            val tmpFile = java.io.File.createTempFile("zamlab_16bit_", ".tiff")
+            try {
+                val ok = com.example.nativebridge.NativeBridge.export16BitTiffNative(bitmap, tmpFile.absolutePath)
+                if (!ok) {
+                    throw IllegalStateException("Failed to encode 16-bit TIFF in native engine")
+                }
+                tmpFile.inputStream().use { input -> input.copyTo(out) }
+                out.flush()
+            } finally {
+                tmpFile.delete()
+            }
+            return
+        }
         val quality = options.effectiveQuality
         val compressFormat = options.format.resolveCompressFormat(quality)
         val ok = bitmap.compress(compressFormat, quality, out)
         if (!ok) {
-            throw IllegalStateException("Failed to encode image as ${options.format.extension.uppercase(Locale.ROOT)}.")
+            throw IllegalStateException("Failed to encode image as ${options.format.extension.uppercase(Locale.ROOT)}")
         }
         out.flush()
     }
+
 }
+

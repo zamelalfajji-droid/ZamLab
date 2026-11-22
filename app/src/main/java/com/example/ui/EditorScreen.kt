@@ -1,3 +1,5 @@
+@file:Suppress("UnusedBoxWithConstraintsScope")
+
 package com.example.ui
 
 import android.content.Context
@@ -152,9 +154,15 @@ import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
+
 
 @Composable
+
+
 fun EditorScreen(
+
+
     viewModel: EditorViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -217,6 +225,14 @@ fun EditorScreen(
         }
     )
 
+    val createTiffLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("image/tiff"),
+        onResult = { uri ->
+            uri?.let { viewModel.exportToDocumentUri(it, pendingSafOptions) }
+        }
+    )
+
+
     LaunchedEffect(uiState.statusBannerMessage) {
         val msg = uiState.statusBannerMessage
         if (msg != null) {
@@ -233,7 +249,7 @@ fun EditorScreen(
                 showExportSheet = false
                 viewModel.dismissExportStatus()
             }
-            delay(7000L)
+            delay(7000L.milliseconds)
             viewModel.dismissExportConfirmationToast()
         }
     }
@@ -593,6 +609,8 @@ fun EditorScreen(
                     ExportFormat.JPG -> createJpgLauncher.launch(suggestedName)
                     ExportFormat.WEBP -> createWebpLauncher.launch(suggestedName)
                     ExportFormat.PDF -> createPdfLauncher.launch(suggestedName)
+                    ExportFormat.TIFF -> createTiffLauncher.launch(suggestedName)
+
                 }
             },
             onShareExported = shareExportedAction,
@@ -999,7 +1017,7 @@ private fun TopFloatingGlassHeader(
                                 awaitFirstDown(requireUnconsumed = false)
                                 var holdingOriginal = false
                                 val holdJob = scope.launch {
-                                    delay(160L)
+                                    delay(160L.milliseconds)
                                     holdingOriginal = true
                                     currentCompareChanged(true)
                                 }

@@ -1,5 +1,5 @@
 package com.example.editor
-
+import com.example.nativebridge.NativeBridge
 import android.graphics.Bitmap
 import androidx.compose.runtime.Immutable
 import androidx.core.graphics.createBitmap
@@ -63,7 +63,17 @@ object OfflineHealEngine {
                 ?: throw IllegalStateException("Unable to copy source image.")
         }
         return when (stroke.mode) {
-            HealMode.SPOT_HEAL -> LocalInpaintingEngine.inpaint(sourceBitmap, listOf(stroke))
+            HealMode.SPOT_HEAL -> {
+                val out = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
+                val radiusPx = (stroke.radiusNorm * maxOf(out.width, out.height)).toInt().coerceAtLeast(2)
+                for ((nx, ny) in stroke.points) {
+                    val cx = (nx * out.width).toInt().coerceIn(0, out.width - 1)
+                    val cy = (ny * out.height).toInt().coerceIn(0, out.height - 1)
+                    NativeBridge.healSpotNative(out, cx, cy, radiusPx)
+                }
+                out
+            }
+
             HealMode.CLONE_STAMP -> applyCloneStamp(sourceBitmap, stroke)
             HealMode.PATCH_SMOOTH -> applyPatchSmooth(sourceBitmap, stroke)
         }
