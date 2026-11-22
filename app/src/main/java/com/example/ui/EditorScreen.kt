@@ -1288,7 +1288,11 @@ private fun ActiveToolPanel(
             onSelectWhiteBalancePreset = viewModel::selectWhiteBalancePreset,
             onToggleEyedropper = viewModel::toggleEyedropperMode,
             onAutoTone = viewModel::applyAutoTone,
-            onToggleBlackAndWhite = viewModel::toggleBlackAndWhite
+            onToggleBlackAndWhite = viewModel::toggleBlackAndWhite,
+            onUpdateChromaticAberration = viewModel::updateChromaticAberration,
+            onResetChromaticAberration = viewModel::resetChromaticAberration,
+            onUpdateAnamorphicStreak = viewModel::updateAnamorphicStreak,
+            onResetAnamorphicStreak = viewModel::resetAnamorphicStreak
         )
 
         StudioTab.ALL -> AllParametersPanel(
@@ -1303,7 +1307,11 @@ private fun ActiveToolPanel(
             onToggleEyedropper = viewModel::toggleEyedropperMode,
             onAutoTone = viewModel::applyAutoTone,
             onToggleBlackAndWhite = viewModel::toggleBlackAndWhite,
-            onSaveRecipe = viewModel::saveCurrentLookAsPreset
+            onSaveRecipe = viewModel::saveCurrentLookAsPreset,
+            onUpdateChromaticAberration = viewModel::updateChromaticAberration,
+            onResetChromaticAberration = viewModel::resetChromaticAberration,
+            onUpdateAnamorphicStreak = viewModel::updateAnamorphicStreak,
+            onResetAnamorphicStreak = viewModel::resetAnamorphicStreak
         )
 
         StudioTab.LUTS -> LutPanel(

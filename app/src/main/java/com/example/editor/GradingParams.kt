@@ -524,6 +524,10 @@ data class GradingParams(
     val grain: Float = 0f,          // 0 .. 100
     val grainSize: Float = 25f,     // 0 .. 100
     val grainRoughness: Float = 50f,// 0 .. 100
+    val halation: Float = 0f,           // 0 .. 100
+    val bloom: Float = 0f,              // 0 .. 100
+    val chromaticAberration: Float = 0f,// -50 .. +50
+    val anamorphicStreak: Float = 0f,   // 0 .. 100
 
     // Detail
     val sharpening: Float = 0f,                    // 0 .. 150
@@ -539,7 +543,6 @@ data class GradingParams(
 
     // Optics
     val lensDistortion: Float = 0f,       // -100 .. +100
-    val chromaticAberration: Float = 0f,  // 0 .. 100
 
     // Lens Blur
     val lensBlurAmount: Float = 0f,       // 0 .. 100
@@ -600,13 +603,17 @@ data class GradingParams(
             clarity != 0f ||
             dehaze != 0f ||
             vignette != 0f ||
-            grain > 0f
+            grain > 0f ||
+            halation > 0f ||
+            bloom > 0f ||
+            chromaticAberration != 0f ||
+            anamorphicStreak > 0f
 
     val hasDetailEdits: Boolean
         get() = sharpening > 0f || noiseReduction > 0f || colorNoiseReduction > 0f
 
     val hasOpticsEdits: Boolean
-        get() = lensDistortion != 0f || chromaticAberration > 0f
+        get() = lensDistortion != 0f
 
     val hasLensBlurEdits: Boolean
         get() = lensBlurAmount > 0f || bokehFocus != 50f
@@ -672,7 +679,11 @@ data class GradingParams(
         vignetteHighlights = 0f,
         grain = 0f,
         grainSize = 25f,
-        grainRoughness = 50f
+        grainRoughness = 50f,
+        halation = 0f,
+        bloom = 0f,
+        chromaticAberration = 0f,
+        anamorphicStreak = 0f
     )
 
     fun resetDetail(): GradingParams = copy(
@@ -689,8 +700,7 @@ data class GradingParams(
     )
 
     fun resetOptics(): GradingParams = copy(
-        lensDistortion = 0f,
-        chromaticAberration = 0f
+        lensDistortion = 0f
     )
 
     fun resetLensBlur(): GradingParams = copy(
@@ -775,7 +785,7 @@ data class GradingParams(
                 colorNoiseReductionDetail = s.colorNoiseReductionDetail.coerceIn(0f, 100f),
                 colorNoiseReductionSmoothness = s.colorNoiseReductionSmoothness.coerceIn(0f, 100f),
                 lensDistortion = (s.lensDistortion * t).coerceIn(-100f, 100f),
-                chromaticAberration = (s.chromaticAberration * t).coerceIn(0f, 100f),
+                chromaticAberration = (s.chromaticAberration * t).coerceIn(-50f, 50f),
                 calibration = RgbCalibrationData(
                     redHue = (s.redHue * t).coerceIn(-100f, 100f),
                     redSaturation = (s.redSaturation * t).coerceIn(-100f, 100f),

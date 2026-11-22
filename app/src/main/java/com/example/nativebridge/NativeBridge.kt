@@ -29,4 +29,20 @@ object NativeBridge {
         domainMax: FloatArray,
         intensity: Float
     ): Boolean
+
+    external fun applyHalationBloomNative(
+        bitmap: Bitmap,
+        halation: Float,
+        bloom: Float
+    ): Boolean
+
+    external fun applyChromaticAberrationNative(
+        bitmap: Bitmap,
+        amount: Float
+    ): Boolean
+
+    external fun applyAnamorphicStreakNative(
+        bitmap: Bitmap,
+        amount: Float
+    ): Boolean
 }

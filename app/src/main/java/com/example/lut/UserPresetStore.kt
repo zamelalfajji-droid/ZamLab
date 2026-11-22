@@ -198,6 +198,9 @@ object UserPresetStore {
             put("grain", p.grain.toDouble())
             put("grainSize", p.grainSize.toDouble())
             put("grainRoughness", p.grainRoughness.toDouble())
+            put("halation", p.halation.toDouble())
+            put("bloom", p.bloom.toDouble())
+            put("anamorphicStreak", p.anamorphicStreak.toDouble())
 
             put("sharpening", p.sharpening.toDouble())
             put("sharpenRadius", p.sharpenRadius.toDouble())
@@ -274,6 +277,9 @@ object UserPresetStore {
             grain = obj.optDouble("grain", 0.0).toFloat(),
             grainSize = obj.optDouble("grainSize", 25.0).toFloat(),
             grainRoughness = obj.optDouble("grainRoughness", 50.0).toFloat(),
+            halation = obj.optDouble("halation", 0.0).toFloat().coerceIn(0f, 100f),
+            bloom = obj.optDouble("bloom", 0.0).toFloat().coerceIn(0f, 100f),
+            anamorphicStreak = obj.optDouble("anamorphicStreak", 0.0).toFloat().coerceIn(0f, 100f),
             sharpening = obj.optDouble("sharpening", 0.0).toFloat(),
             sharpenRadius = obj.optDouble("sharpenRadius", 1.0).toFloat(),
             sharpenDetail = obj.optDouble("sharpenDetail", 25.0).toFloat(),
@@ -285,7 +291,7 @@ object UserPresetStore {
             colorNoiseReductionDetail = obj.optDouble("colorNoiseReductionDetail", 50.0).toFloat(),
             colorNoiseReductionSmoothness = obj.optDouble("colorNoiseReductionSmoothness", 50.0).toFloat(),
             lensDistortion = obj.optDouble("lensDistortion", 0.0).toFloat(),
-            chromaticAberration = obj.optDouble("chromaticAberration", 0.0).toFloat(),
+            chromaticAberration = obj.optDouble("chromaticAberration", 0.0).toFloat().coerceIn(-50f, 50f),
             lensBlurAmount = obj.optDouble("lensBlurAmount", 0.0).toFloat(),
             bokehFocus = obj.optDouble("bokehFocus", 50.0).toFloat(),
             calibration = if (calObj != null) {

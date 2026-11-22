@@ -34,6 +34,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BlurCircular
+import androidx.compose.material.icons.filled.BlurLinear
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.Camera
@@ -41,6 +43,7 @@ import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Details
 import androidx.compose.material.icons.filled.FilterBAndW
+import androidx.compose.material.icons.filled.FilterTiltShift
 import androidx.compose.material.icons.filled.Flare
 import androidx.compose.material.icons.filled.Grain
 import androidx.compose.material.icons.filled.InvertColors
@@ -52,6 +55,7 @@ import androidx.compose.material.icons.filled.Tonality
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Vignette
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material.icons.filled.WbTwilight
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -116,7 +120,8 @@ internal enum class FocusSliderTool(
     val valueRange: ClosedFloatingPointRange<Float>,
     val step: Float,
     val testTag: String,
-    val tileTag: String
+    val tileTag: String,
+    val shortLabel: String = label
 ) {
     EXPOSURE("Exposure", Icons.Default.Brightness6, -2f..2f, 0.05f, "slider_exposure", "tool_exposure"),
     CONTRAST("Contrast", Icons.Default.Contrast, -100f..100f, 1f, "slider_contrast", "tool_contrast"),
@@ -133,7 +138,11 @@ internal enum class FocusSliderTool(
     DEHAZE("Dehaze", Icons.Default.BlurOn, -100f..100f, 1f, "slider_dehaze", "tool_dehaze"),
     VIGNETTE("Vignette", Icons.Default.Vignette, -100f..100f, 1f, "slider_vignette", "tool_vignette"),
     SHARPEN("Sharpen", Icons.Default.CenterFocusStrong, 0f..150f, 1f, "slider_sharpening", "tool_sharpen"),
-    GRAIN("Grain", Icons.Default.Grain, 0f..100f, 1f, "slider_grain", "tool_grain")
+    GRAIN("Grain", Icons.Default.Grain, 0f..100f, 1f, "slider_grain", "tool_grain"),
+    HALATION("Halation", Icons.Default.WbTwilight, 0f..100f, 1f, "slider_halation", "tool_halation"),
+    BLOOM("Bloom", Icons.Default.BlurCircular, 0f..100f, 1f, "slider_bloom", "tool_bloom"),
+    CHROMATIC_ABERRATION("Chromatic Aberration", Icons.Default.FilterTiltShift, -50f..50f, 1f, "slider_chromatic_aberration", "tool_chromatic_aberration", "Chroma"),
+    ANAMORPHIC_STREAK("Anamorphic Streak", Icons.Default.BlurLinear, 0f..100f, 1f, "slider_anamorphic_streak", "tool_anamorphic_streak", "Streak")
 }
 
 private sealed interface StripEntry {
@@ -165,6 +174,10 @@ private val AdjustStripEntries: List<StripEntry> = listOf(
     StripEntry.Slider(FocusSliderTool.DEHAZE),
     StripEntry.Slider(FocusSliderTool.VIGNETTE),
     StripEntry.Slider(FocusSliderTool.GRAIN),
+    StripEntry.Slider(FocusSliderTool.HALATION),
+    StripEntry.Slider(FocusSliderTool.BLOOM),
+    StripEntry.Slider(FocusSliderTool.CHROMATIC_ABERRATION),
+    StripEntry.Slider(FocusSliderTool.ANAMORPHIC_STREAK),
     StripEntry.BlackAndWhite,
     StripEntry.Curve,
     StripEntry.HslColor,
@@ -192,6 +205,20 @@ fun AdjustPanel(
     onToggleEyedropper: (EyedropperMode) -> Unit,
     onAutoTone: () -> Unit,
     onToggleBlackAndWhite: () -> Unit,
+    onUpdateChromaticAberration: (Float) -> Unit = { v ->
+        onParamsChange { it.copy(chromaticAberration = v.coerceIn(-50f, 50f)) }
+    },
+    onResetChromaticAberration: () -> Unit = {
+        onDraggingChanged(false)
+        onParamsChange { it.copy(chromaticAberration = 0f) }
+    },
+    onUpdateAnamorphicStreak: (Float) -> Unit = { v ->
+        onParamsChange { it.copy(anamorphicStreak = v.coerceIn(0f, 100f)) }
+    },
+    onResetAnamorphicStreak: () -> Unit = {
+        onDraggingChanged(false)
+        onParamsChange { it.copy(anamorphicStreak = 0f) }
+    },
     modifier: Modifier = Modifier
 ) {
     var selectedTool by remember { mutableStateOf(FocusSliderTool.EXPOSURE) }
@@ -235,12 +262,22 @@ fun AdjustPanel(
             testTag = selectedTool.testTag,
             onValueChange = { next ->
                 onDraggingChanged(true)
-                onParamsChange { it.withToolValue(selectedTool, next) }
+                when (selectedTool) {
+                    FocusSliderTool.CHROMATIC_ABERRATION -> onUpdateChromaticAberration(next)
+                    FocusSliderTool.ANAMORPHIC_STREAK -> onUpdateAnamorphicStreak(next)
+                    else -> onParamsChange { it.withToolValue(selectedTool, next) }
+                }
             },
             onValueChangeFinished = { onDraggingChanged(false) },
             onReset = {
-                onDraggingChanged(false)
-                onParamsChange { it.withToolValue(selectedTool, 0f) }
+                when (selectedTool) {
+                    FocusSliderTool.CHROMATIC_ABERRATION -> onResetChromaticAberration()
+                    FocusSliderTool.ANAMORPHIC_STREAK -> onResetAnamorphicStreak()
+                    else -> {
+                        onDraggingChanged(false)
+                        onParamsChange { it.withToolValue(selectedTool, 0f) }
+                    }
+                }
             },
             modifier = Modifier.padding(horizontal = 12.dp)
         )
@@ -285,16 +322,23 @@ fun AdjustPanel(
 
                     is StripEntry.Slider -> {
                         FocusToolTile(
-                            label = entry.tool.label,
+                            label = entry.tool.shortLabel,
                             icon = entry.tool.icon,
                             selected = selectedTool == entry.tool,
                             hasActiveEdit = params.isModified(entry.tool),
                             testTag = entry.tool.tileTag,
+                            contentDescription = entry.tool.label,
                             onClick = { selectedTool = entry.tool },
                             onDoubleTapReset = {
                                 selectedTool = entry.tool
-                                onDraggingChanged(false)
-                                onParamsChange { it.withToolValue(entry.tool, 0f) }
+                                when (entry.tool) {
+                                    FocusSliderTool.CHROMATIC_ABERRATION -> onResetChromaticAberration()
+                                    FocusSliderTool.ANAMORPHIC_STREAK -> onResetAnamorphicStreak()
+                                    else -> {
+                                        onDraggingChanged(false)
+                                        onParamsChange { it.withToolValue(entry.tool, 0f) }
+                                    }
+                                }
                             }
                         )
                     }
@@ -511,6 +555,7 @@ private fun FocusToolTile(
     selected: Boolean,
     hasActiveEdit: Boolean,
     testTag: String,
+    contentDescription: String = label,
     onClick: () -> Unit,
     onDoubleTapReset: (() -> Unit)? = null
 ) {
@@ -559,7 +604,7 @@ private fun FocusToolTile(
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = label,
+            contentDescription = contentDescription,
             tint = contentTint,
             modifier = Modifier.size(19.dp)
         )
@@ -604,6 +649,10 @@ internal fun GradingParams.valueFor(tool: FocusSliderTool): Float = when (tool) 
     FocusSliderTool.VIGNETTE -> vignette
     FocusSliderTool.SHARPEN -> sharpening
     FocusSliderTool.GRAIN -> grain
+    FocusSliderTool.HALATION -> halation
+    FocusSliderTool.BLOOM -> bloom
+    FocusSliderTool.CHROMATIC_ABERRATION -> chromaticAberration
+    FocusSliderTool.ANAMORPHIC_STREAK -> anamorphicStreak
 }
 
 internal fun GradingParams.isModified(tool: FocusSliderTool): Boolean =
@@ -626,12 +675,19 @@ internal fun GradingParams.withToolValue(tool: FocusSliderTool, value: Float): G
     FocusSliderTool.VIGNETTE -> copy(vignette = value)
     FocusSliderTool.SHARPEN -> copy(sharpening = value)
     FocusSliderTool.GRAIN -> copy(grain = value)
+    FocusSliderTool.HALATION -> copy(halation = value.coerceIn(0f, 100f))
+    FocusSliderTool.BLOOM -> copy(bloom = value.coerceIn(0f, 100f))
+    FocusSliderTool.CHROMATIC_ABERRATION -> copy(chromaticAberration = value.coerceIn(-50f, 50f))
+    FocusSliderTool.ANAMORPHIC_STREAK -> copy(anamorphicStreak = value.coerceIn(0f, 100f))
 }
 
 internal fun formatToolValue(tool: FocusSliderTool, value: Float): String = when (tool) {
     FocusSliderTool.EXPOSURE -> String.format(Locale.US, "%+.2f EV", value)
     FocusSliderTool.SHARPEN,
-    FocusSliderTool.GRAIN -> "${value.roundToInt()}"
+    FocusSliderTool.GRAIN,
+    FocusSliderTool.HALATION,
+    FocusSliderTool.BLOOM,
+    FocusSliderTool.ANAMORPHIC_STREAK -> "${value.roundToInt()}"
     else -> String.format(Locale.US, "%+d", value.roundToInt())
 }
 
@@ -656,6 +712,26 @@ internal fun gradientForTool(tool: FocusSliderTool): List<Color>? = when (tool) 
         Color(0xFF38BDF8),
         Color(0xFFF59E0B),
         Color(0xFFEF4444)
+    )
+    FocusSliderTool.HALATION -> listOf(
+        Color(0xFF475569),
+        Color(0xFFE05336),
+        Color(0xFFFFB74D)
+    )
+    FocusSliderTool.BLOOM -> listOf(
+        Color(0xFF475569),
+        Color(0xFFFDE68A),
+        Color(0xFFFFFBEB)
+    )
+    FocusSliderTool.CHROMATIC_ABERRATION -> listOf(
+        Color(0xFF06B6D4),
+        Color(0xFF9CA3AF),
+        Color(0xFFEC4899)
+    )
+    FocusSliderTool.ANAMORPHIC_STREAK -> listOf(
+        Color(0xFF334155),
+        Color(0xFF0EA5E9),
+        Color(0xFF7DD3FC)
     )
     else -> null
 }

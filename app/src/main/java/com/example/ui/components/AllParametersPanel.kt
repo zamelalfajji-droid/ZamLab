@@ -132,7 +132,11 @@ private val ClassicEffectsDetailTools = listOf(
     FocusSliderTool.DEHAZE,
     FocusSliderTool.VIGNETTE,
     FocusSliderTool.SHARPEN,
-    FocusSliderTool.GRAIN
+    FocusSliderTool.GRAIN,
+    FocusSliderTool.HALATION,
+    FocusSliderTool.BLOOM,
+    FocusSliderTool.CHROMATIC_ABERRATION,
+    FocusSliderTool.ANAMORPHIC_STREAK
 )
 
 private fun countModifiedParameters(params: GradingParams): Int {
@@ -197,6 +201,20 @@ fun AllParametersPanel(
     onAutoTone: () -> Unit,
     onToggleBlackAndWhite: () -> Unit,
     onSaveRecipe: (String) -> Unit,
+    onUpdateChromaticAberration: (Float) -> Unit = { v ->
+        onParamsChange { it.copy(chromaticAberration = v.coerceIn(-50f, 50f)) }
+    },
+    onResetChromaticAberration: () -> Unit = {
+        onDraggingChanged(false)
+        onParamsChange { it.copy(chromaticAberration = 0f) }
+    },
+    onUpdateAnamorphicStreak: (Float) -> Unit = { v ->
+        onParamsChange { it.copy(anamorphicStreak = v.coerceIn(0f, 100f)) }
+    },
+    onResetAnamorphicStreak: () -> Unit = {
+        onDraggingChanged(false)
+        onParamsChange { it.copy(anamorphicStreak = 0f) }
+    },
     modifier: Modifier = Modifier
 ) {
     var selectedFilter by remember { mutableStateOf(AllFilterChip.ALL) }
@@ -430,7 +448,11 @@ fun AllParametersPanel(
                         onOpenProfileMenu = onOpenProfileMenu,
                         onAutoTone = onAutoTone,
                         onToggleBlackAndWhite = onToggleBlackAndWhite,
-                        onBrowseAll = { selectedFilter = AllFilterChip.ALL }
+                        onBrowseAll = { selectedFilter = AllFilterChip.ALL },
+                        onUpdateChromaticAberration = onUpdateChromaticAberration,
+                        onResetChromaticAberration = onResetChromaticAberration,
+                        onUpdateAnamorphicStreak = onUpdateAnamorphicStreak,
+                        onResetAnamorphicStreak = onResetAnamorphicStreak
                     )
                 }
 
@@ -766,12 +788,22 @@ fun AllParametersPanel(
                                     isModified = params.isModified(tool),
                                     onValueChange = { next ->
                                         onDraggingChanged(true)
-                                        onParamsChange { it.withToolValue(tool, next) }
+                                        when (tool) {
+                                            FocusSliderTool.CHROMATIC_ABERRATION -> onUpdateChromaticAberration(next)
+                                            FocusSliderTool.ANAMORPHIC_STREAK -> onUpdateAnamorphicStreak(next)
+                                            else -> onParamsChange { it.withToolValue(tool, next) }
+                                        }
                                     },
                                     onValueChangeFinished = { onDraggingChanged(false) },
                                     onReset = {
-                                        onDraggingChanged(false)
-                                        onParamsChange { it.withToolValue(tool, 0f) }
+                                        when (tool) {
+                                            FocusSliderTool.CHROMATIC_ABERRATION -> onResetChromaticAberration()
+                                            FocusSliderTool.ANAMORPHIC_STREAK -> onResetAnamorphicStreak()
+                                            else -> {
+                                                onDraggingChanged(false)
+                                                onParamsChange { it.withToolValue(tool, 0f) }
+                                            }
+                                        }
                                     }
                                 )
                             }
@@ -881,7 +913,11 @@ private fun EditedOnlyContent(
     onOpenProfileMenu: () -> Unit,
     onAutoTone: () -> Unit,
     onToggleBlackAndWhite: () -> Unit,
-    onBrowseAll: () -> Unit
+    onBrowseAll: () -> Unit,
+    onUpdateChromaticAberration: (Float) -> Unit,
+    onResetChromaticAberration: () -> Unit,
+    onUpdateAnamorphicStreak: (Float) -> Unit,
+    onResetAnamorphicStreak: () -> Unit
 ) {
     if (editedCount == 0) {
         Surface(
@@ -1622,12 +1658,22 @@ private fun EditedOnlyContent(
                     isModified = true,
                     onValueChange = { next ->
                         onDraggingChanged(true)
-                        onParamsChange { it.withToolValue(tool, next) }
+                        when (tool) {
+                            FocusSliderTool.CHROMATIC_ABERRATION -> onUpdateChromaticAberration(next)
+                            FocusSliderTool.ANAMORPHIC_STREAK -> onUpdateAnamorphicStreak(next)
+                            else -> onParamsChange { it.withToolValue(tool, next) }
+                        }
                     },
                     onValueChangeFinished = { onDraggingChanged(false) },
                     onReset = {
-                        onDraggingChanged(false)
-                        onParamsChange { it.withToolValue(tool, 0f) }
+                        when (tool) {
+                            FocusSliderTool.CHROMATIC_ABERRATION -> onResetChromaticAberration()
+                            FocusSliderTool.ANAMORPHIC_STREAK -> onResetAnamorphicStreak()
+                            else -> {
+                                onDraggingChanged(false)
+                                onParamsChange { it.withToolValue(tool, 0f) }
+                            }
+                        }
                     }
                 )
             }

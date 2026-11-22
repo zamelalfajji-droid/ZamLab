@@ -333,3 +333,462 @@ Java_com_example_nativebridge_NativeBridge_applyLut3dNative(
     return JNI_TRUE;
 }
 
+// 5. FILM HALATION & BLOOM (Highlight Threshold + Downsampled Separable Gaussian Blur + Screen Composite)
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_nativebridge_NativeBridge_applyHalationBloomNative(
+        JNIEnv* env,
+        jobject /* this */,
+        jobject bitmap,
+        jfloat halation,
+        jfloat bloom) {
+    if (bitmap == nullptr) return JNI_FALSE;
+
+    const float hal = std::clamp(std::isfinite(halation) ? halation : 0.0f, 0.0f, 1.0f);
+    const float blm = std::clamp(std::isfinite(bloom) ? bloom : 0.0f, 0.0f, 1.0f);
+    if (hal <= 0.0005f && blm <= 0.0005f) {
+        return JNI_TRUE;
+    }
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) return JNI_FALSE;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+    const int w = static_cast<int>(info.width);
+    const int h = static_cast<int>(info.height);
+    if (w <= 0 || h <= 0) return JNI_TRUE;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) return JNI_FALSE;
+
+    const int ds = std::clamp(std::max(w, h) / 480, 1, 4);
+    const int gw = std::max(1, (w + ds - 1) / ds);
+    const int gh = std::max(1, (h + ds - 1) / ds);
+    const bool useHal = hal > 0.0005f;
+    const bool useBloom = blm > 0.0005f;
+
+    std::vector<float> halBuf(useHal ? static_cast<size_t>(gw) * gh * 3 : 0, 0.0f);
+    std::vector<float> bloomBuf(useBloom ? static_cast<size_t>(gw) * gh * 3 : 0, 0.0f);
+
+    auto smoothRamp = [](float edge0, float edge1, float x) -> float {
+        const float denom = std::max(edge1 - edge0, 1e-4f);
+        const float t = std::clamp((x - edge0) / denom, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+
+    const float inv255 = 1.0f / 255.0f;
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(pixels);
+
+    // Pass 1: Box-downsample + Highlight Threshold extraction
+    for (int gy = 0; gy < gh; ++gy) {
+        const int yStart = gy * ds;
+        const int yEnd = std::min(h, yStart + ds);
+        for (int gx = 0; gx < gw; ++gx) {
+            const int xStart = gx * ds;
+            const int xEnd = std::min(w, xStart + ds);
+            float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
+            int cnt = 0;
+            for (int y = yStart; y < yEnd; ++y) {
+                const uint8_t* row = base + static_cast<size_t>(y) * info.stride;
+                for (int x = xStart; x < xEnd; ++x) {
+                    const uint8_t* px = row + x * 4;
+                    sumR += static_cast<float>(px[0]);
+                    sumG += static_cast<float>(px[1]);
+                    sumB += static_cast<float>(px[2]);
+                    cnt++;
+                }
+            }
+            const float invCnt = inv255 / static_cast<float>(std::max(1, cnt));
+            const float r = sumR * invCnt;
+            const float g = sumG * invCnt;
+            const float b = sumB * invCnt;
+            const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            const size_t dstIdx = (static_cast<size_t>(gy) * gw + gx) * 3;
+
+            if (useHal) {
+                const float rawT = smoothRamp(0.65f, 0.96f, lum);
+                const float tH = rawT * (0.45f + 0.55f * rawT);
+                halBuf[dstIdx + 0] = std::min(1.0f, (r * 1.12f + 0.14f) * tH);
+                halBuf[dstIdx + 1] = g * 0.30f * tH;
+                halBuf[dstIdx + 2] = b * 0.07f * tH;
+            }
+            if (useBloom) {
+                const float rawT = smoothRamp(0.54f, 0.94f, lum);
+                const float tB = rawT * (0.55f + 0.45f * rawT);
+                bloomBuf[dstIdx + 0] = r * tB;
+                bloomBuf[dstIdx + 1] = g * tB;
+                bloomBuf[dstIdx + 2] = b * tB;
+            }
+        }
+    }
+
+    // Pass 2: Separable 1D Gaussian Blur (Horizontal + Vertical)
+    auto separableGaussian = [&](std::vector<float>& buf, int radius) {
+        if (radius <= 0 || gw <= 1 || gh <= 1 || buf.empty()) return;
+        const float sigma = std::max(0.8f, static_cast<float>(radius) * 0.45f);
+        const float invTwoSigma2 = 1.0f / (2.0f * sigma * sigma);
+        std::vector<float> kernel(radius * 2 + 1);
+        float kSum = 0.0f;
+        for (int i = -radius; i <= radius; ++i) {
+            const float wt = std::exp(-static_cast<float>(i * i) * invTwoSigma2);
+            kernel[i + radius] = wt;
+            kSum += wt;
+        }
+        const float invKSum = 1.0f / std::max(kSum, 1e-6f);
+        for (float& wt : kernel) wt *= invKSum;
+
+        std::vector<float> tmp(buf.size(), 0.0f);
+        for (int y = 0; y < gh; ++y) {
+            const float* srcRow = buf.data() + static_cast<size_t>(y) * gw * 3;
+            float* dstRow = tmp.data() + static_cast<size_t>(y) * gw * 3;
+            for (int x = 0; x < gw; ++x) {
+                float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    const int sx = std::clamp(x + k, 0, gw - 1);
+                    const float wt = kernel[k + radius];
+                    const float* sp = srcRow + sx * 3;
+                    accR += sp[0] * wt;
+                    accG += sp[1] * wt;
+                    accB += sp[2] * wt;
+                }
+                dstRow[x * 3 + 0] = accR;
+                dstRow[x * 3 + 1] = accG;
+                dstRow[x * 3 + 2] = accB;
+            }
+        }
+        for (int y = 0; y < gh; ++y) {
+            float* dstRow = buf.data() + static_cast<size_t>(y) * gw * 3;
+            for (int x = 0; x < gw; ++x) {
+                float accR = 0.0f, accG = 0.0f, accB = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    const int sy = std::clamp(y + k, 0, gh - 1);
+                    const float wt = kernel[k + radius];
+                    const float* sp = tmp.data() + (static_cast<size_t>(sy) * gw + x) * 3;
+                    accR += sp[0] * wt;
+                    accG += sp[1] * wt;
+                    accB += sp[2] * wt;
+                }
+                dstRow[x * 3 + 0] = accR;
+                dstRow[x * 3 + 1] = accG;
+                dstRow[x * 3 + 2] = accB;
+            }
+        }
+    };
+
+    const int maxGDim = std::max(gw, gh);
+    if (useHal) {
+        const int radH = std::clamp(static_cast<int>(maxGDim * 0.022f), 3, 14);
+        separableGaussian(halBuf, radH);
+    }
+    if (useBloom) {
+        const int radB = std::clamp(static_cast<int>(maxGDim * 0.015f), 2, 10);
+        separableGaussian(bloomBuf, radB);
+    }
+
+    // Pass 3: Bilinear upsample + Screen composite back onto RGBA_8888 bitmap
+    std::vector<int> gx0(w), gx1(w);
+    std::vector<float> tx(w);
+    const float invDs = 1.0f / static_cast<float>(ds);
+    const float maxGx = static_cast<float>(gw - 1);
+    const float maxGy = static_cast<float>(gh - 1);
+    for (int x = 0; x < w; ++x) {
+        const float fx = std::clamp((static_cast<float>(x) + 0.5f) * invDs - 0.5f, 0.0f, maxGx);
+        const int ix = std::clamp(static_cast<int>(std::floor(fx)), 0, gw - 1);
+        gx0[x] = ix;
+        gx1[x] = std::min(ix + 1, gw - 1);
+        tx[x] = fx - static_cast<float>(ix);
+    }
+
+    const float halStrength = hal * 0.90f;
+    const float bloomStrength = blm * 0.80f;
+    uint8_t* mutBase = reinterpret_cast<uint8_t*>(pixels);
+
+    for (int y = 0; y < h; ++y) {
+        const float fy = std::clamp((static_cast<float>(y) + 0.5f) * invDs - 0.5f, 0.0f, maxGy);
+        const int gy0 = std::clamp(static_cast<int>(std::floor(fy)), 0, gh - 1);
+        const int gy1 = std::min(gy0 + 1, gh - 1);
+        const float ty = fy - static_cast<float>(gy0);
+        const size_t rowG0 = static_cast<size_t>(gy0) * gw;
+        const size_t rowG1 = static_cast<size_t>(gy1) * gw;
+        uint8_t* row = mutBase + static_cast<size_t>(y) * info.stride;
+
+        for (int x = 0; x < w; ++x) {
+            const int x0 = gx0[x];
+            const int x1 = gx1[x];
+            const float ftx = tx[x];
+
+            const size_t i00 = (rowG0 + x0) * 3;
+            const size_t i10 = (rowG0 + x1) * 3;
+            const size_t i01 = (rowG1 + x0) * 3;
+            const size_t i11 = (rowG1 + x1) * 3;
+
+            uint8_t* px = row + x * 4;
+            for (int c = 0; c < 3; ++c) {
+                float glow = 0.0f;
+                if (useHal) {
+                    const float top = halBuf[i00 + c] + (halBuf[i10 + c] - halBuf[i00 + c]) * ftx;
+                    const float bot = halBuf[i01 + c] + (halBuf[i11 + c] - halBuf[i01 + c]) * ftx;
+                    glow += (top + (bot - top) * ty) * halStrength;
+                }
+                if (useBloom) {
+                    const float top = bloomBuf[i00 + c] + (bloomBuf[i10 + c] - bloomBuf[i00 + c]) * ftx;
+                    const float bot = bloomBuf[i01 + c] + (bloomBuf[i11 + c] - bloomBuf[i01 + c]) * ftx;
+                    glow += (top + (bot - top) * ty) * bloomStrength;
+                }
+                glow = std::clamp(glow, 0.0f, 1.0f);
+                const float baseC = static_cast<float>(px[c]) * inv255;
+                const float screenC = 1.0f - (1.0f - baseC) * (1.0f - glow);
+                const int outByte = static_cast<int>(std::clamp(screenC, 0.0f, 1.0f) * 255.0f + 0.5f);
+                px[c] = static_cast<uint8_t>(std::clamp(outByte, 0, 255));
+            }
+        }
+    }
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return JNI_TRUE;
+}
+
+// 6. CHROMATIC ABERRATION (Radial R/B Channel UV Shift with Bilinear Interpolation)
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_nativebridge_NativeBridge_applyChromaticAberrationNative(
+        JNIEnv* env,
+        jobject /* this */,
+        jobject bitmap,
+        jfloat amount) {
+    if (bitmap == nullptr) return JNI_FALSE;
+
+    const float norm = std::clamp(std::isfinite(amount) ? amount : 0.0f, -1.0f, 1.0f);
+    if (std::abs(norm) <= 0.0005f) {
+        return JNI_TRUE;
+    }
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) return JNI_FALSE;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+    const int w = static_cast<int>(info.width);
+    const int h = static_cast<int>(info.height);
+    if (w <= 1 || h <= 1) return JNI_TRUE;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) return JNI_FALSE;
+
+    const size_t tightRowBytes = static_cast<size_t>(w) * 4;
+    std::vector<uint8_t> srcCopy(static_cast<size_t>(h) * tightRowBytes);
+    const uint8_t* srcBase = reinterpret_cast<const uint8_t*>(pixels);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = srcBase + static_cast<size_t>(y) * info.stride;
+        std::copy(row, row + tightRowBytes, srcCopy.data() + static_cast<size_t>(y) * tightRowBytes);
+    }
+
+    auto sampleChannelBilinear = [&](float u, float v, int channel) -> uint8_t {
+        const float fx = std::clamp(u * static_cast<float>(w) - 0.5f, 0.0f, static_cast<float>(w - 1));
+        const float fy = std::clamp(v * static_cast<float>(h) - 0.5f, 0.0f, static_cast<float>(h - 1));
+        const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, w - 1);
+        const int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, h - 1);
+        const int x1 = std::min(x0 + 1, w - 1);
+        const int y1 = std::min(y0 + 1, h - 1);
+        const float tx = fx - static_cast<float>(x0);
+        const float ty = fy - static_cast<float>(y0);
+
+        const uint8_t* r0 = srcCopy.data() + static_cast<size_t>(y0) * tightRowBytes;
+        const uint8_t* r1 = srcCopy.data() + static_cast<size_t>(y1) * tightRowBytes;
+        const float c00 = static_cast<float>(r0[x0 * 4 + channel]);
+        const float c10 = static_cast<float>(r0[x1 * 4 + channel]);
+        const float c01 = static_cast<float>(r1[x0 * 4 + channel]);
+        const float c11 = static_cast<float>(r1[x1 * 4 + channel]);
+        const float top = c00 + (c10 - c00) * tx;
+        const float bot = c01 + (c11 - c01) * tx;
+        const int outVal = static_cast<int>(top + (bot - top) * ty + 0.5f);
+        return static_cast<uint8_t>(std::clamp(outVal, 0, 255));
+    };
+
+    const float shiftScale = norm * 0.012f;
+    const float invW = 1.0f / static_cast<float>(w);
+    const float invH = 1.0f / static_cast<float>(h);
+    uint8_t* dstBase = reinterpret_cast<uint8_t*>(pixels);
+
+    for (int y = 0; y < h; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) * invH;
+        const float dy = v - 0.5f;
+        uint8_t* dstRow = dstBase + static_cast<size_t>(y) * info.stride;
+        for (int x = 0; x < w; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) * invW;
+            const float dx = u - 0.5f;
+
+            const float ru = std::clamp(0.5f + dx * (1.0f + shiftScale), 0.0f, 1.0f);
+            const float rv = std::clamp(0.5f + dy * (1.0f + shiftScale), 0.0f, 1.0f);
+            const float bu = std::clamp(0.5f + dx * (1.0f - shiftScale), 0.0f, 1.0f);
+            const float bv = std::clamp(0.5f + dy * (1.0f - shiftScale), 0.0f, 1.0f);
+
+            uint8_t* px = dstRow + x * 4;
+            px[0] = sampleChannelBilinear(ru, rv, 0);
+            px[2] = sampleChannelBilinear(bu, bv, 2);
+        }
+    }
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return JNI_TRUE;
+}
+
+// 7. ANAMORPHIC STREAK (Highlight Threshold + Wide 1D Horizontal Gaussian Streak Tinted Cyan/Blue)
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_example_nativebridge_NativeBridge_applyAnamorphicStreakNative(
+        JNIEnv* env,
+        jobject /* this */,
+        jobject bitmap,
+        jfloat amount) {
+    if (bitmap == nullptr) return JNI_FALSE;
+
+    const float amt = std::clamp(std::isfinite(amount) ? amount : 0.0f, 0.0f, 1.0f);
+    if (amt <= 0.0005f) {
+        return JNI_TRUE;
+    }
+
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) return JNI_FALSE;
+    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) return JNI_FALSE;
+    const int w = static_cast<int>(info.width);
+    const int h = static_cast<int>(info.height);
+    if (w <= 0 || h <= 0) return JNI_TRUE;
+
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) return JNI_FALSE;
+
+    const int ds = std::clamp(std::max(w, h) / 480, 1, 4);
+    const int gw = std::max(1, (w + ds - 1) / ds);
+    const int gh = std::max(1, (h + ds - 1) / ds);
+
+    std::vector<float> hiMask(static_cast<size_t>(gw) * gh, 0.0f);
+    std::vector<float> streakBuf(static_cast<size_t>(gw) * gh, 0.0f);
+
+    auto smoothRamp = [](float edge0, float edge1, float x) -> float {
+        const float denom = std::max(edge1 - edge0, 1e-4f);
+        const float t = std::clamp((x - edge0) / denom, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+
+    const float inv255 = 1.0f / 255.0f;
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(pixels);
+
+    // Pass 1: Box-downsample + Highlight Threshold extraction
+    for (int gy = 0; gy < gh; ++gy) {
+        const int yStart = gy * ds;
+        const int yEnd = std::min(h, yStart + ds);
+        for (int gx = 0; gx < gw; ++gx) {
+            const int xStart = gx * ds;
+            const int xEnd = std::min(w, xStart + ds);
+            float sumR = 0.0f, sumG = 0.0f, sumB = 0.0f;
+            int cnt = 0;
+            for (int y = yStart; y < yEnd; ++y) {
+                const uint8_t* row = base + static_cast<size_t>(y) * info.stride;
+                for (int x = xStart; x < xEnd; ++x) {
+                    const uint8_t* px = row + x * 4;
+                    sumR += static_cast<float>(px[0]);
+                    sumG += static_cast<float>(px[1]);
+                    sumB += static_cast<float>(px[2]);
+                    cnt++;
+                }
+            }
+            const float invCnt = inv255 / static_cast<float>(std::max(1, cnt));
+            const float r = sumR * invCnt;
+            const float g = sumG * invCnt;
+            const float b = sumB * invCnt;
+            const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            const float maxChan = std::max(r, std::max(g, b));
+            const float hiSignal = std::max(lum, maxChan * 0.92f);
+            const float rawT = smoothRamp(0.68f, 0.96f, hiSignal);
+            hiMask[static_cast<size_t>(gy) * gw + gx] = rawT * rawT;
+        }
+    }
+
+    // Pass 2: Wide 1D Horizontal Gaussian Streak along each scanline
+    const int radius = std::max(3, std::min(72, static_cast<int>(gw * (0.05f + 0.14f * amt))));
+    if (gw > 1) {
+        const float sigma = std::max(1.2f, static_cast<float>(radius) * 0.42f);
+        const float invTwoSigma2 = 1.0f / (2.0f * sigma * sigma);
+        std::vector<float> kernel(radius * 2 + 1);
+        float kSum = 0.0f;
+        for (int i = -radius; i <= radius; ++i) {
+            const float wt = std::exp(-static_cast<float>(i * i) * invTwoSigma2);
+            kernel[i + radius] = wt;
+            kSum += wt;
+        }
+        const float invKSum = 1.0f / std::max(kSum, 1e-6f);
+        for (float& wt : kernel) wt *= invKSum;
+
+        for (int gy = 0; gy < gh; ++gy) {
+            const float* srcRow = hiMask.data() + static_cast<size_t>(gy) * gw;
+            float* dstRow = streakBuf.data() + static_cast<size_t>(gy) * gw;
+            for (int gx = 0; gx < gw; ++gx) {
+                float acc = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    const int sx = gx + k;
+                    if (sx >= 0 && sx < gw) {
+                        acc += srcRow[sx] * kernel[k + radius];
+                    }
+                }
+                dstRow[gx] = acc;
+            }
+        }
+    } else {
+        streakBuf = hiMask;
+    }
+
+    // Pass 3: Bilinear upsample + Additive Cool Cyan/Blue Streak Composite
+    std::vector<int> gx0(w), gx1(w);
+    std::vector<float> tx(w);
+    const float invDs = 1.0f / static_cast<float>(ds);
+    const float maxGx = static_cast<float>(gw - 1);
+    const float maxGy = static_cast<float>(gh - 1);
+    for (int x = 0; x < w; ++x) {
+        const float fx = std::clamp((static_cast<float>(x) + 0.5f) * invDs - 0.5f, 0.0f, maxGx);
+        const int ix = std::clamp(static_cast<int>(std::floor(fx)), 0, gw - 1);
+        gx0[x] = ix;
+        gx1[x] = std::min(ix + 1, gw - 1);
+        tx[x] = fx - static_cast<float>(ix);
+    }
+
+    const float streakStrength = amt * 1.65f;
+    uint8_t* mutBase = reinterpret_cast<uint8_t*>(pixels);
+
+    for (int y = 0; y < h; ++y) {
+        const float fy = std::clamp((static_cast<float>(y) + 0.5f) * invDs - 0.5f, 0.0f, maxGy);
+        const int gy0 = std::clamp(static_cast<int>(std::floor(fy)), 0, gh - 1);
+        const int gy1 = std::min(gy0 + 1, gh - 1);
+        const float ty = fy - static_cast<float>(gy0);
+        const size_t rowG0 = static_cast<size_t>(gy0) * gw;
+        const size_t rowG1 = static_cast<size_t>(gy1) * gw;
+        uint8_t* row = mutBase + static_cast<size_t>(y) * info.stride;
+
+        for (int x = 0; x < w; ++x) {
+            const int x0 = gx0[x];
+            const int x1 = gx1[x];
+            const float ftx = tx[x];
+
+            const float s00 = streakBuf[rowG0 + x0];
+            const float s10 = streakBuf[rowG0 + x1];
+            const float s01 = streakBuf[rowG1 + x0];
+            const float s11 = streakBuf[rowG1 + x1];
+            const float top = s00 + (s10 - s00) * ftx;
+            const float bot = s01 + (s11 - s01) * ftx;
+            const float s = (top + (bot - top) * ty) * streakStrength;
+            if (s <= 0.0005f) continue;
+
+            uint8_t* px = row + x * 4;
+            const float baseR = static_cast<float>(px[0]) * inv255;
+            const float baseG = static_cast<float>(px[1]) * inv255;
+            const float baseB = static_cast<float>(px[2]) * inv255;
+
+            const float outR = std::clamp(baseR + s * 0.24f, 0.0f, 1.0f);
+            const float outG = std::clamp(baseG + s * 0.74f, 0.0f, 1.0f);
+            const float outB = std::clamp(baseB + s * 1.00f, 0.0f, 1.0f);
+
+            px[0] = static_cast<uint8_t>(std::clamp(static_cast<int>(outR * 255.0f + 0.5f), 0, 255));
+            px[1] = static_cast<uint8_t>(std::clamp(static_cast<int>(outG * 255.0f + 0.5f), 0, 255));
+            px[2] = static_cast<uint8_t>(std::clamp(static_cast<int>(outB * 255.0f + 0.5f), 0, 255));
+        }
+    }
+
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return JNI_TRUE;
+}
+
+

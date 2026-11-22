@@ -211,6 +211,12 @@ data class EditorUiState(
     val hasHealEdits: Boolean
         get() = healStrokes.isNotEmpty() || preHealPreviewBitmap != null
 
+    val chromaticAberration: Float
+        get() = gradingParams.chromaticAberration
+
+    val anamorphicStreak: Float
+        get() = gradingParams.anamorphicStreak
+
     val activeMask: LocalMask?
         get() = gradingParams.masks.firstOrNull { it.id == selectedMaskId }
             ?: gradingParams.masks.firstOrNull()
@@ -1507,6 +1513,46 @@ class EditorViewModel(
         }
         gradingInput.value = updated to currentState.activeLut
         _uiState.update { syncHistoryFlags(it.copy(gradingParams = updated)) }
+    }
+
+    fun updateHalation(value: Float) {
+        val clamped = value.coerceIn(0f, 100f)
+        updateGradingParams { it.copy(halation = clamped) }
+    }
+
+    fun resetHalation() {
+        setSliderDragging(false)
+        updateGradingParams { it.copy(halation = 0f) }
+    }
+
+    fun updateBloom(value: Float) {
+        val clamped = value.coerceIn(0f, 100f)
+        updateGradingParams { it.copy(bloom = clamped) }
+    }
+
+    fun resetBloom() {
+        setSliderDragging(false)
+        updateGradingParams { it.copy(bloom = 0f) }
+    }
+
+    fun updateChromaticAberration(value: Float) {
+        val clamped = value.coerceIn(-50f, 50f)
+        updateGradingParams { it.copy(chromaticAberration = clamped) }
+    }
+
+    fun resetChromaticAberration() {
+        setSliderDragging(false)
+        updateGradingParams { it.copy(chromaticAberration = 0f) }
+    }
+
+    fun updateAnamorphicStreak(value: Float) {
+        val clamped = value.coerceIn(0f, 100f)
+        updateGradingParams { it.copy(anamorphicStreak = clamped) }
+    }
+
+    fun resetAnamorphicStreak() {
+        setSliderDragging(false)
+        updateGradingParams { it.copy(anamorphicStreak = 0f) }
     }
 
     // --- Crop, Orientation & Geometry / Perspective Actions ---

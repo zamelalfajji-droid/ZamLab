@@ -390,18 +390,31 @@ object ColorGradingEngine {
             .filter { it.enabled && it.hasAdjustments }
             .take(MAX_LOCAL_MASKS)
         val hasActiveMasks = activeMasks.isNotEmpty()
+        val hasOtherEffectsEdits = params.texture != 0f ||
+            params.clarity != 0f ||
+            params.dehaze != 0f ||
+            params.vignette != 0f ||
+            params.grain > 0f
+        val hasHalationOrBloom = params.halation > 0.01f || params.bloom > 0.01f
+        val hasChromaticAberration = abs(params.chromaticAberration) > 0.01f
+        val hasAnamorphicStreak = params.anamorphicStreak > 0.01f
         val hasNonLutPixelEdits =
             params.hasProfileEdits ||
             params.hasLightEdits ||
             params.hasColorEdits ||
-            params.hasEffectsEdits ||
+            hasOtherEffectsEdits ||
             params.hasDetailEdits ||
             params.hasOpticsEdits ||
             params.hasLensBlurEdits ||
             params.hasCalibrationEdits ||
             hasActiveMasks
 
-        val onlyGeomOrCrop = hasGeomOrCrop && !hasNonLutPixelEdits && !applyLut
+        val onlyGeomOrCrop = hasGeomOrCrop &&
+            !hasNonLutPixelEdits &&
+            !applyLut &&
+            !hasHalationOrBloom &&
+            !hasChromaticAberration &&
+            !hasAnamorphicStreak
         if (onlyGeomOrCrop) {
             val pixelsToWrite = srcPixelsRef!!
             srcPixelsRef = null
@@ -417,10 +430,24 @@ object ColorGradingEngine {
             !hasAnyOob &&
             NativeBridge.isAvailable
 
-        if (!hasNonLutPixelEdits && preferNative3dLut) {
+        if (!hasNonLutPixelEdits && (!applyLut || preferNative3dLut)) {
             val out = createBitmap(width, height)
             out.setPixels(srcPixelsRef!!, 0, width, 0, 0, width, height)
-            if (tryApplyLut3dNative(out, effectiveLut!!, lutMix)) {
+            val lutOk = if (preferNative3dLut && effectiveLut != null) {
+                tryApplyLut3dNative(out, effectiveLut, lutMix)
+            } else {
+                true
+            }
+            if (lutOk) {
+                if (hasChromaticAberration) {
+                    applyChromaticAberrationInPlace(out, params.chromaticAberration)
+                }
+                if (hasHalationOrBloom) {
+                    applyHalationBloomInPlace(out, params.halation, params.bloom)
+                }
+                if (hasAnamorphicStreak) {
+                    applyAnamorphicStreakInPlace(out, params.anamorphicStreak)
+                }
                 srcPixelsRef = null
                 rawPixels = null
                 oobMask = null
@@ -432,7 +459,7 @@ object ColorGradingEngine {
         val srcPixels = srcPixelsRef!!
         val dstPixels = IntArray(total)
 
-        val hasOptics = params.lensDistortion != 0f || params.chromaticAberration > 0f
+        val hasOptics = params.lensDistortion != 0f
         val hasSpatialDetail = params.texture != 0f ||
             params.clarity != 0f ||
             params.sharpening > 0f ||
@@ -440,7 +467,6 @@ object ColorGradingEngine {
             params.colorNoiseReduction > 0f
 
         val distortionK = -(params.lensDistortion / 100f) * 0.35f
-        val caShift = (params.chromaticAberration / 100f) * 0.008f
         val lensBlurNorm = (params.lensBlurAmount / 100f).coerceIn(0f, 1f)
         val bokehFocusNorm = (params.bokehFocus / 100f).coerceIn(0f, 1f)
         val minDim = min(width, height).toFloat()
@@ -598,28 +624,9 @@ object ColorGradingEngine {
 
                             val basePx = sampleBilinear(srcPixels, width, height, wu, wv)
                             a = basePx ushr 24
+                            r = ((basePx ushr 16) and 0xFF) * (1f / 255f)
                             g = ((basePx ushr 8) and 0xFF) * (1f / 255f)
-                            if (caShift > 0f) {
-                                val rPx = sampleBilinear(
-                                    srcPixels,
-                                    width,
-                                    height,
-                                    (0.5f + dx * (radialScale + caShift)).coerceIn(0f, 1f),
-                                    (0.5f + dy * (radialScale + caShift)).coerceIn(0f, 1f)
-                                )
-                                val bPx = sampleBilinear(
-                                    srcPixels,
-                                    width,
-                                    height,
-                                    (0.5f + dx * (radialScale - caShift)).coerceIn(0f, 1f),
-                                    (0.5f + dy * (radialScale - caShift)).coerceIn(0f, 1f)
-                                )
-                                r = ((rPx ushr 16) and 0xFF) * (1f / 255f)
-                                b = (bPx and 0xFF) * (1f / 255f)
-                            } else {
-                                r = ((basePx ushr 16) and 0xFF) * (1f / 255f)
-                                b = (basePx and 0xFF) * (1f / 255f)
-                            }
+                            b = (basePx and 0xFF) * (1f / 255f)
                         } else {
                             val px = srcPixels[idx]
                             a = px ushr 24
@@ -1318,7 +1325,535 @@ object ColorGradingEngine {
                 applyLutKotlinOnBitmap(out, effectiveLut, lutMix)
             }
         }
+        if (hasChromaticAberration) {
+            applyChromaticAberrationInPlace(out, params.chromaticAberration)
+        }
+        if (hasHalationOrBloom) {
+            applyHalationBloomInPlace(out, params.halation, params.bloom)
+        }
+        if (hasAnamorphicStreak) {
+            applyAnamorphicStreakInPlace(out, params.anamorphicStreak)
+        }
         out
+    }
+
+    fun applyHalationBloomInPlace(
+        bitmap: Bitmap,
+        halation: Float,
+        bloom: Float
+    ) {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
+        val halNorm = (halation / 100f).coerceIn(0f, 1f)
+        val bloomNorm = (bloom / 100f).coerceIn(0f, 1f)
+        if (halNorm <= 0.0005f && bloomNorm <= 0.0005f) return
+
+        val nativeApplied = if (NativeBridge.isAvailable && bitmap.config == Bitmap.Config.ARGB_8888) {
+            try {
+                NativeBridge.applyHalationBloomNative(bitmap, halNorm, bloomNorm)
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            false
+        }
+        if (!nativeApplied) {
+            applyHalationBloomKotlin(bitmap, halNorm, bloomNorm)
+        }
+    }
+
+    private fun applyHalationBloomKotlin(
+        bitmap: Bitmap,
+        halNorm: Float,
+        bloomNorm: Float
+    ) {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        applyHalationBloomPixels(pixels, w, h, halNorm, bloomNorm)
+        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
+    }
+
+    internal fun applyHalationBloomPixels(
+        pixels: IntArray,
+        w: Int,
+        h: Int,
+        halNorm: Float,
+        bloomNorm: Float
+    ) {
+        if (w <= 0 || h <= 0 || pixels.size < w * h) return
+        val hal = halNorm.coerceIn(0f, 1f)
+        val blm = bloomNorm.coerceIn(0f, 1f)
+        if (hal <= 0.0005f && blm <= 0.0005f) return
+
+        val ds = (max(w, h) / 480).coerceIn(1, 4)
+        val gw = max(1, (w + ds - 1) / ds)
+        val gh = max(1, (h + ds - 1) / ds)
+        val useHal = hal > 0.0005f
+        val useBloom = blm > 0.0005f
+
+        val halBuf = if (useHal) FloatArray(gw * gh * 3) else FloatArray(0)
+        val bloomBuf = if (useBloom) FloatArray(gw * gh * 3) else FloatArray(0)
+        val inv255 = 1f / 255f
+
+        for (gy in 0 until gh) {
+            val yStart = gy * ds
+            val yEnd = min(h, yStart + ds)
+            for (gx in 0 until gw) {
+                val xStart = gx * ds
+                val xEnd = min(w, xStart + ds)
+                var sumR = 0f
+                var sumG = 0f
+                var sumB = 0f
+                var cnt = 0
+                for (y in yStart until yEnd) {
+                    val rowOff = y * w
+                    for (x in xStart until xEnd) {
+                        val px = pixels[rowOff + x]
+                        sumR += ((px ushr 16) and 0xFF)
+                        sumG += ((px ushr 8) and 0xFF)
+                        sumB += (px and 0xFF)
+                        cnt++
+                    }
+                }
+                val invCnt = inv255 / max(1, cnt)
+                val r = sumR * invCnt
+                val g = sumG * invCnt
+                val b = sumB * invCnt
+                val lum = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                val dstIdx = (gy * gw + gx) * 3
+
+                if (useHal) {
+                    val rawT = smoothRamp(0.65f, 0.96f, lum)
+                    val tH = rawT * (0.45f + 0.55f * rawT)
+                    halBuf[dstIdx + 0] = min(1f, (r * 1.12f + 0.14f) * tH)
+                    halBuf[dstIdx + 1] = g * 0.30f * tH
+                    halBuf[dstIdx + 2] = b * 0.07f * tH
+                }
+                if (useBloom) {
+                    val rawT = smoothRamp(0.54f, 0.94f, lum)
+                    val tB = rawT * (0.55f + 0.45f * rawT)
+                    bloomBuf[dstIdx + 0] = r * tB
+                    bloomBuf[dstIdx + 1] = g * tB
+                    bloomBuf[dstIdx + 2] = b * tB
+                }
+            }
+        }
+
+        fun separableGaussian(buf: FloatArray, radius: Int) {
+            if (radius <= 0 || gw <= 1 || gh <= 1 || buf.isEmpty()) return
+            val sigma = max(0.8f, radius * 0.45f)
+            val invTwoSigma2 = 1f / (2f * sigma * sigma)
+            val kernel = FloatArray(radius * 2 + 1)
+            var kSum = 0f
+            for (i in -radius..radius) {
+                val wt = exp(-(i * i).toFloat() * invTwoSigma2)
+                kernel[i + radius] = wt
+                kSum += wt
+            }
+            val invKSum = 1f / max(kSum, 1e-6f)
+            for (i in kernel.indices) kernel[i] *= invKSum
+
+            val tmp = FloatArray(buf.size)
+            for (y in 0 until gh) {
+                val rowBase = y * gw * 3
+                for (x in 0 until gw) {
+                    var accR = 0f
+                    var accG = 0f
+                    var accB = 0f
+                    for (k in -radius..radius) {
+                        val sx = (x + k).coerceIn(0, gw - 1)
+                        val wt = kernel[k + radius]
+                        val sIdx = rowBase + sx * 3
+                        accR += buf[sIdx + 0] * wt
+                        accG += buf[sIdx + 1] * wt
+                        accB += buf[sIdx + 2] * wt
+                    }
+                    val dIdx = rowBase + x * 3
+                    tmp[dIdx + 0] = accR
+                    tmp[dIdx + 1] = accG
+                    tmp[dIdx + 2] = accB
+                }
+            }
+            for (y in 0 until gh) {
+                val dstRowBase = y * gw * 3
+                for (x in 0 until gw) {
+                    var accR = 0f
+                    var accG = 0f
+                    var accB = 0f
+                    for (k in -radius..radius) {
+                        val sy = (y + k).coerceIn(0, gh - 1)
+                        val wt = kernel[k + radius]
+                        val sIdx = (sy * gw + x) * 3
+                        accR += tmp[sIdx + 0] * wt
+                        accG += tmp[sIdx + 1] * wt
+                        accB += tmp[sIdx + 2] * wt
+                    }
+                    val dIdx = dstRowBase + x * 3
+                    buf[dIdx + 0] = accR
+                    buf[dIdx + 1] = accG
+                    buf[dIdx + 2] = accB
+                }
+            }
+        }
+
+        val maxGDim = max(gw, gh)
+        if (useHal) {
+            separableGaussian(halBuf, (maxGDim * 0.022f).toInt().coerceIn(3, 14))
+        }
+        if (useBloom) {
+            separableGaussian(bloomBuf, (maxGDim * 0.015f).toInt().coerceIn(2, 10))
+        }
+
+        val gx0 = IntArray(w)
+        val gx1 = IntArray(w)
+        val tx = FloatArray(w)
+        val invDs = 1f / ds.toFloat()
+        val maxGx = (gw - 1).toFloat()
+        val maxGy = (gh - 1).toFloat()
+        for (x in 0 until w) {
+            val fx = ((x + 0.5f) * invDs - 0.5f).coerceIn(0f, maxGx)
+            val ix = fx.toInt().coerceIn(0, gw - 1)
+            gx0[x] = ix
+            gx1[x] = min(ix + 1, gw - 1)
+            tx[x] = fx - ix
+        }
+
+        val halStrength = hal * 0.90f
+        val bloomStrength = blm * 0.80f
+
+        for (y in 0 until h) {
+            val fy = ((y + 0.5f) * invDs - 0.5f).coerceIn(0f, maxGy)
+            val gy0 = fy.toInt().coerceIn(0, gh - 1)
+            val gy1 = min(gy0 + 1, gh - 1)
+            val ty = fy - gy0
+            val rowG0 = gy0 * gw
+            val rowG1 = gy1 * gw
+            val rowOff = y * w
+
+            for (x in 0 until w) {
+                val x0 = gx0[x]
+                val x1 = gx1[x]
+                val ftx = tx[x]
+                val i00 = (rowG0 + x0) * 3
+                val i10 = (rowG0 + x1) * 3
+                val i01 = (rowG1 + x0) * 3
+                val i11 = (rowG1 + x1) * 3
+
+                val px = pixels[rowOff + x]
+                val a = px and 0xFF000000.toInt()
+                val baseR = ((px ushr 16) and 0xFF) * inv255
+                val baseG = ((px ushr 8) and 0xFF) * inv255
+                val baseB = (px and 0xFF) * inv255
+
+                var glowR = 0f
+                var glowG = 0f
+                var glowB = 0f
+                if (useHal) {
+                    val topR = halBuf[i00 + 0] + (halBuf[i10 + 0] - halBuf[i00 + 0]) * ftx
+                    val botR = halBuf[i01 + 0] + (halBuf[i11 + 0] - halBuf[i01 + 0]) * ftx
+                    glowR += (topR + (botR - topR) * ty) * halStrength
+
+                    val topG = halBuf[i00 + 1] + (halBuf[i10 + 1] - halBuf[i00 + 1]) * ftx
+                    val botG = halBuf[i01 + 1] + (halBuf[i11 + 1] - halBuf[i01 + 1]) * ftx
+                    glowG += (topG + (botG - topG) * ty) * halStrength
+
+                    val topB = halBuf[i00 + 2] + (halBuf[i10 + 2] - halBuf[i00 + 2]) * ftx
+                    val botB = halBuf[i01 + 2] + (halBuf[i11 + 2] - halBuf[i01 + 2]) * ftx
+                    glowB += (topB + (botB - topB) * ty) * halStrength
+                }
+                if (useBloom) {
+                    val topR = bloomBuf[i00 + 0] + (bloomBuf[i10 + 0] - bloomBuf[i00 + 0]) * ftx
+                    val botR = bloomBuf[i01 + 0] + (bloomBuf[i11 + 0] - bloomBuf[i01 + 0]) * ftx
+                    glowR += (topR + (botR - topR) * ty) * bloomStrength
+
+                    val topG = bloomBuf[i00 + 1] + (bloomBuf[i10 + 1] - bloomBuf[i00 + 1]) * ftx
+                    val botG = bloomBuf[i01 + 1] + (bloomBuf[i11 + 1] - bloomBuf[i01 + 1]) * ftx
+                    glowG += (topG + (botG - topG) * ty) * bloomStrength
+
+                    val topB = bloomBuf[i00 + 2] + (bloomBuf[i10 + 2] - bloomBuf[i00 + 2]) * ftx
+                    val botB = bloomBuf[i01 + 2] + (bloomBuf[i11 + 2] - bloomBuf[i01 + 2]) * ftx
+                    glowB += (topB + (botB - topB) * ty) * bloomStrength
+                }
+
+                val gr = glowR.coerceIn(0f, 1f)
+                val gg = glowG.coerceIn(0f, 1f)
+                val gb = glowB.coerceIn(0f, 1f)
+
+                val outR = (1f - (1f - baseR) * (1f - gr)).coerceIn(0f, 1f)
+                val outG = (1f - (1f - baseG) * (1f - gg)).coerceIn(0f, 1f)
+                val outB = (1f - (1f - baseB) * (1f - gb)).coerceIn(0f, 1f)
+
+                val ri = (outR * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val gi = (outG * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val bi = (outB * 255f + 0.5f).toInt().coerceIn(0, 255)
+                pixels[rowOff + x] = a or (ri shl 16) or (gi shl 8) or bi
+            }
+        }
+    }
+
+    fun applyChromaticAberrationInPlace(
+        bitmap: Bitmap,
+        chromaticAberration: Float
+    ) {
+        if (bitmap.isRecycled || bitmap.width <= 1 || bitmap.height <= 1) return
+        val amountNorm = (chromaticAberration / 50f).coerceIn(-1f, 1f)
+        if (abs(amountNorm) <= 0.0005f) return
+
+        val nativeApplied = if (NativeBridge.isAvailable && bitmap.config == Bitmap.Config.ARGB_8888) {
+            try {
+                NativeBridge.applyChromaticAberrationNative(bitmap, amountNorm)
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            false
+        }
+        if (!nativeApplied) {
+            applyChromaticAberrationKotlin(bitmap, amountNorm)
+        }
+    }
+
+    private fun applyChromaticAberrationKotlin(
+        bitmap: Bitmap,
+        amountNorm: Float
+    ) {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        applyChromaticAberrationPixels(pixels, w, h, amountNorm)
+        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
+    }
+
+    internal fun applyChromaticAberrationPixels(
+        pixels: IntArray,
+        w: Int,
+        h: Int,
+        amountNorm: Float
+    ) {
+        if (w <= 1 || h <= 1 || pixels.size < w * h) return
+        val norm = amountNorm.coerceIn(-1f, 1f)
+        if (abs(norm) <= 0.0005f) return
+
+        val src = pixels.copyOf()
+        val shiftScale = norm * 0.012f
+        val invW = 1f / w.toFloat()
+        val invH = 1f / h.toFloat()
+        val maxFx = (w - 1).toFloat()
+        val maxFy = (h - 1).toFloat()
+
+        fun sampleChan(u: Float, v: Float, shiftBits: Int): Int {
+            val fx = (u * w - 0.5f).coerceIn(0f, maxFx)
+            val fy = (v * h - 0.5f).coerceIn(0f, maxFy)
+            val x0 = fx.toInt().coerceIn(0, w - 1)
+            val y0 = fy.toInt().coerceIn(0, h - 1)
+            val x1 = min(x0 + 1, w - 1)
+            val y1 = min(y0 + 1, h - 1)
+            val tx = fx - x0
+            val ty = fy - y0
+
+            val r0 = y0 * w
+            val r1 = y1 * w
+            val c00 = (src[r0 + x0] ushr shiftBits) and 0xFF
+            val c10 = (src[r0 + x1] ushr shiftBits) and 0xFF
+            val c01 = (src[r1 + x0] ushr shiftBits) and 0xFF
+            val c11 = (src[r1 + x1] ushr shiftBits) and 0xFF
+            val top = c00 + (c10 - c00) * tx
+            val bot = c01 + (c11 - c01) * tx
+            return (top + (bot - top) * ty + 0.5f).toInt().coerceIn(0, 255)
+        }
+
+        for (y in 0 until h) {
+            val v = (y + 0.5f) * invH
+            val dy = v - 0.5f
+            val rowOff = y * w
+            for (x in 0 until w) {
+                val u = (x + 0.5f) * invW
+                val dx = u - 0.5f
+
+                val ru = (0.5f + dx * (1f + shiftScale)).coerceIn(0f, 1f)
+                val rv = (0.5f + dy * (1f + shiftScale)).coerceIn(0f, 1f)
+                val bu = (0.5f + dx * (1f - shiftScale)).coerceIn(0f, 1f)
+                val bv = (0.5f + dy * (1f - shiftScale)).coerceIn(0f, 1f)
+
+                val orig = src[rowOff + x]
+                val aAndG = orig and 0xFF00FF00.toInt()
+                val rOut = sampleChan(ru, rv, 16)
+                val bOut = sampleChan(bu, bv, 0)
+                pixels[rowOff + x] = aAndG or (rOut shl 16) or bOut
+            }
+        }
+    }
+
+    fun applyAnamorphicStreakInPlace(
+        bitmap: Bitmap,
+        anamorphicStreak: Float
+    ) {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
+        val amountNorm = (anamorphicStreak / 100f).coerceIn(0f, 1f)
+        if (amountNorm <= 0.0005f) return
+
+        val nativeApplied = if (NativeBridge.isAvailable && bitmap.config == Bitmap.Config.ARGB_8888) {
+            try {
+                NativeBridge.applyAnamorphicStreakNative(bitmap, amountNorm)
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            false
+        }
+        if (!nativeApplied) {
+            applyAnamorphicStreakKotlin(bitmap, amountNorm)
+        }
+    }
+
+    private fun applyAnamorphicStreakKotlin(
+        bitmap: Bitmap,
+        amountNorm: Float
+    ) {
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        applyAnamorphicStreakPixels(pixels, w, h, amountNorm)
+        bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
+    }
+
+    internal fun applyAnamorphicStreakPixels(
+        pixels: IntArray,
+        w: Int,
+        h: Int,
+        amountNorm: Float
+    ) {
+        if (w <= 0 || h <= 0 || pixels.size < w * h) return
+        val amt = amountNorm.coerceIn(0f, 1f)
+        if (amt <= 0.0005f) return
+
+        val ds = (max(w, h) / 480).coerceIn(1, 4)
+        val gw = max(1, (w + ds - 1) / ds)
+        val gh = max(1, (h + ds - 1) / ds)
+        val hiMask = FloatArray(gw * gh)
+        val streakBuf = FloatArray(gw * gh)
+        val inv255 = 1f / 255f
+
+        for (gy in 0 until gh) {
+            val yStart = gy * ds
+            val yEnd = min(h, yStart + ds)
+            for (gx in 0 until gw) {
+                val xStart = gx * ds
+                val xEnd = min(w, xStart + ds)
+                var sumR = 0f
+                var sumG = 0f
+                var sumB = 0f
+                var cnt = 0
+                for (y in yStart until yEnd) {
+                    val rowOff = y * w
+                    for (x in xStart until xEnd) {
+                        val px = pixels[rowOff + x]
+                        sumR += ((px ushr 16) and 0xFF)
+                        sumG += ((px ushr 8) and 0xFF)
+                        sumB += (px and 0xFF)
+                        cnt++
+                    }
+                }
+                val invCnt = inv255 / max(1, cnt)
+                val r = sumR * invCnt
+                val g = sumG * invCnt
+                val b = sumB * invCnt
+                val lum = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                val maxChan = max(r, max(g, b))
+                val hiSignal = max(lum, maxChan * 0.92f)
+                val rawT = smoothRamp(0.68f, 0.96f, hiSignal)
+                hiMask[gy * gw + gx] = rawT * rawT
+            }
+        }
+
+        val radius = max(3, min(72, (gw * (0.05f + 0.14f * amt)).toInt()))
+        if (gw > 1) {
+            val sigma = max(1.2f, radius * 0.42f)
+            val invTwoSigma2 = 1f / (2f * sigma * sigma)
+            val kernel = FloatArray(radius * 2 + 1)
+            var kSum = 0f
+            for (i in -radius..radius) {
+                val wt = exp(-(i * i).toFloat() * invTwoSigma2)
+                kernel[i + radius] = wt
+                kSum += wt
+            }
+            val invKSum = 1f / max(kSum, 1e-6f)
+            for (i in kernel.indices) kernel[i] *= invKSum
+
+            for (gy in 0 until gh) {
+                val rowOff = gy * gw
+                for (gx in 0 until gw) {
+                    var acc = 0f
+                    for (k in -radius..radius) {
+                        val sx = gx + k
+                        if (sx in 0 until gw) {
+                            acc += hiMask[rowOff + sx] * kernel[k + radius]
+                        }
+                    }
+                    streakBuf[rowOff + gx] = acc
+                }
+            }
+        } else {
+            hiMask.copyInto(streakBuf)
+        }
+
+        val gx0 = IntArray(w)
+        val gx1 = IntArray(w)
+        val tx = FloatArray(w)
+        val invDs = 1f / ds.toFloat()
+        val maxGx = (gw - 1).toFloat()
+        val maxGy = (gh - 1).toFloat()
+        for (x in 0 until w) {
+            val fx = ((x + 0.5f) * invDs - 0.5f).coerceIn(0f, maxGx)
+            val ix = fx.toInt().coerceIn(0, gw - 1)
+            gx0[x] = ix
+            gx1[x] = min(ix + 1, gw - 1)
+            tx[x] = fx - ix
+        }
+
+        val streakStrength = amt * 1.65f
+        for (y in 0 until h) {
+            val fy = ((y + 0.5f) * invDs - 0.5f).coerceIn(0f, maxGy)
+            val gy0 = fy.toInt().coerceIn(0, gh - 1)
+            val gy1 = min(gy0 + 1, gh - 1)
+            val ty = fy - gy0
+            val rowG0 = gy0 * gw
+            val rowG1 = gy1 * gw
+            val rowOff = y * w
+
+            for (x in 0 until w) {
+                val x0 = gx0[x]
+                val x1 = gx1[x]
+                val ftx = tx[x]
+
+                val s00 = streakBuf[rowG0 + x0]
+                val s10 = streakBuf[rowG0 + x1]
+                val s01 = streakBuf[rowG1 + x0]
+                val s11 = streakBuf[rowG1 + x1]
+                val top = s00 + (s10 - s00) * ftx
+                val bot = s01 + (s11 - s01) * ftx
+                val s = (top + (bot - top) * ty) * streakStrength
+                if (s <= 0.0005f) continue
+
+                val px = pixels[rowOff + x]
+                val a = px and 0xFF000000.toInt()
+                val baseR = ((px ushr 16) and 0xFF) * inv255
+                val baseG = ((px ushr 8) and 0xFF) * inv255
+                val baseB = (px and 0xFF) * inv255
+
+                val outR = (baseR + s * 0.24f).coerceIn(0f, 1f)
+                val outG = (baseG + s * 0.74f).coerceIn(0f, 1f)
+                val outB = (baseB + s * 1.00f).coerceIn(0f, 1f)
+
+                val ri = (outR * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val gi = (outG * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val bi = (outB * 255f + 0.5f).toInt().coerceIn(0, 255)
+                pixels[rowOff + x] = a or (ri shl 16) or (gi shl 8) or bi
+            }
+        }
     }
 
     private fun tryApplyLut3dNative(

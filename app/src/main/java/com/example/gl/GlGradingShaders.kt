@@ -124,6 +124,8 @@ object GlGradingShaders {
         uniform vec4 uVignetteParams1;
         uniform vec2 uVignetteParams2;
         uniform vec3 uGrainParams;
+        uniform vec2 uHalationBloom;
+        uniform float uAnamorphicStreak;
 
         uniform float uHasLut;
         uniform float uLutSize;
@@ -540,7 +542,7 @@ object GlGradingShaders {
                     return;
                 }
                 texel = texture2D(uImageTex, clamp(srcUv, 0.0, 1.0));
-                if (uChromaticAberration > 0.0) {
+                if (abs(uChromaticAberration) > 0.00001) {
                     texel.r = sampleSourceClamped(vec2(0.5) + d * (radialScale + uChromaticAberration)).r;
                     texel.b = sampleSourceClamped(vec2(0.5) + d * (radialScale - uChromaticAberration)).b;
                 }
@@ -944,6 +946,75 @@ object GlGradingShaders {
                 c = mix(c, clamp(lutColor, 0.0, 1.0), uLutIntensity);
             }
 
+            // 14. Film Halation & Bloom (live GPU highlight threshold + radial Gaussian scatter)
+            if (uHalationBloom.x > 0.001 || uHalationBloom.y > 0.001) {
+                float minRes = max(min(uImageRes.x, uImageRes.y), 1.0);
+                vec2 stepScale = vec2(minRes / max(uImageRes.x, 1.0), minRes / max(uImageRes.y, 1.0));
+                vec2 halRadius = stepScale * 0.022;
+                vec2 blmRadius = stepScale * 0.015;
+                vec3 halAcc = vec3(0.0);
+                vec3 blmAcc = vec3(0.0);
+                float halW = 0.0;
+                float blmW = 0.0;
+
+                for (int ring = 0; ring < 2; ring++) {
+                    float rFrac = (ring == 0) ? 0.45 : 1.0;
+                    float gWt = (ring == 0) ? 1.0 : 0.48;
+                    for (int dir = 0; dir < 8; dir++) {
+                        float ang = float(dir) * 0.78539816 + float(ring) * 0.39269908;
+                        vec2 dirVec = vec2(cos(ang), sin(ang));
+
+                        if (uHalationBloom.x > 0.001) {
+                            vec3 sH = sampleSourceClamped(uv + dirVec * (halRadius * rFrac));
+                            float lumH = lumaRec709(sH);
+                            float rawH = smoothRamp(0.65, 0.96, lumH);
+                            float tH = rawH * (0.45 + 0.55 * rawH);
+                            vec3 halTint = vec3(min(1.0, (sH.r * 1.12 + 0.14) * tH), sH.g * 0.30 * tH, sH.b * 0.07 * tH);
+                            halAcc += halTint * gWt;
+                            halW += gWt;
+                        }
+                        if (uHalationBloom.y > 0.001) {
+                            vec3 sB = sampleSourceClamped(uv + dirVec * (blmRadius * rFrac));
+                            float lumB = lumaRec709(sB);
+                            float rawB = smoothRamp(0.54, 0.94, lumB);
+                            float tB = rawB * (0.55 + 0.45 * rawB);
+                            blmAcc += sB * tB * gWt;
+                            blmW += gWt;
+                        }
+                    }
+                }
+
+                vec3 glow = vec3(0.0);
+                if (uHalationBloom.x > 0.001 && halW > 0.0) {
+                    glow += (halAcc / halW) * (uHalationBloom.x * 0.90);
+                }
+                if (uHalationBloom.y > 0.001 && blmW > 0.0) {
+                    glow += (blmAcc / blmW) * (uHalationBloom.y * 0.80);
+                }
+                glow = clamp(glow, 0.0, 1.0);
+                c = clamp(1.0 - (1.0 - c) * (1.0 - glow), 0.0, 1.0);
+            }
+
+            // 15. Anamorphic Streak (live GPU horizontal highlight threshold + wide 1D Gaussian cyan/blue streak)
+            if (uAnamorphicStreak > 0.001) {
+                float spanX = 0.04 + 0.14 * uAnamorphicStreak;
+                float sAcc = 0.0;
+                float sW = 0.0;
+                for (int i = -6; i <= 6; i++) {
+                    float tNorm = float(i) / 6.0;
+                    float gWt = exp(-tNorm * tNorm * 2.2);
+                    vec3 sTap = sampleSourceClamped(vec2(uv.x + tNorm * spanX, uv.y));
+                    float sLum = lumaRec709(sTap);
+                    float sMax = max(sTap.r, max(sTap.g, sTap.b));
+                    float hiSig = max(sLum, sMax * 0.92);
+                    float rawS = smoothRamp(0.68, 0.96, hiSig);
+                    sAcc += (rawS * rawS) * gWt;
+                    sW += gWt;
+                }
+                float streak = (sW > 0.0) ? (sAcc / sW) * (uAnamorphicStreak * 1.65) : 0.0;
+                c = clamp(c + vec3(0.24, 0.74, 1.00) * streak, 0.0, 1.0);
+            }
+
             gl_FragColor = vec4(c, texel.a);
         }
     """
@@ -1157,6 +1228,8 @@ object GlGradingShaders {
         val uVignetteParams1 = GLES20.glGetUniformLocation(program, "uVignetteParams1")
         val uVignetteParams2 = GLES20.glGetUniformLocation(program, "uVignetteParams2")
         val uGrainParams = GLES20.glGetUniformLocation(program, "uGrainParams")
+        val uHalationBloom = GLES20.glGetUniformLocation(program, "uHalationBloom")
+        val uAnamorphicStreak = GLES20.glGetUniformLocation(program, "uAnamorphicStreak")
 
         val uHasLut = GLES20.glGetUniformLocation(program, "uHasLut")
         val uLutSize = GLES20.glGetUniformLocation(program, "uLutSize")
@@ -1297,10 +1370,13 @@ object GlGradingShaders {
         }
 
         // Optics
-        val hasOptics = params.lensDistortion != 0f || params.chromaticAberration > 0f
+        val hasOptics = params.lensDistortion != 0f || kotlin.math.abs(params.chromaticAberration) > 0.01f
         GLES20.glUniform1f(handles.uHasOptics, if (hasOptics) 1f else 0f)
         GLES20.glUniform1f(handles.uLensDistortion, -(params.lensDistortion / 100f) * 0.35f)
-        GLES20.glUniform1f(handles.uChromaticAberration, (params.chromaticAberration / 100f) * 0.008f)
+        GLES20.glUniform1f(
+            handles.uChromaticAberration,
+            (params.chromaticAberration / 50f).coerceIn(-1f, 1f) * 0.012f
+        )
 
         // Lens Blur
         GLES20.glUniform1f(handles.uLensBlurAmount, (params.lensBlurAmount / 100f).coerceIn(0f, 1f))
@@ -1504,6 +1580,15 @@ object GlGradingShaders {
             (params.grain / 100f) * 0.16f,
             (params.grainSize / 100f).coerceIn(0f, 1f),
             (params.grainRoughness / 100f).coerceIn(0f, 1f)
+        )
+        GLES20.glUniform2f(
+            handles.uHalationBloom,
+            (params.halation / 100f).coerceIn(0f, 1f),
+            (params.bloom / 100f).coerceIn(0f, 1f)
+        )
+        GLES20.glUniform1f(
+            handles.uAnamorphicStreak,
+            (params.anamorphicStreak / 100f).coerceIn(0f, 1f)
         )
 
         // External .cube LUT (XMP presets populate sliders directly and do NOT apply baked LUT)

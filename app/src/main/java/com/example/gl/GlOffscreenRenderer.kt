@@ -40,13 +40,30 @@ object GlOffscreenRenderer {
             return@withContext source.copy(Bitmap.Config.ARGB_8888, false)
         }
 
+        val glParams = params.copy(
+            chromaticAberration = 0f,
+            anamorphicStreak = 0f
+        )
         val glBitmap = runCatching {
-            renderViaEglPbuffer(source, params, lut)
+            renderViaEglPbuffer(source, glParams, lut)
         }.onFailure { e ->
             Log.w(TAG, "Offscreen GL export fallback to CPU engine: ${e.message}")
         }.getOrNull()
 
-        glBitmap ?: ColorGradingEngine.processFullResolution(source, params, lut)
+        if (glBitmap != null) {
+            if (kotlin.math.abs(params.chromaticAberration) > 0.01f) {
+                ColorGradingEngine.applyChromaticAberrationInPlace(glBitmap, params.chromaticAberration)
+            }
+            if (params.halation > 0.01f || params.bloom > 0.01f) {
+                ColorGradingEngine.applyHalationBloomInPlace(glBitmap, params.halation, params.bloom)
+            }
+            if (params.anamorphicStreak > 0.01f) {
+                ColorGradingEngine.applyAnamorphicStreakInPlace(glBitmap, params.anamorphicStreak)
+            }
+            glBitmap
+        } else {
+            ColorGradingEngine.processFullResolution(source, params, lut)
+        }
     }
 
     private fun renderViaEglPbuffer(
