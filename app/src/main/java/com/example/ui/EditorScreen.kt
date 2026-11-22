@@ -147,6 +147,7 @@ import com.example.ui.theme.StudioBackground
 import com.example.ui.theme.StudioCharcoal
 import com.example.ui.theme.StudioCinemaAmber
 import com.example.ui.theme.StudioCoolWhite
+import com.example.ui.theme.StudioDockActivePill
 import com.example.ui.theme.StudioGlassHairline
 import com.example.ui.theme.StudioGlassHighlight
 import com.example.ui.theme.StudioGlassSurface
@@ -160,6 +161,7 @@ import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
@@ -824,7 +826,7 @@ private fun ImmersiveCanvasStage(
                             imageVector = StudioIcons.HistogramBars,
                             contentDescription = stringResource(R.string.cd_toggle_histogram),
                             tint = if (uiState.showHistogram) StudioCinemaAmber else StudioMutedSlate,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                         if (uiState.showHistogram) {
                             Box(
@@ -890,7 +892,7 @@ private fun TopFloatingGlassHeader(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val useCompactScroll = maxWidth < 312.dp
+            val useCompactScroll = maxWidth < 332.dp
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -908,12 +910,12 @@ private fun TopFloatingGlassHeader(
                     Arrangement.SpaceBetween
                 }
             ) {
-                // Left Smoked-Glass Pill: ZamLab Emblem + Import Photo
+                // Left Elevated Graphite Pill: ZamLab Emblem + Import Photo
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = StudioGlassSurface,
+                    color = StudioGraphite,
                     shadowElevation = 6.dp,
-                    modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+                    modifier = Modifier.border(1.dp, StudioHairline, RoundedCornerShape(50))
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -924,7 +926,7 @@ private fun TopFloatingGlassHeader(
                             color = StudioObsidian,
                             modifier = Modifier
                                 .size(25.dp)
-                                .border(1.dp, StudioGlassHairline, CircleShape)
+                                .border(1.dp, StudioHairline, CircleShape)
                                 .testTag("zamlab_brand_emblem")
                         ) {
                             Image(
@@ -943,7 +945,7 @@ private fun TopFloatingGlassHeader(
                             modifier = Modifier
                                 .width(1.dp)
                                 .height(16.dp)
-                                .background(StudioGlassHairline)
+                                .background(StudioHairline)
                         )
 
                         IconButton(
@@ -956,7 +958,7 @@ private fun TopFloatingGlassHeader(
                                 imageVector = StudioIcons.OpenPhoto,
                                 contentDescription = stringResource(R.string.cd_open_photo),
                                 tint = StudioCoolWhite,
-                                modifier = Modifier.size(19.dp)
+                                modifier = Modifier.size(24.dp)
                             )
                         }
                     }
@@ -981,7 +983,7 @@ private fun TopFloatingGlassHeader(
                         imageVector = StudioIcons.Undo,
                         contentDescription = stringResource(R.string.cd_undo_history),
                         tint = if (canUndo) StudioCoolWhite else StudioTextMuted.copy(alpha = 0.5f),
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
 
@@ -1003,7 +1005,7 @@ private fun TopFloatingGlassHeader(
                         imageVector = StudioIcons.Redo,
                         contentDescription = stringResource(R.string.cd_redo_history),
                         tint = if (canRedo) StudioCoolWhite else StudioTextMuted.copy(alpha = 0.5f),
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
 
@@ -1050,13 +1052,13 @@ private fun TopFloatingGlassHeader(
                         imageVector = StudioIcons.SplitCompare,
                         contentDescription = stringResource(R.string.cd_compare_before_after),
                         tint = if (compareActive) StudioCinemaAmber else StudioMutedSlate,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                     if (compareActive) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
-                                .padding(bottom = 7.dp)
+                                .padding(bottom = 5.dp)
                                 .size(3.5.dp)
                                 .clip(CircleShape)
                                 .background(StudioCinemaAmber)
@@ -1066,7 +1068,7 @@ private fun TopFloatingGlassHeader(
             }
         }
 
-        // Right Warm Cinema Amber Export Pill (#F5A623 fill with #121316 text & icon)
+        // Right Bold Uppercase Cinema Amber EXPORT Pill (#F5A623 fill, #121316 bold text, 20dp corner radius)
         Button(
             onClick = onOpenExport,
             enabled = canExport,
@@ -1076,8 +1078,8 @@ private fun TopFloatingGlassHeader(
                 disabledContainerColor = StudioCinemaAmber.copy(alpha = 0.28f),
                 disabledContentColor = StudioCharcoal.copy(alpha = 0.6f)
             ),
-            shape = RoundedCornerShape(50),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+            shape = RoundedCornerShape(20.dp),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
             modifier = Modifier
                 .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                 .height(48.dp)
@@ -1086,14 +1088,14 @@ private fun TopFloatingGlassHeader(
             Icon(
                 imageVector = StudioIcons.ExportArrow,
                 contentDescription = stringResource(R.string.cd_export_photo),
-                modifier = Modifier.size(15.dp)
+                modifier = Modifier.size(18.dp)
             )
-            Spacer(modifier = Modifier.width(4.dp))
+            Spacer(modifier = Modifier.width(5.dp))
             Text(
-                text = stringResource(R.string.action_export),
+                text = stringResource(R.string.action_export).uppercase(Locale.ROOT),
                 style = MaterialTheme.typography.labelMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.2.sp
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.6.sp
                 ),
                 maxLines = 1,
                 softWrap = false,
@@ -1425,7 +1427,7 @@ private fun FloatingCapsuleNavDock(
     onSelectTab: (StudioTab) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val capsuleShape = RoundedCornerShape(30.dp)
+    val capsuleShape = RoundedCornerShape(34.dp)
     val gp = uiState.gradingParams
     val hasAdjustEdits = gp.hasLightEdits || gp.hasColorEdits || gp.hasEffectsEdits || gp.hasDetailEdits || gp.hasProfileEdits
     val hasLutEdits = uiState.selectedLutId != null || uiState.selectedUserPresetId != null
@@ -1439,14 +1441,15 @@ private fun FloatingCapsuleNavDock(
         color = StudioGraphite,
         shadowElevation = 10.dp,
         modifier = modifier
+            .height(68.dp)
             .border(1.dp, StudioHairline, capsuleShape)
             .testTag("floating_capsule_nav")
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val useHorizontalScroll = maxWidth < 392.dp
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val useHorizontalScroll = maxWidth < 452.dp
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .then(
                         if (useHorizontalScroll) {
                             Modifier.horizontalScroll(rememberScrollState())
@@ -1454,14 +1457,18 @@ private fun FloatingCapsuleNavDock(
                             Modifier
                         }
                     )
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    .padding(horizontal = 6.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val itemModifier = if (useHorizontalScroll) {
-                    Modifier.widthIn(min = 52.dp)
+                    Modifier
+                        .fillMaxHeight()
+                        .widthIn(min = 60.dp)
                 } else {
-                    Modifier.weight(1f)
+                    Modifier
+                        .fillMaxHeight()
+                        .weight(1f)
                 }
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_adjust),
@@ -1550,7 +1557,7 @@ private fun CapsuleNavTabItem(
     modifier: Modifier = Modifier
 ) {
     val bgColor by animateColorAsState(
-        targetValue = if (selected) StudioAmberPillFill else Color.Transparent,
+        targetValue = if (selected) StudioDockActivePill else Color.Transparent,
         animationSpec = tween(durationMillis = 150),
         label = "capsule_tab_bg"
     )
@@ -1565,35 +1572,36 @@ private fun CapsuleNavTabItem(
         label = "capsule_tab_tint"
     )
 
-    val pillShape = RoundedCornerShape(24.dp)
+    val pillShape = RoundedCornerShape(26.dp)
     Box(
         modifier = modifier
-            .heightIn(min = 48.dp)
+            .heightIn(min = 56.dp)
             .minimumInteractiveComponentSize()
             .clip(pillShape)
             .background(bgColor)
-            .border(1.dp, borderColor, pillShape)
+            .border(1.2.dp, borderColor, pillShape)
             .clickable(onClick = onClick)
-            .padding(vertical = 5.dp, horizontal = 1.dp)
+            .padding(vertical = 5.dp, horizontal = 8.dp)
             .testTag(testTag),
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             Icon(
                 imageVector = if (selected) selectedIcon else unselectedIcon,
                 contentDescription = label,
                 tint = contentColor,
-                modifier = Modifier.size(17.dp)
+                modifier = Modifier.size(22.dp)
             )
             Text(
-                text = label,
+                text = label.uppercase(Locale.ROOT),
                 style = MaterialTheme.typography.labelSmall.copy(
-                    fontSize = 9.5.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                    letterSpacing = (-0.2).sp
+                    fontSize = 10.sp,
+                    lineHeight = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.4.sp
                 ),
                 color = contentColor,
                 maxLines = 1,
@@ -1605,8 +1613,8 @@ private fun CapsuleNavTabItem(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 5.dp, end = 6.dp)
-                    .size(4.dp)
+                    .padding(top = 6.dp, end = 7.dp)
+                    .size(4.5.dp)
                     .clip(CircleShape)
                     .background(StudioCinemaAmber)
             )

@@ -10,6 +10,7 @@ val StudioTileBorder = Color(0xFF2E323C)
 val StudioHairline = Color(0xFF2B2F38)
 val StudioCinemaAmber = Color(0xFFF5A623)
 val StudioAmberPillFill = Color(0xFF2A2317)
+val StudioDockActivePill = Color(0xFF2C2418)
 val StudioCoolWhite = Color(0xFFF2F4F8)
 val StudioMutedSlate = Color(0xFF8E95A5)
 

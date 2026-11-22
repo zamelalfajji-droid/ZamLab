@@ -10,16 +10,16 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 
 /**
- * Custom 1.5dp rounded-stroke vector icon suite for ZamLab's Calibrated Darkroom Studio.
+ * Custom 1.75dp rounded-stroke vector icon suite for ZamLab's Calibrated Darkroom Studio.
  *
- * All icons share a 24x24dp grid with uniform 1.5f stroke width, round line caps,
+ * All icons share a 24x24dp grid with uniform 1.75f stroke width, round line caps,
  * and round joins so top-bar actions, tool strip tiles, and the 7-tab bottom dock
- * feel cohesive and instrument-grade.
+ * feel bold, crisp, and instrument-grade.
  */
 object StudioIcons {
 
     private val StrokeBrush = SolidColor(Color.White)
-    private const val STROKE_W = 1.5f
+    private const val STROKE_W = 1.75f
 
     private fun buildIcon(
         name: String,

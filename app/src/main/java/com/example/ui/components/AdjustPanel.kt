@@ -587,8 +587,8 @@ private fun FocusToolTile(
 
     Column(
         modifier = Modifier
-            .width(60.dp)
-            .height(64.dp)
+            .width(64.dp)
+            .height(68.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(containerColor)
             .border(
@@ -600,7 +600,7 @@ private fun FocusToolTile(
                 onTap = onClick,
                 onDoubleTapReset = onDoubleTapReset
             )
-            .padding(horizontal = 3.dp, vertical = 6.dp)
+            .padding(horizontal = 3.dp, vertical = 5.dp)
             .testTag(testTag),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -609,13 +609,14 @@ private fun FocusToolTile(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = contentTint,
-            modifier = Modifier.size(19.dp)
+            modifier = Modifier.size(24.dp)
         )
         Box(modifier = Modifier.height(4.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 10.sp,
+                fontSize = 11.sp,
+                lineHeight = 13.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 letterSpacing = (-0.1).sp
             ),
@@ -624,7 +625,7 @@ private fun FocusToolTile(
             softWrap = false,
             overflow = TextOverflow.Ellipsis
         )
-        Box(modifier = Modifier.height(4.dp))
+        Box(modifier = Modifier.height(3.dp))
         // Subtle cinema-amber indicator dot under any modified tool (reserves height so icons stay aligned)
         Box(
             modifier = Modifier

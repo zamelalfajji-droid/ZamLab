@@ -113,6 +113,8 @@ import com.example.ui.theme.StudioEraserCrimson
 import com.example.ui.theme.StudioEraserCrimsonSoft
 import com.example.ui.theme.StudioGlassHairline
 import com.example.ui.theme.StudioGlassSurface
+import com.example.ui.theme.StudioGraphite
+import com.example.ui.theme.StudioHairline
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioTextPrimary
@@ -1280,13 +1282,14 @@ private fun HistogramHud(
     histogram: HistogramData,
     onClick: () -> Unit
 ) {
+    val hudShape = RoundedCornerShape(12.dp)
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = StudioGlassSurface,
+        shape = hudShape,
+        color = StudioGraphite.copy(alpha = 0.92f),
         shadowElevation = 6.dp,
         modifier = Modifier
-            .border(1.dp, StudioGlassHairline, RoundedCornerShape(14.dp))
-            .clip(RoundedCornerShape(14.dp))
+            .border(1.dp, StudioHairline, hudShape)
+            .clip(hudShape)
             .clickable(onClick = onClick)
             .testTag("histogram_hud")
     ) {
