@@ -12,7 +12,7 @@ import androidx.core.content.edit
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.gl.GlOffscreenRenderer
 import com.example.lut.CubeLut
 import com.example.lut.LutImporter
