@@ -77,7 +77,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.CropAspectPreset
 import com.example.editor.CropGeometryParams
 import com.example.editor.CropOverlayMode
