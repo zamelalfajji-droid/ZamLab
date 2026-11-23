@@ -1,0 +1,50 @@
+
+package com.zamalfajji.zamlab.nativebridge
+
+import android.graphics.Bitmap
+
+object NativeBridge {
+    val isAvailable: Boolean = try {
+        System.loadLibrary("zamlab_native")
+        true
+    } catch (_: UnsatisfiedLinkError) {
+        false
+    } catch (_: SecurityException) {
+        false
+    }
+
+    external fun getEngineVersion(): String
+
+    external fun export16BitTiffNative(bitmap: Bitmap, outputPath: String): Boolean
+
+    external fun healSpotNative(bitmap: Bitmap, centerX: Int, centerY: Int, radius: Int)
+
+    external fun computeHistogramNative(bitmap: Bitmap): IntArray?
+
+    external fun applyLut3dNative(
+        bitmap: Bitmap,
+        lutTable: FloatArray,
+        lutSize: Int,
+        domainMin: FloatArray,
+        domainMax: FloatArray,
+        intensity: Float
+    ): Boolean
+
+    external fun applyHalationBloomNative(
+        bitmap: Bitmap,
+        halation: Float,
+        bloom: Float
+    ): Boolean
+
+    external fun applyChromaticAberrationNative(
+        bitmap: Bitmap,
+        amount: Float
+    ): Boolean
+
+    external fun applyAnamorphicStreakNative(
+        bitmap: Bitmap,
+        amount: Float
+    ): Boolean
+
+    external fun nativeParseXmpPreset(fd: Int): FloatArray?
+}

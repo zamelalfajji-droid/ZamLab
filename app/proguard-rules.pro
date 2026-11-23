@@ -1,21 +1,63 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ZamLab Google Play Store Release ProGuard / R8 Configuration
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Preserve stack trace metadata for Play Console crash symbolication
+-keepattributes SourceFile,LineNumberTable
+-keepattributes Signature,InnerClasses,EnclosingMethod,*Annotation*
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ==============================================================================
+# Native C++17 JNI Bridge (libzamlab_native.so)
+# ==============================================================================
+-keep class com.zamalfajji.zamlab.nativebridge.NativeBridge {
+    *;
+}
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ==============================================================================
+# OpenGL ES 2.0 Shaders, EGL Contexts & Renderers
+# ==============================================================================
+-keep class com.zamalfajji.zamlab.gl.** { *; }
+-keep class android.opengl.** { *; }
+-keep class javax.microedition.khronos.** { *; }
+-dontwarn android.opengl.**
+
+# ==============================================================================
+# Jetpack Compose & AndroidX Lifecycle / ViewModels
+# ==============================================================================
+-keep class androidx.compose.runtime.** { *; }
+-keep class androidx.compose.ui.** { *; }
+-keepclassmembers class * extends androidx.lifecycle.ViewModel {
+    <init>(...);
+}
+-keepclassmembers class * extends androidx.lifecycle.AndroidViewModel {
+    <init>(android.app.Application);
+}
+-keepclassmembers class * {
+    @androidx.compose.runtime.Composable <methods>;
+}
+
+# ==============================================================================
+# JSON / Gson / Preset & State Serialization
+# ==============================================================================
+-keep class com.zamalfajji.zamlab.lut.UserPreset { *; }
+-keep class com.zamalfajji.zamlab.lut.UserPresetStore { *; }
+-keep class com.zamalfajji.zamlab.lut.XmpDevelopSettings { *; }
+-keep class com.zamalfajji.zamlab.editor.GradingParams { *; }
+-keep class com.zamalfajji.zamlab.editor.GradingParams$* { *; }
+-keep class com.google.gson.** { *; }
+-keepclassmembers class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
+-dontwarn com.google.gson.**
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
+-keep,includedescriptorclasses class kotlinx.serialization.** { *; }
+-dontwarn kotlinx.serialization.**
+
+# ==============================================================================
+# MediaPipe (defensive keep rules if native/vision tasks are linked)
+# ==============================================================================
+-keep class com.google.mediapipe.** { *; }
+-keep class com.google.protobuf.** { *; }
+-dontwarn com.google.mediapipe.**
+-dontwarn com.google.protobuf.**

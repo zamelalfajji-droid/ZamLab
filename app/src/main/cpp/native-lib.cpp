@@ -12,7 +12,7 @@
 #include <utility>
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_nativebridge_NativeBridge_getEngineVersion(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_getEngineVersion(
         JNIEnv* env,
         jobject /* this */) {
     std::string info = "ZamLab Native C++ Engine (16-bit TIFF + Fast Heal + Histogram)";
@@ -21,7 +21,7 @@ Java_com_example_nativebridge_NativeBridge_getEngineVersion(
 
 // 1. REAL 16-BIT UNCOMPRESSED TIFF EXPORT (Bypasses JVM Heap Limits)
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_nativebridge_NativeBridge_export16BitTiffNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_export16BitTiffNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap,
@@ -93,7 +93,7 @@ Java_com_example_nativebridge_NativeBridge_export16BitTiffNative(
 
 // 2. FAST C++ HEAL BRUSH (In-place Native Diffusion Inpainting)
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_nativebridge_NativeBridge_healSpotNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_healSpotNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap,
@@ -145,7 +145,7 @@ Java_com_example_nativebridge_NativeBridge_healSpotNative(
 
 // 3. ULTRA-FAST NATIVE RGB + LUMA HISTOGRAM (Returns 256 * 4 Ints)
 extern "C" JNIEXPORT jintArray JNICALL
-Java_com_example_nativebridge_NativeBridge_computeHistogramNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_computeHistogramNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap) {
@@ -182,7 +182,7 @@ Java_com_example_nativebridge_NativeBridge_computeHistogramNative(
 
 // 4. ULTRA-FAST NATIVE 3D .CUBE LUT (Trilinear Interpolation with Precomputed Channel Coords)
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_nativebridge_NativeBridge_applyLut3dNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_applyLut3dNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap,
@@ -339,7 +339,7 @@ Java_com_example_nativebridge_NativeBridge_applyLut3dNative(
 
 // 5. FILM HALATION & BLOOM (Highlight Threshold + Downsampled Separable Gaussian Blur + Screen Composite)
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_nativebridge_NativeBridge_applyHalationBloomNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_applyHalationBloomNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap,
@@ -552,7 +552,7 @@ Java_com_example_nativebridge_NativeBridge_applyHalationBloomNative(
 
 // 6. CHROMATIC ABERRATION (Radial R/B Channel UV Shift with Bilinear Interpolation)
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_nativebridge_NativeBridge_applyChromaticAberrationNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_applyChromaticAberrationNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap,
@@ -634,7 +634,7 @@ Java_com_example_nativebridge_NativeBridge_applyChromaticAberrationNative(
 
 // 7. ANAMORPHIC STREAK (Highlight Threshold + Wide 1D Horizontal Gaussian Streak Tinted Cyan/Blue)
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_nativebridge_NativeBridge_applyAnamorphicStreakNative(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_applyAnamorphicStreakNative(
         JNIEnv* env,
         jobject /* this */,
         jobject bitmap,
@@ -941,7 +941,7 @@ void extractToneCurvePv2012(
 } // namespace
 
 extern "C" JNIEXPORT jfloatArray JNICALL
-Java_com_example_nativebridge_NativeBridge_nativeParseXmpPreset(
+Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_nativeParseXmpPreset(
         JNIEnv* env,
         jobject /* this */,
         jint fd) {
