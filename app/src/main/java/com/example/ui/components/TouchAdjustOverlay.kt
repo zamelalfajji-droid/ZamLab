@@ -46,7 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.HslBand
 import com.example.editor.HslBandAdjustment
 import com.example.ui.theme.StudioAmber
