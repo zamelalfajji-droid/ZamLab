@@ -10,6 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -72,12 +73,14 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -89,6 +92,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.R
+import com.example.editor.ColorGradingEngine
 import com.example.editor.CropAspectPreset
 import com.example.editor.CropOverlayMode
 import com.example.editor.EyedropperMode
@@ -141,6 +145,8 @@ fun PhotoViewport(
     splitCompareRatio: Float,
     showHistogram: Boolean,
     histogram: HistogramData?,
+    showHighlightClipping: Boolean = false,
+    showShadowClipping: Boolean = false,
     healMode: HealMode = HealMode.SPOT_HEAL,
     healStrokes: List<HealStroke> = emptyList(),
     activeHealStroke: HealStroke? = null,
@@ -166,6 +172,8 @@ fun PhotoViewport(
     onCompareChanged: (Boolean) -> Unit,
     onSplitRatioChange: (Float) -> Unit,
     onToggleHistogram: () -> Unit,
+    onToggleHighlightClipping: () -> Unit = {},
+    onToggleShadowClipping: () -> Unit = {},
     onStartHealStroke: (Float, Float) -> Unit = { _, _ -> },
     onAppendHealStroke: (Float, Float) -> Unit = { _, _ -> },
     onFinishHealStroke: () -> Unit = {},
@@ -536,13 +544,11 @@ fun PhotoViewport(
                                 val dist = (pressedChanges.first().position - downPosition).getDistance()
                                 if (dist > touchSlop) {
                                     movedPastSlop = true
-                                    if (!holdCancelled) {
+                                    // Cancel pending hold ONLY if it has not yet engaged;
+                                    // once Original compare is active, keep showing Original until finger lifts.
+                                    if (!holdCancelled && !isHoldComparing) {
                                         holdCancelled = true
                                         holdJob?.cancel()
-                                        if (isHoldComparing) {
-                                            isHoldComparing = false
-                                            currentCompareCallback(false)
-                                        }
                                     }
                                 }
                             }
@@ -687,6 +693,7 @@ fun PhotoViewport(
                 .testTag("photo_canvas")
         ) {
             var glController by remember { mutableStateOf<GlPhotoRenderController?>(null) }
+            var glRenderFailed by remember { mutableStateOf(false) }
 
             DisposableEffect(Unit) {
                 onDispose {
@@ -701,8 +708,78 @@ fun PhotoViewport(
                     lut = activeLut,
                     isOriginal = isComparingOriginal,
                     splitRatio = effectiveSplitRatio,
-                    applyCrop = applyCropInShader
+                    applyCrop = applyCropInShader,
+                    showHighlightClipping = showHighlightClipping,
+                    showShadowClipping = showShadowClipping
                 )
+            }
+
+            // Live CPU fallback ONLY if OpenGL ES / FBO initialization fails on the device.
+            // Never draws over the TextureView while GPU rendering is healthy.
+            var cpuFallbackBitmap by remember { mutableStateOf<Bitmap?>(null) }
+            LaunchedEffect(
+                glRenderFailed,
+                previewBitmap,
+                gradingParams,
+                activeLut,
+                isComparingOriginal,
+                applyCropInShader,
+                showHighlightClipping,
+                showShadowClipping
+            ) {
+                if (!glRenderFailed || previewBitmap == null || previewBitmap.isRecycled) {
+                    val prev = cpuFallbackBitmap
+                    cpuFallbackBitmap = null
+                    if (prev != null && prev !== previewBitmap && !prev.isRecycled) {
+                        prev.recycle()
+                    }
+                    return@LaunchedEffect
+                }
+                val uncropped = gradingParams.crop.copy(
+                    cropLeft = 0f,
+                    cropTop = 0f,
+                    cropRight = 1f,
+                    cropBottom = 1f
+                )
+                val effectiveParams = if (isComparingOriginal) {
+                    GradingParams(crop = if (applyCropInShader) gradingParams.crop else uncropped)
+                } else if (!applyCropInShader) {
+                    gradingParams.copy(crop = uncropped)
+                } else {
+                    gradingParams
+                }
+                val graded = ColorGradingEngine.processFullResolution(
+                    source = previewBitmap,
+                    params = effectiveParams,
+                    lut = if (isComparingOriginal) null else activeLut
+                )
+                val rendered = if (!isComparingOriginal && (showHighlightClipping || showShadowClipping)) {
+                    val overlaid = ColorGradingEngine.applyClippingWarningOverlay(
+                        source = graded,
+                        showHighlightClipping = showHighlightClipping,
+                        showShadowClipping = showShadowClipping
+                    )
+                    if (overlaid !== graded && graded !== previewBitmap && !graded.isRecycled) {
+                        graded.recycle()
+                    }
+                    overlaid
+                } else {
+                    graded
+                }
+                val old = cpuFallbackBitmap
+                cpuFallbackBitmap = rendered
+                if (old != null && old !== rendered && old !== previewBitmap && !old.isRecycled) {
+                    old.recycle()
+                }
+            }
+            DisposableEffect(Unit) {
+                onDispose {
+                    val bmp = cpuFallbackBitmap
+                    cpuFallbackBitmap = null
+                    if (bmp != null && bmp !== previewBitmap && !bmp.isRecycled) {
+                        bmp.recycle()
+                    }
+                }
             }
 
             Box(
@@ -713,33 +790,54 @@ fun PhotoViewport(
                         height = with(density) { fittedH.toDp() }
                     )
             ) {
-                AndroidView(
-                    factory = { ctx ->
-                        TextureView(ctx).also { tv ->
-                            val controller = GlPhotoRenderController(tv)
-                            controller.updateState(
+                if (!glRenderFailed) {
+                    AndroidView(
+                        factory = { ctx ->
+                            TextureView(ctx).also { tv ->
+                                val controller = GlPhotoRenderController(
+                                    textureView = tv,
+                                    onRenderStatusChanged = { ready ->
+                                        glRenderFailed = !ready
+                                    }
+                                )
+                                controller.updateState(
+                                    imageBitmap = previewBitmap,
+                                    params = gradingParams,
+                                    lut = activeLut,
+                                    isOriginal = isComparingOriginal,
+                                    splitRatio = effectiveSplitRatio,
+                                    applyCrop = applyCropInShader,
+                                    showHighlightClipping = showHighlightClipping,
+                                    showShadowClipping = showShadowClipping
+                                )
+                                glController = controller
+                            }
+                        },
+                        update = {
+                            glController?.updateState(
                                 imageBitmap = previewBitmap,
                                 params = gradingParams,
                                 lut = activeLut,
                                 isOriginal = isComparingOriginal,
                                 splitRatio = effectiveSplitRatio,
-                                applyCrop = applyCropInShader
+                                applyCrop = applyCropInShader,
+                                showHighlightClipping = showHighlightClipping,
+                                showShadowClipping = showShadowClipping
                             )
-                            glController = controller
-                        }
-                    },
-                    update = {
-                        glController?.updateState(
-                            imageBitmap = previewBitmap,
-                            params = gradingParams,
-                            lut = activeLut,
-                            isOriginal = isComparingOriginal,
-                            splitRatio = effectiveSplitRatio,
-                            applyCrop = applyCropInShader
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    val bmpToShow = cpuFallbackBitmap ?: previewBitmap
+                    if (bmpToShow != null && !bmpToShow.isRecycled) {
+                        Image(
+                            bitmap = bmpToShow.asImageBitmap(),
+                            contentDescription = canvasDescription,
+                            contentScale = ContentScale.FillBounds,
+                            modifier = Modifier.fillMaxSize()
                         )
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
+                    }
+                }
 
                 // Interactive crop box & composition overlays when Crop & Rotate tab is active
                 if (isCropMode && !isComparingOriginal && fittedW > 1f && fittedH > 1f) {
@@ -950,7 +1048,7 @@ fun PhotoViewport(
             }
         }
 
-        // Top-left live RGB/Luma Histogram HUD (shown cleanly when toggled from floating utility pill)
+        // Top-left live RGB/Luma Histogram HUD with Lightroom-style Shadow & Highlight Clipping toggles
         AnimatedVisibility(
             visible = showHistogram && histogram != null,
             enter = fadeIn(),
@@ -962,6 +1060,10 @@ fun PhotoViewport(
             if (histogram != null) {
                 HistogramHud(
                     histogram = histogram,
+                    showShadowClipping = showShadowClipping,
+                    showHighlightClipping = showHighlightClipping,
+                    onToggleShadowClipping = onToggleShadowClipping,
+                    onToggleHighlightClipping = onToggleHighlightClipping,
                     onClick = onToggleHistogram
                 )
             }
@@ -983,13 +1085,14 @@ fun PhotoViewport(
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = StudioAmber,
-                    shadowElevation = 4.dp
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.testTag("original_compare_badge")
                 ) {
                     Text(
-                        text = "ORIGINAL",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = stringResource(R.string.badge_original),
+                        style = MaterialTheme.typography.labelMedium,
                         color = StudioBackground,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                     )
                 }
             }
@@ -1280,25 +1383,131 @@ private fun viewportToNormalized(
 @Composable
 private fun HistogramHud(
     histogram: HistogramData,
+    showShadowClipping: Boolean,
+    showHighlightClipping: Boolean,
+    onToggleShadowClipping: () -> Unit,
+    onToggleHighlightClipping: () -> Unit,
     onClick: () -> Unit
 ) {
     val hudShape = RoundedCornerShape(12.dp)
+    val shadowClipped = (histogram.luma.firstOrNull() ?: 0f) > 0.10f ||
+        (histogram.red.firstOrNull() ?: 0f) > 0.14f ||
+        (histogram.blue.firstOrNull() ?: 0f) > 0.14f
+    val highlightClipped = (histogram.luma.lastOrNull() ?: 0f) > 0.10f ||
+        (histogram.red.lastOrNull() ?: 0f) > 0.14f ||
+        (histogram.green.lastOrNull() ?: 0f) > 0.14f
+    val shadowClipBlue = Color(0xFF3B82F6)
+    val highlightClipRed = Color(0xFFEF4444)
+    val shadowCd = stringResource(R.string.cd_shadow_clipping_toggle)
+    val highlightCd = stringResource(R.string.cd_highlight_clipping_toggle)
+
     Surface(
         shape = hudShape,
         color = StudioGraphite.copy(alpha = 0.92f),
         shadowElevation = 6.dp,
         modifier = Modifier
+            .width(156.dp)
             .border(1.dp, StudioHairline, hudShape)
             .clip(hudShape)
-            .clickable(onClick = onClick)
             .testTag("histogram_hud")
     ) {
-        Box(modifier = Modifier.padding(6.dp)) {
-            Canvas(
-                modifier = Modifier
-                    .width(108.dp)
-                    .height(42.dp)
+        Column(modifier = Modifier.padding(bottom = 6.dp)) {
+            // Top bar: Shadow Clipping (Blue) | RGB | Highlight Clipping (Red)
+            Row(
+                modifier = Modifier.width(156.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(width = 48.dp, height = 36.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                        .clip(RoundedCornerShape(topStart = 12.dp, bottomEnd = 8.dp))
+                        .background(
+                            if (showShadowClipping) shadowClipBlue.copy(alpha = 0.24f) else Color.Transparent
+                        )
+                        .clickable(onClick = onToggleShadowClipping)
+                        .semantics { contentDescription = shadowCd }
+                        .testTag("shadow_clipping_toggle"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.size(12.dp)) {
+                        val tri = Path().apply {
+                            moveTo(size.width * 0.5f, size.height * 0.12f)
+                            lineTo(size.width * 0.92f, size.height * 0.88f)
+                            lineTo(size.width * 0.08f, size.height * 0.88f)
+                            close()
+                        }
+                        if (showShadowClipping) {
+                            drawPath(tri, color = shadowClipBlue)
+                        } else {
+                            drawPath(
+                                tri,
+                                color = if (shadowClipped) shadowClipBlue else StudioTextSecondary.copy(alpha = 0.72f),
+                                style = Stroke(width = 1.5.dp.toPx(), join = StrokeJoin.Round)
+                            )
+                        }
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .height(36.dp)
+                        .clickable(onClick = onClick)
+                        .padding(horizontal = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "RGB",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StudioTextSecondary.copy(alpha = 0.9f),
+                        maxLines = 1
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(width = 48.dp, height = 36.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 36.dp)
+                        .clip(RoundedCornerShape(topEnd = 12.dp, bottomStart = 8.dp))
+                        .background(
+                            if (showHighlightClipping) highlightClipRed.copy(alpha = 0.24f) else Color.Transparent
+                        )
+                        .clickable(onClick = onToggleHighlightClipping)
+                        .semantics { contentDescription = highlightCd }
+                        .testTag("highlight_clipping_toggle"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.size(12.dp)) {
+                        val tri = Path().apply {
+                            moveTo(size.width * 0.5f, size.height * 0.12f)
+                            lineTo(size.width * 0.92f, size.height * 0.88f)
+                            lineTo(size.width * 0.08f, size.height * 0.88f)
+                            close()
+                        }
+                        if (showHighlightClipping) {
+                            drawPath(tri, color = highlightClipRed)
+                        } else {
+                            drawPath(
+                                tri,
+                                color = if (highlightClipped) highlightClipRed else StudioTextSecondary.copy(alpha = 0.72f),
+                                style = Stroke(width = 1.5.dp.toPx(), join = StrokeJoin.Round)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 6.dp)
+                    .clickable(onClick = onClick)
+            ) {
+                Canvas(
+                    modifier = Modifier
+                        .width(144.dp)
+                        .height(42.dp)
+                ) {
                     val bins = histogram.luma.size
                     if (bins < 2) return@Canvas
                     val stepX = size.width / (bins - 1).toFloat()
@@ -1330,12 +1539,7 @@ private fun HistogramHud(
                     drawChannel(histogram.blue, Color(0x3338BDF8), Color(0xAA38BDF8))
                     drawChannel(histogram.luma, Color(0x30FFFFFF), Color(0xCCFFFFFF))
                 }
-                Text(
-                    text = "RGB",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StudioTextSecondary.copy(alpha = 0.85f),
-                    modifier = Modifier.align(Alignment.TopStart)
-                )
+            }
         }
     }
 }

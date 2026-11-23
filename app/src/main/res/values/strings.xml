@@ -61,4 +61,14 @@
     <string name="action_save_recipe">Save Recipe</string>
     <string name="cd_save_recipe">Save current adjustments as a reusable preset in LUTs</string>
     <string name="cd_drag_resize_panel">Drag or tap to resize studio controls panel</string>
+    <string name="badge_original">Original</string>
+    <string name="cd_shadow_clipping_toggle">Toggle shadow clipping warning overlay</string>
+    <string name="cd_highlight_clipping_toggle">Toggle highlight clipping warning overlay</string>
+    <string name="lut_none_label">Original</string>
+    <string name="lut_strength_label">LUT Strength</string>
+    <string name="preset_strength_label">Preset Strength</string>
+    <string name="lut_my_presets_tab">My Presets</string>
+    <string name="lut_action_save">Save</string>
+    <string name="lut_action_import">Import</string>
+    <string name="lut_empty_my_presets">Tap Save to store your current look as a reusable preset.</string>
 </resources>

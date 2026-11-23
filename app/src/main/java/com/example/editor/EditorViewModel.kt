@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -152,6 +153,8 @@ data class EditorUiState(
     val isSplitCompareEnabled: Boolean = false,
     val splitCompareRatio: Float = 0.5f,
     val showHistogram: Boolean = true,
+    val showHighlightClipping: Boolean = false,
+    val showShadowClipping: Boolean = false,
     val cropOverlayMode: CropOverlayMode = CropOverlayMode.THIRDS,
     val healMode: HealMode = HealMode.SPOT_HEAL,
     val healBrushSizePx: Float = OfflineHealEngine.DEFAULT_BRUSH_SIZE_PX,
@@ -490,23 +493,21 @@ class EditorViewModel(
 
     private fun observeHistogramPipeline() {
         viewModelScope.launch {
-            combine(histSourceBitmap, gradingInput, isDraggingFlow) { histSource, (params, lut), dragging ->
-                Triple(histSource, params to lut, dragging)
-            }.collectLatest { (histSource, pair, dragging) ->
-                if (histSource == null || histSource.isRecycled) return@collectLatest
-                // Debounce live histogram during active 120Hz slider drags; compute immediately on lift
-                if (dragging) {
-                    delay(90L)
-                }
-                try {
-                    val histogram = ColorGradingEngine.computePreviewHistogram(histSource, pair.first, pair.second)
-                    _uiState.update { it.copy(histogram = histogram) }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.e(TAG, "Histogram update failed", e)
-                }
+            combine(histSourceBitmap, gradingInput) { histSource, (params, lut) ->
+                Triple(histSource, params, lut)
             }
+                .conflate()
+                .collect { (histSource, params, lut) ->
+                    if (histSource == null || histSource.isRecycled) return@collect
+                    try {
+                        val histogram = ColorGradingEngine.computePreviewHistogram(histSource, params, lut)
+                        _uiState.update { it.copy(histogram = histogram) }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Histogram update failed", e)
+                    }
+                }
         }
     }
 
@@ -629,12 +630,46 @@ class EditorViewModel(
 
         if (_uiState.value.activeTab == StudioTab.LUTS) {
             ensureUserPresetThumbnailsLoaded()
+            ensureDefaultLutFolderLoaded(token)
+        } else {
+            // Only refresh thumbnails for any folder that is currently open
+            _uiState.value.lutFolders
+                .filter { it.isExpanded }
+                .forEach { loadFolderThumbnailsIfNeeded(it.name, token) }
         }
+    }
 
-        // Only refresh thumbnails for any folder that is currently open
-        _uiState.value.lutFolders
-            .filter { it.isExpanded }
-            .forEach { loadFolderThumbnailsIfNeeded(it.name, token) }
+    private fun ensureDefaultLutFolderLoaded(expectedPhotoToken: Long) {
+        val state = _uiState.value
+        val folders = state.lutFolders
+        if (folders.isEmpty()) return
+        val expanded = folders.filter { it.isExpanded }
+        if (expanded.isNotEmpty()) {
+            expanded.forEach { loadFolderThumbnailsIfNeeded(it.name, expectedPhotoToken) }
+            return
+        }
+        val targetFolderName = folders.firstOrNull { f ->
+            state.selectedLutId != null && f.descriptors.any { it.id == state.selectedLutId }
+        }?.name ?: folders.first().name
+        selectLutFolder(targetFolderName)
+    }
+
+    fun selectLutFolder(folderName: String) {
+        val targetFolder = _uiState.value.lutFolders.firstOrNull { it.name == folderName } ?: return
+        if (!targetFolder.isExpanded) {
+            _uiState.update { state ->
+                state.copy(
+                    lutFolders = state.lutFolders.map { folder ->
+                        if (folder.name == folderName) {
+                            folder.copy(isExpanded = true)
+                        } else {
+                            folder
+                        }
+                    }
+                )
+            }
+        }
+        loadFolderThumbnailsIfNeeded(folderName, photoGeneration.get())
     }
 
     fun toggleLutFolder(folderName: String) {
@@ -1162,6 +1197,7 @@ class EditorViewModel(
         }
         if (tab == StudioTab.LUTS) {
             ensureUserPresetThumbnailsLoaded()
+            ensureDefaultLutFolderLoaded(photoGeneration.get())
         }
     }
 
@@ -1432,6 +1468,14 @@ class EditorViewModel(
 
     fun toggleHistogram() {
         _uiState.update { it.copy(showHistogram = !it.showHistogram) }
+    }
+
+    fun toggleHighlightClipping() {
+        _uiState.update { it.copy(showHighlightClipping = !it.showHighlightClipping) }
+    }
+
+    fun toggleShadowClipping() {
+        _uiState.update { it.copy(showShadowClipping = !it.showShadowClipping) }
     }
 
     fun setSliderDragging(dragging: Boolean) {

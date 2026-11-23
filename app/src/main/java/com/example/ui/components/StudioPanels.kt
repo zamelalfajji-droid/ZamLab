@@ -1,9 +1,8 @@
 package com.example.ui.components
 
 import android.graphics.Bitmap
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -15,40 +14,33 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.FileUpload
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,44 +48,60 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.editor.LutFolderGroup
 import com.example.editor.LutPresetItem
 import com.example.lut.CubeLut
 import com.example.lut.LutSourceFormat
-import com.example.lut.LutType
 import com.example.lut.UserPreset
 import com.example.ui.theme.StudioAmber
+import com.example.ui.theme.StudioAmberPillFill
 import com.example.ui.theme.StudioBackground
 import com.example.ui.theme.StudioBorder
-import com.example.ui.theme.StudioBorderSubtle
+import com.example.ui.theme.StudioCinemaAmber
+import com.example.ui.theme.StudioCoolWhite
 import com.example.ui.theme.StudioCyan
-import com.example.ui.theme.StudioSurface
+import com.example.ui.theme.StudioGraphite
+import com.example.ui.theme.StudioHairline
+import com.example.ui.theme.StudioMutedSlate
 import com.example.ui.theme.StudioSurfaceElevated
 import com.example.ui.theme.StudioSurfaceHighest
 import com.example.ui.theme.StudioTextMuted
 import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
+import com.example.ui.theme.StudioTileBorder
+import com.example.ui.theme.StudioTileSurface
 import kotlin.math.roundToInt
 
+private const val MY_PRESETS_CATEGORY_KEY = "__my_presets__"
+
+/**
+ * Compact darkroom LUT & Preset panel engineered so the 0%–100% LUT Strength slider and
+ * the horizontally scrollable square LUT thumbnail strip remain permanently visible above the
+ * bottom capsule navigation dock on all mobile screen heights with zero page scrolling.
+ */
 @Composable
 fun LutPanel(
     folders: List<LutFolderGroup>,
     selectedLutId: String?,
     activeLut: CubeLut?,
     lutIntensity: Float,
+    sourcePreviewBitmap: Bitmap? = null,
     userPresets: List<UserPreset> = emptyList(),
     userPresetThumbnails: Map<String, Bitmap> = emptyMap(),
     selectedUserPresetId: String? = null,
+    onSelectFolder: (String) -> Unit = {},
     onToggleFolder: (String) -> Unit,
     onSelectLut: (String?) -> Unit,
     onIntensityChange: (Float) -> Unit,
@@ -105,230 +113,227 @@ fun LutPanel(
     onDeleteUserPreset: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val totalCount = remember(folders) { folders.sumOf { it.totalCount } + userPresets.size }
     var showSaveDialog by remember { mutableStateOf(false) }
 
-    Column(modifier = modifier.fillMaxSize()) {
-        // Header row: active preset info + Off button (if active) + Import button
+    // Default to the folder containing the active LUT, an already-expanded folder, or the first folder
+    var activeCategoryKey by remember {
+        mutableStateOf(
+            folders.firstOrNull { f -> selectedLutId != null && f.descriptors.any { it.id == selectedLutId } }?.name
+                ?: folders.firstOrNull { it.isExpanded }?.name
+                ?: folders.firstOrNull()?.name
+                ?: MY_PRESETS_CATEGORY_KEY
+        )
+    }
+
+    // Keep activeCategoryKey valid when folders finish async indexing or custom folders are added/deleted
+    LaunchedEffect(folders, selectedLutId) {
+        if (activeCategoryKey == MY_PRESETS_CATEGORY_KEY) return@LaunchedEffect
+        val validFolder = folders.firstOrNull { it.name == activeCategoryKey }
+        if (validFolder == null && folders.isNotEmpty()) {
+            val preferred = folders.firstOrNull { f ->
+                selectedLutId != null && f.descriptors.any { it.id == selectedLutId }
+            } ?: folders.firstOrNull { it.isExpanded } ?: folders.first()
+            activeCategoryKey = preferred.name
+            onSelectFolder(preferred.name)
+        } else if (validFolder != null && !validFolder.isLoadedForCurrentPhoto && !validFolder.isLoading) {
+            onSelectFolder(validFolder.name)
+        }
+    }
+
+    val activeFolder = remember(folders, activeCategoryKey) {
+        folders.firstOrNull { it.name == activeCategoryKey }
+    }
+    val isViewingMyPresets = activeCategoryKey == MY_PRESETS_CATEGORY_KEY
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(StudioBackground)
+            .padding(top = 4.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        // Row 1: Compact Category Filter Chips + Save Look + Import .cube/.xmp
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+                .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Color LUTs & Presets",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = StudioTextPrimary
-                )
-                Text(
-                    text = activeLut?.let { lut ->
-                        val fmt = when {
-                            lut.sourceFormat == LutSourceFormat.XMP -> "XMP"
-                            lut.type == LutType.LUT_3D -> "${lut.size}³ 3D"
-                            else -> "${lut.size} 1D"
-                        }
-                        "${lut.title} • ${lut.category} • $fmt"
-                    } ?: "${folders.size} folders • $totalCount presets",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (activeLut != null) StudioAmber else StudioTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            if (selectedLutId != null) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onSelectLut(null) }
-                        .testTag("lut_clear_active_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = StudioSurfaceElevated,
-                        modifier = Modifier.border(1.dp, StudioBorder, RoundedCornerShape(8.dp))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.RestartAlt,
-                                contentDescription = "Turn off preset",
-                                tint = StudioTextSecondary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = "Off",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = StudioTextSecondary,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.width(6.dp))
-            OutlinedButton(
-                onClick = onImportCubeClick,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            LazyRow(
                 modifier = Modifier
-                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                    .testTag("import_lut_button")
+                    .weight(1f)
+                    .testTag("lut_category_bar"),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.FileUpload,
-                    contentDescription = null,
-                    tint = StudioCyan,
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(5.dp))
-                Text(
-                    text = stringResource(R.string.action_import_lut),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = StudioCyan,
-                    maxLines = 1,
-                    softWrap = false
-                )
-            }
-        }
-
-        HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-
-        // Stacked vertical list: My Presets + collapsible folder bars + 3-column grid inside open folders
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            item(key = "my_presets_section") {
-                MyPresetsSection(
-                    userPresets = userPresets,
-                    userPresetThumbnails = userPresetThumbnails,
-                    selectedUserPresetId = selectedUserPresetId,
-                    onSaveLookClick = { showSaveDialog = true },
-                    onApplyUserPreset = onApplyUserPreset,
-                    onDeleteUserPreset = onDeleteUserPreset
-                )
-            }
-
-            folders.forEach { folder ->
-                val folderSlug = folder.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-                val folderHasSelected = folder.descriptors.any { it.id == selectedLutId }
-
-                item(key = "folder_bar_${folder.name}") {
-                    FolderAccordionBar(
-                        name = folder.name,
+                items(items = folders, key = { it.name }) { folder ->
+                    val folderSlug = folder.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+                    val selected = activeCategoryKey == folder.name
+                    val hasActiveLut = folder.descriptors.any { it.id == selectedLutId }
+                    LutCategoryChip(
+                        label = folder.name,
                         count = folder.totalCount,
-                        isExpanded = folder.isExpanded,
-                        isCustom = folder.isCustomFolder,
-                        hasSelectedPreset = folderHasSelected,
+                        selected = selected,
+                        hasActiveDot = hasActiveLut,
                         testTag = "lut_folder_$folderSlug",
-                        onClick = { onToggleFolder(folder.name) }
+                        onClick = {
+                            activeCategoryKey = folder.name
+                            onSelectFolder(folder.name)
+                        }
                     )
                 }
 
-                if (folder.isExpanded) {
-                    if (folder.isLoading && folder.items.all { it.lut == null }) {
-                        item(key = "folder_loading_${folder.name}") {
-                            FolderLoadingRow(folderName = folder.name)
-                        }
-                    } else {
-                        val rows = folder.items.chunked(3)
-                        items(
-                            items = rows,
-                            key = { rowItems -> "row_${folder.name}_${rowItems.first().id}" }
-                        ) { rowItems ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 2.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                rowItems.forEach { item ->
-                                    LutGridThumbnailCard(
-                                        item = item,
-                                        selected = selectedLutId == item.id,
-                                        onClick = { onSelectLut(item.id) },
-                                        onDelete = if (item.isCustom) {
-                                            { onDeleteCustomLut(item.id) }
-                                        } else null,
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("lut_card_${item.id}")
-                                    )
-                                }
-                                repeat(3 - rowItems.size) {
-                                    Spacer(modifier = Modifier.weight(1f))
-                                }
-                            }
-                        }
-                    }
+                item(key = MY_PRESETS_CATEGORY_KEY) {
+                    LutCategoryChip(
+                        label = stringResource(R.string.lut_my_presets_tab),
+                        count = userPresets.size,
+                        selected = isViewingMyPresets,
+                        hasActiveDot = selectedUserPresetId != null,
+                        showBookmarkIcon = true,
+                        testTag = "my_presets_section",
+                        onClick = { activeCategoryKey = MY_PRESETS_CATEGORY_KEY }
+                    )
+                }
+            }
+
+            // Compact Save Look action (48dp touch target)
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(StudioTileSurface)
+                    .border(1.dp, StudioTileBorder, RoundedCornerShape(10.dp))
+                    .clickable { showSaveDialog = true }
+                    .padding(horizontal = 9.dp, vertical = 6.dp)
+                    .testTag("save_current_look_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = stringResource(R.string.action_save_look),
+                        tint = StudioCinemaAmber,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = stringResource(R.string.lut_action_save),
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = StudioCoolWhite,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+
+            // Compact Import .cube / .xmp action (48dp touch target)
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(StudioTileSurface)
+                    .border(1.dp, StudioCyan.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                    .clickable(onClick = onImportCubeClick)
+                    .padding(horizontal = 9.dp, vertical = 6.dp)
+                    .testTag("import_lut_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FileUpload,
+                        contentDescription = stringResource(R.string.action_import_lut),
+                        tint = StudioCyan,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = stringResource(R.string.lut_action_import),
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = StudioCyan,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
 
-        HorizontalDivider(color = StudioBorderSubtle, thickness = 1.dp)
-
-        // Pinned LUT / Preset Intensity slider at the bottom
+        // Row 2: 0%–100% LUT Strength / Intensity Slider directly above the LUT thumbnail strip
+        val hasSelectedLut = selectedLutId != null
+        val strengthLabel = if (activeLut?.sourceFormat == LutSourceFormat.XMP) {
+            stringResource(R.string.preset_strength_label)
+        } else {
+            stringResource(R.string.lut_strength_label)
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xFF12151C))
-                .padding(horizontal = 14.dp, vertical = 4.dp)
+                .padding(horizontal = 12.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(StudioGraphite)
+                .border(1.dp, StudioHairline, RoundedCornerShape(12.dp))
+                .padding(horizontal = 12.dp, vertical = 4.dp)
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .doubleTapToReset(
-                        enabled = selectedLutId != null,
+                        enabled = hasSelectedLut,
                         onDoubleTapReset = {
                             onDraggingChanged(false)
                             onIntensityChange(0.75f)
                         }
                     )
-                    .padding(vertical = 2.dp)
                     .testTag("lut_intensity_label"),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (activeLut?.sourceFormat == LutSourceFormat.XMP) {
-                        "Preset Intensity"
-                    } else {
-                        "LUT Intensity"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (selectedLutId != null) StudioTextPrimary else StudioTextMuted,
+                    text = strengthLabel,
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = if (hasSelectedLut) StudioCoolWhite else StudioMutedSlate,
                     maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    softWrap = false
                 )
+                if (activeLut != null) {
+                    Text(
+                        text = "• ${activeLut.title}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StudioCinemaAmber,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = if (selectedLutId != null) StudioAmber.copy(alpha = 0.14f) else StudioSurfaceHighest,
-                    modifier = Modifier.testTag("lut_intensity_value")
+                    color = if (hasSelectedLut) StudioAmberPillFill else StudioSurfaceHighest,
+                    modifier = Modifier
+                        .border(
+                            1.dp,
+                            if (hasSelectedLut) StudioCinemaAmber.copy(alpha = 0.65f) else StudioHairline,
+                            RoundedCornerShape(6.dp)
+                        )
+                        .testTag("lut_intensity_value")
                 ) {
                     Text(
                         text = "${(lutIntensity * 100f).roundToInt()}%",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (selectedLutId != null) StudioAmber else StudioTextMuted,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            fontFeatureSettings = "tnum"
+                        ),
+                        color = if (hasSelectedLut) StudioCoolWhite else StudioTextMuted,
                         maxLines = 1,
                         softWrap = false,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                     )
                 }
             }
@@ -336,8 +341,8 @@ fun LutPanel(
                 value = lutIntensity,
                 valueRange = 0f..1f,
                 step = 0.01f,
-                enabled = selectedLutId != null,
-                accentColor = StudioAmber,
+                enabled = hasSelectedLut,
+                accentColor = StudioCinemaAmber,
                 compact = true,
                 testTag = "lut_intensity_slider",
                 onValueChange = { v ->
@@ -350,6 +355,101 @@ fun LutPanel(
                     onIntensityChange(0.75f)
                 }
             )
+        }
+
+        // Row 3: Permanently Visible Horizontal Scrollable Compact Square LUT Thumbnail Strip
+        if (isViewingMyPresets) {
+            if (userPresets.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(94.dp)
+                        .padding(horizontal = 12.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(StudioTileSurface)
+                        .border(1.dp, StudioTileBorder, RoundedCornerShape(12.dp))
+                        .testTag("lut_thumbnail_strip"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = stringResource(R.string.lut_empty_my_presets),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StudioMutedSlate,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                }
+            } else {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(96.dp)
+                        .testTag("lut_thumbnail_strip"),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items(items = userPresets, key = { it.id }) { preset ->
+                        CompactUserPresetSquareCard(
+                            preset = preset,
+                            thumbnail = userPresetThumbnails[preset.id] ?: sourcePreviewBitmap,
+                            selected = selectedUserPresetId == preset.id,
+                            onClick = { onApplyUserPreset(preset.id) },
+                            onDelete = { onDeleteUserPreset(preset.id) }
+                        )
+                    }
+                }
+            }
+        } else {
+            val folderItems = activeFolder?.items.orEmpty()
+            val isFolderLoading = activeFolder?.isLoading == true && folderItems.all { it.previewThumbnail == null }
+
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(96.dp)
+                    .testTag("lut_thumbnail_strip"),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // First card: Original / None (one-tap LUT off)
+                item(key = "lut_none_card") {
+                    CompactLutSquareCard(
+                        title = stringResource(R.string.lut_none_label),
+                        thumbnail = sourcePreviewBitmap,
+                        badgeText = null,
+                        selected = selectedLutId == null && selectedUserPresetId == null,
+                        isLoadingPreview = false,
+                        onClick = { onSelectLut(null) },
+                        onDelete = null,
+                        modifier = Modifier.testTag("lut_clear_active_button")
+                    )
+                }
+
+                items(items = folderItems, key = { it.id }) { item ->
+                    val badge = when {
+                        item.sourceFormat == LutSourceFormat.XMP -> "XMP"
+                        item.lut != null -> "${item.lut.size}³"
+                        else -> "LUT"
+                    }
+                    CompactLutSquareCard(
+                        title = item.title,
+                        thumbnail = item.previewThumbnail ?: sourcePreviewBitmap,
+                        badgeText = badge,
+                        selected = selectedLutId == item.id,
+                        isLoadingPreview = item.previewThumbnail == null && isFolderLoading,
+                        onClick = { onSelectLut(item.id) },
+                        onDelete = if (item.isCustom) {
+                            { onDeleteCustomLut(item.id) }
+                        } else {
+                            null
+                        },
+                        modifier = Modifier.testTag("lut_card_${item.id}")
+                    )
+                }
+            }
         }
     }
 
@@ -366,116 +466,239 @@ fun LutPanel(
 }
 
 @Composable
-private fun MyPresetsSection(
-    userPresets: List<UserPreset>,
-    userPresetThumbnails: Map<String, Bitmap>,
-    selectedUserPresetId: String?,
-    onSaveLookClick: () -> Unit,
-    onApplyUserPreset: (String) -> Unit,
-    onDeleteUserPreset: (String) -> Unit
+private fun LutCategoryChip(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    hasActiveDot: Boolean,
+    showBookmarkIcon: Boolean = false,
+    testTag: String,
+    onClick: () -> Unit
 ) {
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = StudioSurfaceElevated,
+    val bgColor by animateColorAsState(
+        targetValue = if (selected) StudioAmberPillFill else StudioTileSurface,
+        animationSpec = tween(durationMillis = 140),
+        label = "lut_cat_bg"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = when {
+            selected -> StudioCinemaAmber
+            hasActiveDot -> StudioCinemaAmber.copy(alpha = 0.55f)
+            else -> StudioTileBorder
+        },
+        animationSpec = tween(durationMillis = 140),
+        label = "lut_cat_border"
+    )
+    val textColor by animateColorAsState(
+        targetValue = if (selected) StudioCinemaAmber else StudioCoolWhite.copy(alpha = 0.85f),
+        animationSpec = tween(durationMillis = 140),
+        label = "lut_cat_text"
+    )
+
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, StudioAmber.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
-            .testTag("my_presets_section")
+            .defaultMinSize(minWidth = 48.dp, minHeight = 40.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(bgColor)
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Bookmark,
-                        contentDescription = null,
-                        tint = StudioAmber,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = "My Presets",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = StudioTextPrimary
-                    )
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = StudioSurfaceHighest
-                    ) {
-                        Text(
-                            text = "${userPresets.size}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = StudioAmber,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-
-                Button(
-                    onClick = onSaveLookClick,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = StudioAmber,
-                        contentColor = StudioBackground
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .testTag("save_current_look_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(3.dp))
-                    Text(
-                        text = stringResource(R.string.action_save_look).removePrefix("+ "),
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
-
-            if (userPresets.isEmpty()) {
-                Text(
-                    text = "Save your custom sliders, tone curves, and LUT mixes for one-tap reuse.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = StudioTextSecondary
+            if (showBookmarkIcon) {
+                Icon(
+                    imageVector = Icons.Default.Bookmark,
+                    contentDescription = null,
+                    tint = if (selected) StudioCinemaAmber else StudioMutedSlate,
+                    modifier = Modifier.size(13.dp)
                 )
-            } else {
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    items(items = userPresets, key = { it.id }) { preset ->
-                        UserPresetThumbnailCard(
-                            preset = preset,
-                            thumbnail = userPresetThumbnails[preset.id],
-                            selected = selectedUserPresetId == preset.id,
-                            onClick = { onApplyUserPreset(preset.id) },
-                            onDelete = { onDeleteUserPreset(preset.id) }
-                        )
-                    }
-                }
+            }
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                ),
+                color = textColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "$count",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                color = if (selected) StudioCinemaAmber else StudioMutedSlate,
+                maxLines = 1,
+                softWrap = false
+            )
+            if (hasActiveDot) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(StudioCinemaAmber)
+                        .testTag("${testTag}_active_dot")
+                )
             }
         }
     }
 }
 
+/**
+ * Compact 68dp × 68dp square live-preview LUT thumbnail card with active Cinema Amber border
+ * and single-line LUT name directly underneath.
+ */
 @Composable
-private fun UserPresetThumbnailCard(
+private fun CompactLutSquareCard(
+    title: String,
+    thumbnail: Bitmap?,
+    badgeText: String?,
+    selected: Boolean,
+    isLoadingPreview: Boolean,
+    onClick: () -> Unit,
+    onDelete: (() -> Unit)?,
+    modifier: Modifier = Modifier
+) {
+    val borderColor by animateColorAsState(
+        targetValue = if (selected) StudioCinemaAmber else StudioTileBorder,
+        animationSpec = tween(durationMillis = 140),
+        label = "lut_card_border"
+    )
+    val cardBg by animateColorAsState(
+        targetValue = if (selected) StudioAmberPillFill else StudioTileSurface,
+        animationSpec = tween(durationMillis = 140),
+        label = "lut_card_bg"
+    )
+
+    Column(
+        modifier = modifier
+            .width(74.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(cardBg)
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(68.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(
+                    Brush.linearGradient(
+                        listOf(Color(0xFF1F2735), Color(0xFF2B3548))
+                    )
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (thumbnail != null && !thumbnail.isRecycled) {
+                val imgBmp = remember(thumbnail) { thumbnail.asImageBitmap() }
+                Image(
+                    bitmap = imgBmp,
+                    contentDescription = "$title LUT preview",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize()
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.ColorLens,
+                    contentDescription = null,
+                    tint = StudioTextSecondary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            if (isLoadingPreview) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = StudioCinemaAmber,
+                        strokeWidth = 1.8.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            if (onDelete != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onDelete),
+                    contentAlignment = Alignment.TopStart
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.72f),
+                        modifier = Modifier
+                            .padding(2.dp)
+                            .size(18.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Remove $title",
+                                tint = StudioCoolWhite,
+                                modifier = Modifier.size(11.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (!badgeText.isNullOrBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color.Black.copy(alpha = 0.72f),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(3.dp)
+                ) {
+                    Text(
+                        text = badgeText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 8.sp,
+                            lineHeight = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = if (selected) StudioCinemaAmber else StudioCoolWhite,
+                        modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                    )
+                }
+            }
+        }
+
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 10.5.sp,
+                lineHeight = 13.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+            ),
+            color = if (selected) StudioCinemaAmber else StudioCoolWhite,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 2.dp)
+        )
+    }
+}
+
+@Composable
+private fun CompactUserPresetSquareCard(
     preset: UserPreset,
     thumbnail: Bitmap?,
     selected: Boolean,
@@ -488,100 +711,16 @@ private fun UserPresetThumbnailCard(
         !preset.gradingParams.toneCurve.isDefault -> "CRV"
         else -> "LOOK"
     }
-    Column(
-        modifier = Modifier
-            .width(98.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(StudioSurface)
-            .border(
-                width = if (selected) 2.dp else 1.dp,
-                color = if (selected) StudioAmber else StudioBorder,
-                shape = RoundedCornerShape(10.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(5.dp)
-            .testTag("user_preset_card_${preset.id}"),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .background(
-                    Brush.linearGradient(listOf(Color(0xFF212633), Color(0xFF2F374B)))
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            if (thumbnail != null && !thumbnail.isRecycled) {
-                val imgBmp = remember(thumbnail) { thumbnail.asImageBitmap() }
-                Image(
-                    bitmap = imgBmp,
-                    contentDescription = "${preset.name} custom preset preview",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize()
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Default.ColorLens,
-                    contentDescription = null,
-                    tint = StudioAmber,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onDelete)
-                    .testTag("delete_user_preset_${preset.id}"),
-                contentAlignment = Alignment.TopStart
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = Color.Black.copy(alpha = 0.72f),
-                    modifier = Modifier
-                        .padding(3.dp)
-                        .size(20.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Delete ${preset.name}",
-                            tint = StudioTextPrimary,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
-                }
-            }
-
-            Surface(
-                shape = RoundedCornerShape(4.dp),
-                color = Color.Black.copy(alpha = 0.7f),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(3.dp)
-            ) {
-                Text(
-                    text = badge,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (selected) StudioAmber else StudioCyan,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                )
-            }
-        }
-
-        Text(
-            text = preset.name,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (selected) StudioAmber else StudioTextPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
+    CompactLutSquareCard(
+        title = preset.name,
+        thumbnail = thumbnail,
+        badgeText = badge,
+        selected = selected,
+        isLoadingPreview = false,
+        onClick = onClick,
+        onDelete = onDelete,
+        modifier = Modifier.testTag("user_preset_card_${preset.id}")
+    )
 }
 
 @Composable
@@ -644,229 +783,4 @@ private fun SavePresetDialog(
         },
         modifier = Modifier.testTag("save_preset_dialog")
     )
-}
-
-@Composable
-private fun FolderAccordionBar(
-    name: String,
-    count: Int,
-    isExpanded: Boolean,
-    isCustom: Boolean,
-    hasSelectedPreset: Boolean,
-    testTag: String,
-    onClick: () -> Unit
-) {
-    val arrowRotation by animateFloatAsState(
-        targetValue = if (isExpanded) 90f else 0f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-        label = "folder_arrow"
-    )
-    val borderColor = when {
-        hasSelectedPreset -> StudioAmber.copy(alpha = 0.7f)
-        isExpanded -> StudioBorder
-        else -> StudioBorderSubtle
-    }
-
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = StudioSurfaceElevated,
-        modifier = Modifier
-            .fillMaxWidth()
-            .defaultMinSize(minHeight = 48.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .testTag(testTag)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = if (isExpanded) "Collapse $name" else "Expand $name",
-                    tint = if (isExpanded) StudioAmber else StudioTextSecondary,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .rotate(arrowRotation)
-                )
-                Icon(
-                    imageVector = if (isExpanded) Icons.Default.FolderOpen else Icons.Default.Folder,
-                    contentDescription = null,
-                    tint = when {
-                        hasSelectedPreset -> StudioAmber
-                        isCustom -> StudioCyan
-                        else -> StudioTextSecondary
-                    },
-                    modifier = Modifier.size(17.dp)
-                )
-                Text(
-                    text = name,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (isExpanded || hasSelectedPreset) StudioTextPrimary else StudioTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (hasSelectedPreset) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(StudioAmber)
-                            .testTag("${testTag}_active_dot")
-                    )
-                }
-            }
-
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = StudioSurfaceHighest
-            ) {
-                Text(
-                    text = "$count",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (hasSelectedPreset) StudioAmber else StudioTextSecondary,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FolderLoadingRow(folderName: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 12.dp)
-            .testTag("lut_folder_loading"),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        CircularProgressIndicator(
-            color = StudioAmber,
-            strokeWidth = 2.dp,
-            modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = "Loading $folderName previews…",
-            style = MaterialTheme.typography.bodySmall,
-            color = StudioTextSecondary
-        )
-    }
-}
-
-@Composable
-private fun LutGridThumbnailCard(
-    item: LutPresetItem,
-    selected: Boolean,
-    onClick: () -> Unit,
-    onDelete: (() -> Unit)?,
-    modifier: Modifier = Modifier
-) {
-    val borderColor = if (selected) StudioAmber else StudioBorder
-    val badge = when {
-        item.sourceFormat == LutSourceFormat.XMP -> "XMP"
-        item.lut != null -> "${item.lut.size}³"
-        else -> "LUT"
-    }
-
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(StudioSurfaceElevated)
-            .border(if (selected) 2.dp else 1.dp, borderColor, RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(5.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(58.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .background(
-                    Brush.linearGradient(
-                        listOf(Color(0xFF1F2735), Color(0xFF2B3548))
-                    )
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            val thumbnail = item.previewThumbnail
-            if (thumbnail != null && !thumbnail.isRecycled) {
-                val imgBmp = remember(thumbnail) { thumbnail.asImageBitmap() }
-                Image(
-                    bitmap = imgBmp,
-                    contentDescription = "${item.title} preset preview",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize()
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Default.ColorLens,
-                    contentDescription = null,
-                    tint = StudioTextSecondary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            if (item.isCustom && onDelete != null) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .clickable(onClick = onDelete),
-                    contentAlignment = Alignment.TopStart
-                ) {
-                    Surface(
-                        shape = CircleShape,
-                        color = Color.Black.copy(alpha = 0.72f),
-                        modifier = Modifier
-                            .padding(3.dp)
-                            .size(20.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Remove ${item.title}",
-                                tint = StudioTextPrimary,
-                                modifier = Modifier.size(12.dp)
-                            )
-                        }
-                    }
-                }
-            }
-            Surface(
-                shape = RoundedCornerShape(4.dp),
-                color = Color.Black.copy(alpha = 0.68f),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(3.dp)
-            ) {
-                Text(
-                    text = badge,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (selected) StudioAmber else StudioTextPrimary,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                )
-            }
-        }
-        Text(
-            text = item.title,
-            style = MaterialTheme.typography.bodySmall,
-            color = if (selected) StudioAmber else StudioTextPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
 }

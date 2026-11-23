@@ -18,14 +18,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.max
 
 private const val TAG = "GlOffscreenRenderer"
 
 /**
- * Renders the full-resolution photograph exclusively on export using an offscreen
- * OpenGL ES 2.0 EGL Pbuffer surface, with automatic CPU fallback if the image exceeds
- * the device's GL_MAX_TEXTURE_SIZE.
+ * Full-resolution offscreen OpenGL ES 2.0 2-pass renderer using an EGL Pbuffer + Pass-1 FBO.
+ * Runs the exact same Pass-1 (Steps 1–5 tone & color) + Pass-2 (Step 6 spatial detail + finishing)
+ * GPU shaders as the live preview canvas so exports match the live viewport 1:1.
+ * Automatically falls back to [ColorGradingEngine.processFullResolution] if EGL/GLES is
+ * unavailable or the photo exceeds the GPU's `GL_MAX_TEXTURE_SIZE`.
  */
 object GlOffscreenRenderer {
 
@@ -34,203 +35,245 @@ object GlOffscreenRenderer {
         params: GradingParams,
         lut: CubeLut?
     ): Bitmap = withContext(Dispatchers.Default) {
-        val effectiveLut = if (lut != null && lut.sourceFormat != LutSourceFormat.XMP) lut else null
-        val applyLut = effectiveLut != null && params.lutIntensity > 0.001f
-        if (params.isDefault && !applyLut) {
-            return@withContext source.copy(Bitmap.Config.ARGB_8888, false)
+        if (source.isRecycled || source.width <= 0 || source.height <= 0) {
+            return@withContext createBitmap(1, 1)
+        }
+        val (outW, outH) = GeometryMath.computeOutputDimensions(source.width, source.height, params.crop)
+        val effectiveLut = if (lut?.sourceFormat == LutSourceFormat.XMP) null else lut
+
+        val gpuBitmap = try {
+            renderOnPbuffer(source, outW, outH, params, effectiveLut)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Offscreen GL export fell back to CPU engine: ${t.message}")
+            null
         }
 
-        val glParams = params.copy(
-            chromaticAberration = 0f,
-            anamorphicStreak = 0f
-        )
-        val glBitmap = runCatching {
-            renderViaEglPbuffer(source, glParams, lut)
-        }.onFailure { e ->
-            Log.w(TAG, "Offscreen GL export fallback to CPU engine: ${e.message}")
-        }.getOrNull()
-
-        if (glBitmap != null) {
-            if (kotlin.math.abs(params.chromaticAberration) > 0.01f) {
-                ColorGradingEngine.applyChromaticAberrationInPlace(glBitmap, params.chromaticAberration)
-            }
-            if (params.halation > 0.01f || params.bloom > 0.01f) {
-                ColorGradingEngine.applyHalationBloomInPlace(glBitmap, params.halation, params.bloom)
-            }
-            if (params.anamorphicStreak > 0.01f) {
-                ColorGradingEngine.applyAnamorphicStreakInPlace(glBitmap, params.anamorphicStreak)
-            }
-            glBitmap
-        } else {
-            ColorGradingEngine.processFullResolution(source, params, lut)
+        if (gpuBitmap != null) {
+            return@withContext gpuBitmap
         }
+        ColorGradingEngine.processFullResolution(source, params, effectiveLut)
     }
 
-    private fun renderViaEglPbuffer(
+    private fun renderOnPbuffer(
         source: Bitmap,
+        outW: Int,
+        outH: Int,
         params: GradingParams,
-        lut: CubeLut?
-    ): Bitmap {
-        if (source.isRecycled) {
-            throw IllegalStateException("Source bitmap is recycled")
-        }
-        val srcW = source.width
-        val srcH = source.height
-        if (srcW <= 0 || srcH <= 0) {
-            throw IllegalArgumentException("Invalid source dimensions ${srcW}x$srcH")
-        }
-        val (w, h) = GeometryMath.computeOutputDimensions(srcW, srcH, params.crop)
-        if (w <= 0 || h <= 0) {
-            throw IllegalArgumentException("Invalid output dimensions ${w}x$h")
-        }
-        var display: EGLDisplay? = EGL14.EGL_NO_DISPLAY
-        var context: EGLContext? = EGL14.EGL_NO_CONTEXT
-        var surface: EGLSurface? = EGL14.EGL_NO_SURFACE
-        var program = 0
-        val textures = IntArray(3)
+        effectiveLut: CubeLut?
+    ): Bitmap? {
+        val display: EGLDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+        if (display == EGL14.EGL_NO_DISPLAY) return null
+        val version = IntArray(2)
+        if (!EGL14.eglInitialize(display, version, 0, version, 1)) return null
+
+        var context: EGLContext = EGL14.EGL_NO_CONTEXT
+        var surface: EGLSurface = EGL14.EGL_NO_SURFACE
+        var toneProgram = 0
+        var spatialProgram = 0
+        val textures = IntArray(4)
+        val fbos = IntArray(1)
         var packedLut: GlGradingShaders.PackedLutTexture? = null
         var curveBmp: Bitmap? = null
-        val effectiveLut = if (lut != null && lut.sourceFormat != LutSourceFormat.XMP) lut else null
 
         try {
-            display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-            if (display == null || display == EGL14.EGL_NO_DISPLAY) {
-                throw IllegalStateException("eglGetDisplay returned EGL_NO_DISPLAY")
-            }
-            val version = IntArray(2)
-            if (!EGL14.eglInitialize(display, version, 0, version, 1)) {
-                throw IllegalStateException("eglInitialize failed")
-            }
-
-            val configAttribs = intArrayOf(
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+            val attribList = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8,
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
                 EGL14.EGL_NONE
             )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            if (!EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)) {
-                throw IllegalStateException("eglChooseConfig failed")
+            if (!EGL14.eglChooseConfig(display, attribList, 0, configs, 0, 1, numConfigs, 0)) {
+                return null
             }
-            val config = configs[0] ?: throw IllegalStateException("No Pbuffer EGLConfig")
+            val config = configs[0] ?: return null
 
-            val ctxAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
-            context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
-            if (context == null || context == EGL14.EGL_NO_CONTEXT) {
-                throw IllegalStateException("eglCreateContext failed")
-            }
-
-            val pbufferAttribs = intArrayOf(
-                EGL14.EGL_WIDTH, w,
-                EGL14.EGL_HEIGHT, h,
-                EGL14.EGL_NONE
+            context = EGL14.eglCreateContext(
+                display,
+                config,
+                EGL14.EGL_NO_CONTEXT,
+                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
+                0
             )
-            surface = EGL14.eglCreatePbufferSurface(display, config, pbufferAttribs, 0)
-            if (surface == null || surface == EGL14.EGL_NO_SURFACE) {
-                throw IllegalStateException("eglCreatePbufferSurface failed")
+            if (context == EGL14.EGL_NO_CONTEXT) return null
+
+            surface = EGL14.eglCreatePbufferSurface(
+                display,
+                config,
+                intArrayOf(
+                    EGL14.EGL_WIDTH, outW,
+                    EGL14.EGL_HEIGHT, outH,
+                    EGL14.EGL_NONE
+                ),
+                0
+            )
+            if (surface == EGL14.EGL_NO_SURFACE) return null
+
+            if (!EGL14.eglMakeCurrent(display, surface, surface, context)) return null
+
+            val maxTex = IntArray(1)
+            GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTex, 0)
+            val maxSize = maxTex[0]
+            if (maxSize > 0 && (source.width > maxSize || source.height > maxSize || outW > maxSize || outH > maxSize)) {
+                Log.w(TAG, "Image exceeds GL_MAX_TEXTURE_SIZE=$maxSize; using CPU fallback")
+                return null
             }
 
-            if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
-                throw IllegalStateException("eglMakeCurrent failed")
-            }
-
-            val maxTexSize = IntArray(1)
-            GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTexSize, 0)
-            if (maxTexSize[0] <= 0 || max(max(srcW, srcH), max(w, h)) > maxTexSize[0]) {
-                throw IllegalStateException("Bitmap ${srcW}x${srcH} -> ${w}x$h exceeds GL_MAX_TEXTURE_SIZE=${maxTexSize[0]}")
-            }
-
-            program = GlGradingShaders.compileProgram()
-            val handles = GlGradingShaders.ShaderUniformHandles(program)
+            toneProgram = GlGradingShaders.compileToneColorProgram()
+            spatialProgram = GlGradingShaders.compileSpatialFinishProgram()
+            val tHandles = GlGradingShaders.ToneColorUniformHandles(toneProgram)
+            val sHandles = GlGradingShaders.SpatialFinishUniformHandles(spatialProgram)
             val quadBuffer = GlGradingShaders.createQuadBuffer(readbackFlipY = true)
 
-            GLES20.glGenTextures(3, textures, 0)
+            GLES20.glGenTextures(4, textures, 0)
             GlGradingShaders.uploadTexture(textures[0], source)
 
             if (effectiveLut != null) {
                 packedLut = GlGradingShaders.packLutToTiledBitmap(effectiveLut)
                 GlGradingShaders.uploadTexture(textures[1], packedLut.bitmap)
+            } else {
+                val dummyLut = createBitmap(1, 1)
+                GlGradingShaders.uploadTexture(textures[1], dummyLut)
+                dummyLut.recycle()
             }
             if (!params.toneCurve.isDefault) {
                 curveBmp = GlGradingShaders.packToneCurveBitmap(params.toneCurve)
                 GlGradingShaders.uploadTexture(textures[2], curveBmp)
+            } else {
+                val dummyCurve = createBitmap(1, 1)
+                GlGradingShaders.uploadTexture(textures[2], dummyCurve)
+                dummyCurve.recycle()
             }
 
-            GLES20.glViewport(0, 0, w, h)
-            GLES20.glUseProgram(program)
+            // Allocate Pass-1 offscreen FBO texture (outW x outH)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D,
+                0,
+                GLES20.GL_RGBA,
+                outW,
+                outH,
+                0,
+                GLES20.GL_RGBA,
+                GLES20.GL_UNSIGNED_BYTE,
+                null
+            )
+
+            GLES20.glGenFramebuffers(1, fbos, 0)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbos[0])
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER,
+                GLES20.GL_COLOR_ATTACHMENT0,
+                GLES20.GL_TEXTURE_2D,
+                textures[3],
+                0
+            )
+            if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                return null
+            }
+
+            // PASS 1: Tone & Color (Steps 1–5) -> FBO (textures[3])
+            GLES20.glViewport(0, 0, outW, outH)
+            GLES20.glUseProgram(toneProgram)
+            GLES20.glUniform1i(tHandles.uImageTex, 0)
+            GLES20.glUniform1i(tHandles.uCurveTex, 1)
 
             quadBuffer.position(0)
-            GLES20.glEnableVertexAttribArray(handles.aPosition)
-            GLES20.glVertexAttribPointer(handles.aPosition, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
-
+            GLES20.glEnableVertexAttribArray(tHandles.aPosition)
+            GLES20.glVertexAttribPointer(tHandles.aPosition, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
             quadBuffer.position(2)
-            GLES20.glEnableVertexAttribArray(handles.aTexCoord)
-            GLES20.glVertexAttribPointer(handles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
+            GLES20.glEnableVertexAttribArray(tHandles.aTexCoord)
+            GLES20.glVertexAttribPointer(tHandles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
-            GLES20.glUniform1i(handles.uImageTex, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[2])
 
+            GlGradingShaders.bindToneColorUniforms(
+                handles = tHandles,
+                params = params,
+                imageWidth = source.width,
+                imageHeight = source.height,
+                applyCrop = true,
+                outputWidth = outW,
+                outputHeight = outH
+            )
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisableVertexAttribArray(tHandles.aPosition)
+            GLES20.glDisableVertexAttribArray(tHandles.aTexCoord)
+
+            // PASS 2: Spatial Detail (Step 6) + Finishing -> Pbuffer (default FBO 0)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            GLES20.glViewport(0, 0, outW, outH)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            GLES20.glUseProgram(spatialProgram)
+            GLES20.glUniform1i(sHandles.uGradedTex, 0)
+            GLES20.glUniform1i(sHandles.uLutTex, 1)
+            GLES20.glUniform1i(sHandles.uRawTex, 2)
+
+            quadBuffer.position(0)
+            GLES20.glEnableVertexAttribArray(sHandles.aPosition)
+            GLES20.glVertexAttribPointer(sHandles.aPosition, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
+            quadBuffer.position(2)
+            GLES20.glEnableVertexAttribArray(sHandles.aTexCoord)
+            GLES20.glVertexAttribPointer(sHandles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
+
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[1])
-            GLES20.glUniform1i(handles.uLutTex, 1)
-
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[2])
-            GLES20.glUniform1i(handles.uCurveTex, 2)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
 
-            GlGradingShaders.bindUniforms(
-                handles = handles,
+            GlGradingShaders.bindSpatialFinishUniforms(
+                handles = sHandles,
                 params = params,
                 lut = effectiveLut,
                 packedLut = packedLut,
-                imageWidth = srcW,
-                imageHeight = srcH,
+                fboWidth = outW,
+                fboHeight = outH,
+                imageWidth = source.width,
+                imageHeight = source.height,
                 isOriginal = false,
-                applyCrop = true,
-                outputWidth = w,
-                outputHeight = h
+                splitRatio = -1f,
+                applyCrop = true
             )
-
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glDisableVertexAttribArray(handles.aPosition)
-            GLES20.glDisableVertexAttribArray(handles.aTexCoord)
+            GLES20.glDisableVertexAttribArray(sHandles.aPosition)
+            GLES20.glDisableVertexAttribArray(sHandles.aTexCoord)
             GLES20.glFinish()
 
-            val byteCount = w.toLong() * h.toLong() * 4L
-            if (byteCount <= 0L || byteCount > Int.MAX_VALUE) {
-                throw IllegalStateException("Output readback buffer too large for ${w}x$h")
-            }
-            val pixelBuffer = ByteBuffer.allocateDirect(byteCount.toInt()).order(ByteOrder.nativeOrder())
-            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixelBuffer)
-            pixelBuffer.rewind()
+            val pixelBytes = ByteBuffer.allocateDirect(outW * outH * 4).order(ByteOrder.nativeOrder())
+            GLES20.glReadPixels(0, 0, outW, outH, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixelBytes)
+            pixelBytes.rewind()
 
-            val out = createBitmap(w, h)
-            out.copyPixelsFromBuffer(pixelBuffer)
-            return out
+            val outBitmap = createBitmap(outW, outH)
+            outBitmap.copyPixelsFromBuffer(pixelBytes)
+            return outBitmap
         } finally {
-            runCatching {
-                packedLut?.bitmap?.recycle()
-                curveBmp?.recycle()
-                if (textures[0] != 0 || textures[1] != 0 || textures[2] != 0) {
-                    GLES20.glDeleteTextures(3, textures, 0)
-                }
-                if (program != 0) GLES20.glDeleteProgram(program)
-                if (display != null && display != EGL14.EGL_NO_DISPLAY) {
-                    EGL14.eglMakeCurrent(
-                        display,
-                        EGL14.EGL_NO_SURFACE,
-                        EGL14.EGL_NO_SURFACE,
-                        EGL14.EGL_NO_CONTEXT
-                    )
-                    if (surface != null && surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
-                    if (context != null && context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
-                    EGL14.eglTerminate(display)
-                }
+            try {
+                if (toneProgram != 0) GLES20.glDeleteProgram(toneProgram)
+                if (spatialProgram != 0) GLES20.glDeleteProgram(spatialProgram)
+                if (textures.any { it != 0 }) GLES20.glDeleteTextures(textures.size, textures, 0)
+                if (fbos[0] != 0) GLES20.glDeleteFramebuffers(1, fbos, 0)
+                packedLut?.bitmap?.let { if (!it.isRecycled) it.recycle() }
+                curveBmp?.let { if (!it.isRecycled) it.recycle() }
+                EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+                if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
+                if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
+                EGL14.eglTerminate(display)
+            } catch (_: Throwable) {
             }
         }
     }

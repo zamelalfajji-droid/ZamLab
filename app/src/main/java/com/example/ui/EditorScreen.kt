@@ -579,10 +579,23 @@ fun EditorScreen(
                                         }
                                     }
                                 } else {
-                                    // Constrain active tool panel (including LUTs, Adjust, Crop, Heal, Masks) to 140..240dp
+                                    // Responsive tool panel sizing so photo preview scales down cleanly
+                                    // while keeping the LUT strength slider & horizontal thumbnail strip
+                                    // permanently visible above the bottom navigation bar on all screen heights.
+                                    val isLutsTab = uiState.activeTab == StudioTab.LUTS
+                                    val panelMax = if (isLutsTab) {
+                                        minOf(228.dp, (workspaceHeight * 0.48f).coerceAtLeast(190.dp))
+                                    } else {
+                                        cappedToolMax
+                                    }
+                                    val panelMin = if (isLutsTab) {
+                                        minOf(190.dp, panelMax)
+                                    } else {
+                                        cappedToolMin
+                                    }
                                     val toolPanelModifier = Modifier
                                         .fillMaxWidth()
-                                        .heightIn(min = cappedToolMin, max = cappedToolMax)
+                                        .heightIn(min = panelMin, max = panelMax)
 
                                     Box(modifier = toolPanelModifier) {
                                         ActiveToolPanel(
@@ -696,6 +709,8 @@ private fun ImmersiveCanvasStage(
             splitCompareRatio = uiState.splitCompareRatio,
             showHistogram = uiState.showHistogram,
             histogram = uiState.histogram,
+            showHighlightClipping = uiState.showHighlightClipping,
+            showShadowClipping = uiState.showShadowClipping,
             healMode = uiState.healMode,
             healStrokes = uiState.healStrokes,
             activeHealStroke = uiState.activeHealStroke,
@@ -722,6 +737,8 @@ private fun ImmersiveCanvasStage(
             onCompareChanged = viewModel::setComparingOriginal,
             onSplitRatioChange = viewModel::setSplitCompareRatio,
             onToggleHistogram = viewModel::toggleHistogram,
+            onToggleHighlightClipping = viewModel::toggleHighlightClipping,
+            onToggleShadowClipping = viewModel::toggleShadowClipping,
             onStartHealStroke = viewModel::startHealStroke,
             onAppendHealStroke = viewModel::appendHealStroke,
             onFinishHealStroke = viewModel::finishHealStroke,
@@ -1369,9 +1386,11 @@ private fun ActiveToolPanel(
             selectedLutId = uiState.selectedLutId,
             activeLut = uiState.activeLut,
             lutIntensity = uiState.gradingParams.lutIntensity,
+            sourcePreviewBitmap = uiState.previewIdleBitmap,
             userPresets = uiState.userPresets,
             userPresetThumbnails = uiState.userPresetThumbnails,
             selectedUserPresetId = uiState.selectedUserPresetId,
+            onSelectFolder = viewModel::selectLutFolder,
             onToggleFolder = viewModel::toggleLutFolder,
             onSelectLut = viewModel::selectLut,
             onIntensityChange = viewModel::updateLutIntensity,

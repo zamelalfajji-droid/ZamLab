@@ -5,157 +5,224 @@ import android.opengl.GLES20
 import android.opengl.GLUtils
 import androidx.core.graphics.createBitmap
 import com.example.editor.CameraProfiles
+import com.example.editor.GeometryMath
 import com.example.editor.GradingParams
+import com.example.editor.HslBand
+import com.example.editor.MaskType
 import com.example.editor.ToneCurveData
 import com.example.lut.CubeLut
-import com.example.lut.LutSourceFormat
 import com.example.lut.LutType
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.exp
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sqrt
 
+/**
+ * Two-pass OpenGL ES 2.0 real-time photo grading shader pipeline.
+ *
+ * Processing architecture (deterministic, physically accurate 6-step order):
+ * - **Pass 1 (`TONE_COLOR_FRAGMENT_SHADER` -> Offscreen FBO `uGradedTex`)**:
+ *   - Geometry / crop / perspective / lens distortion / chromatic aberration / lens blur
+ *   - Camera Profile tone & matrix shaping
+ *   - Step 1: Exact IEC 61966-2-1 sRGB -> Linear light conversion
+ *   - Step 2: Photographic Exposure in linear light: `color *= pow(2.0, exposureEV)`
+ *   - Step 3: White Balance (Temp & Tint) using luminance-balanced linear channel multipliers
+ *   - Step 4: Smooth tonal curves for Highlights, Shadows, Whites, Blacks, Parametric Tones,
+ *             C1-continuous soft highlight shoulder roll-off, and smooth S-curve Contrast with
+ *             soft toe & shoulder protection
+ *   - Step 5: Exact Linear -> sRGB display conversion, Tone Curves (`uCurveTex`), RGB Calibration,
+ *             8-band HSL Mixer, Point Color, Grayscale OR skin-tone & saturation-protected Vibrance
+ *             + Saturation, Split Toning, Color Grading Wheels, and up to 4 Selective Local Masks
+ *
+ * - **Pass 2 (`SPATIAL_FINISH_FRAGMENT_SHADER` reading Pass-1 FBO `uGradedTex` -> Screen/Pbuffer)**:
+ *   - Step 6: Real multi-pixel neighborhood spatial filtering on the ACTUAL graded pixels:
+ *     - Edge-aware Luminance & Color Noise Reduction
+ *     - Dehaze: 9-tap local dark-channel atmospheric veil estimation + radiance & saturation recovery
+ *     - Texture: Small-radius 9-tap Gaussian blur difference (`c - blurSmall`) with edge-halo guard
+ *     - Clarity: Wider-radius 13-tap Gaussian blur difference (`c - blurLarge`) weighted by a smooth
+ *       midtone mask protecting pure blacks and pure whites
+ *     - Sharpen: 9-tap Gaussian unsharp mask + 5-tap Laplacian with flat-area noise threshold protection
+ *   - Finishing passes: Vignette, Film Grain, 3D/1D `.cube` LUT, Film Halation & Bloom,
+ *     Anamorphic Streak, and pixel-exact Before/After original & split-compare reading `uRawTex`.
+ */
 object GlGradingShaders {
 
-    const val VERTEX_SHADER = """
+    /**
+     * Computes luminance-balanced linear-space White Balance channel multipliers for
+     * `tempNorm` (-1..+1) and `tintNorm` (-1..+1). Shared 1:1 with [com.example.editor.ColorGradingEngine].
+     */
+    fun computeLinearWhiteBalanceMultipliers(tempNorm: Float, tintNorm: Float, out: FloatArray) {
+        val t = tempNorm.coerceIn(-1f, 1f)
+        val g = tintNorm.coerceIn(-1f, 1f)
+        if (abs(t) <= 0.0005f && abs(g) <= 0.0005f) {
+            out[0] = 1f
+            out[1] = 1f
+            out[2] = 1f
+            return
+        }
+        val rawR = exp(t * 0.42f + g * 0.14f)
+        val rawG = exp(t * 0.04f - g * 0.28f)
+        val rawB = exp(-t * 0.46f + g * 0.14f)
+        val lumaNorm = (0.2126f * rawR + 0.7152f * rawG + 0.0722f * rawB).coerceAtLeast(1e-4f)
+        out[0] = rawR / lumaNorm
+        out[1] = rawG / lumaNorm
+        out[2] = rawB / lumaNorm
+    }
+
+    /**
+     * Computes the C1-continuous soft highlight shoulder knee in linear light space.
+     * Returns `1.0` when there is no positive linear overdrive (guaranteeing bit-exact unedited
+     * `[0, 1]` passthrough) and smoothly lowers toward `0.78` under heavy exposure/highlight/white
+     * gain so bright skies preserve smooth gradations instead of hard clipping.
+     */
+    fun computeSoftShoulderKnee(
+        exposureEV: Float,
+        wbMaxMul: Float,
+        highlightsNorm: Float,
+        whitesNorm: Float
+    ): Float {
+        val maxLinearGain = 2f.pow(exposureEV.coerceAtLeast(0f)) *
+            wbMaxMul.coerceAtLeast(1f) *
+            2f.pow(highlightsNorm.coerceAtLeast(0f) * 0.85f + whitesNorm.coerceAtLeast(0f) * 0.70f)
+        val overdrive = (maxLinearGain - 1f).coerceAtLeast(0f)
+        if (overdrive <= 0.001f) return 1f
+        val strength = (overdrive / (overdrive + 1.25f)).coerceIn(0f, 1f)
+        return 1f - 0.22f * strength
+    }
+
+    private const val VERTEX_SHADER = """
         attribute vec2 aPosition;
         attribute vec2 aTexCoord;
         varying vec2 vTexCoord;
         void main() {
-            gl_Position = vec4(aPosition, 0.0, 1.0);
             vTexCoord = aTexCoord;
+            gl_Position = vec4(aPosition, 0.0, 1.0);
         }
     """
 
-    const val FRAGMENT_SHADER = """
+    /**
+     * Pass 1 Fragment Shader: Geometry, Optics, Camera Profile, and Steps 1–5 (Tone & Color).
+     * Compact packed-vec4 uniforms (~47 vec4 total, zero dynamic array indexing) for rock-solid
+     * compatibility across all OpenGL ES 2.0 drivers and software emulators.
+     */
+    private const val TONE_COLOR_FRAGMENT_SHADER = """
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
         precision highp float;
+        #else
+        precision mediump float;
+        #endif
 
         varying vec2 vTexCoord;
 
         uniform sampler2D uImageTex;
-        uniform sampler2D uLutTex;
         uniform sampler2D uCurveTex;
 
-        uniform float uIsOriginal;
-        uniform float uSplitRatio;
-        uniform vec2 uTexelSize;
-        uniform vec2 uImageRes;
+        uniform mat3 uOrientMatrix;
+        uniform vec4 uCropRect;        // (left, top, right, bottom)
+        uniform vec4 uOptics;          // (distortion, caNorm, lensBlur, hasProfile)
+        uniform vec4 uImageInfo;       // (invW, invH, outAspect, hasCurve)
 
-        uniform float uHasGeometry;
-        uniform vec3 uGeomRow0;
-        uniform vec3 uGeomRow1;
-        uniform vec3 uGeomRow2;
-        uniform vec4 uCropRect;
+        uniform vec4 uProfTone;        // (contrast*st, shadowLift*st, hiCompress*st, midPunch*st)
+        uniform vec4 uProfGain;        // (1+rGain*st, 1+gGain*st, 1+bGain*st, 0)
+        uniform vec4 uProfColor;       // (satDelta*st, vibDelta*st, monoMix, 0)
+        uniform vec4 uProfMono;        // (monoW.rgb, 0)
+        uniform vec4 uProfShCast;      // (shBias.rgb * st, 0)
+        uniform vec4 uProfHiCast;      // (hiBias.rgb * st, 0)
 
-        uniform float uHasOptics;
-        uniform float uLensDistortion;
-        uniform float uChromaticAberration;
+        uniform vec4 uToneA;           // (exposureEV, tempNorm, tintNorm, contrastNorm)
+        uniform vec4 uToneB;           // (highlightsNorm, shadowsNorm, whitesNorm, blacksNorm)
+        uniform vec4 uWbMult;          // (wbR, wbG, wbB, shoulderKnee)
+        uniform vec4 uParamTone;       // (paramHi, paramLights, paramDarks, paramSh)
+        uniform vec4 uColorA;          // (vibranceNorm, saturationNorm, isGrayscale, 0)
 
-        uniform float uLensBlurAmount;
-        uniform float uBokehFocus;
+        uniform vec4 uCalibA;          // (redHue, redSat, greenHue, greenSat)
+        uniform vec4 uCalibB;          // (blueHue, blueSat, splitBalance, hasCal)
+        uniform vec4 uSplitSh;         // (shTint.rgb, shAmt)
+        uniform vec4 uSplitHi;         // (hiTint.rgb, hiAmt)
 
-        uniform float uHasSpatial;
-        uniform float uTextureAmount;
-        uniform float uClarityAmount;
-        uniform vec4 uSharpenParams;
-        uniform vec3 uNrParams;
-        uniform vec3 uColorNrParams;
+        uniform vec4 uWheelSh;         // (tint.rgb, lum)
+        uniform vec4 uWheelMid;        // (tint.rgb, lum)
+        uniform vec4 uWheelHi;         // (tint.rgb, lum)
+        uniform vec4 uWheelGl;         // (tint.rgb, lum)
+        uniform vec4 uWheelMix;        // (blending, balance, hasWheels, hasHsl)
 
-        uniform float uHasProfile;
-        uniform float uProfStrength;
-        uniform vec4 uProfTone;
-        uniform vec3 uProfGains;
-        uniform vec2 uProfSat;
-        uniform vec3 uProfShadowTint;
-        uniform vec3 uProfHighlightTint;
-        uniform vec4 uProfMono;
-        uniform vec3 uProfSelective;
+        uniform vec4 uPointA;          // (sourceHueDeg, sourceSat, sourceLuma, rangeNorm)
+        uniform vec4 uPointB;          // (hueShift, satShift, lumShift, hasPoint)
 
-        uniform float uExposureMult;
-        uniform vec3 uTempMult;
-        uniform float uDehazeNorm;
-        uniform float uWhiteGain;
-        uniform float uBlackLift;
-        uniform float uHighlightsStrength;
-        uniform float uShadowsStrength;
-        uniform float uHasParametric;
-        uniform vec4 uParametric;
-        uniform float uContrastFactor;
+        uniform vec4 uHsl0;            // Red (hue, sat, lum, 0)
+        uniform vec4 uHsl1;            // Orange
+        uniform vec4 uHsl2;            // Yellow
+        uniform vec4 uHsl3;            // Green
+        uniform vec4 uHsl4;            // Aqua
+        uniform vec4 uHsl5;            // Blue
+        uniform vec4 uHsl6;            // Purple
+        uniform vec4 uHsl7;            // Magenta
 
-        uniform float uHasCurve;
+        uniform vec4 uMaskMeta;        // (maskCount, 0, 0, 0)
+        uniform vec4 uMask0A;          // (type, inverted, feather, exposureEV)
+        uniform vec4 uMask0B;          // (p0, p1, p2, p3)
+        uniform vec4 uMask0C;          // (contrast, warmth, saturation, sharpness)
 
-        uniform float uHasCal;
-        uniform vec3 uCalHue;
-        uniform vec3 uCalSat;
+        uniform vec4 uMask1A;
+        uniform vec4 uMask1B;
+        uniform vec4 uMask1C;
 
-        uniform float uHasHsl;
-        uniform vec3 uHsl0;
-        uniform vec3 uHsl1;
-        uniform vec3 uHsl2;
-        uniform vec3 uHsl3;
-        uniform vec3 uHsl4;
-        uniform vec3 uHsl5;
-        uniform vec3 uHsl6;
-        uniform vec3 uHsl7;
+        uniform vec4 uMask2A;
+        uniform vec4 uMask2B;
+        uniform vec4 uMask2C;
 
-        uniform float uIsGrayscale;
-        uniform float uVibranceNorm;
-        uniform float uSaturationFactor;
+        uniform vec4 uMask3A;
+        uniform vec4 uMask3B;
+        uniform vec4 uMask3C;
 
-        uniform float uHasSplitTone;
-        uniform vec3 uSplitShadowTint;
-        uniform vec3 uSplitHighlightTint;
-        uniform vec4 uSplitParams;
+        vec3 srgbToLinear(vec3 c) {
+            vec3 cc = clamp(c, 0.0, 1.0);
+            vec3 lo = cc / 12.92;
+            vec3 hi = pow(max((cc + 0.055) / 1.055, vec3(1e-6)), vec3(2.4));
+            return mix(lo, hi, step(vec3(0.04045), cc));
+        }
 
-        uniform float uHasPointColor;
-        uniform vec3 uPointSource;
-        uniform vec4 uPointShift;
+        vec3 linearToSrgb(vec3 c) {
+            vec3 cc = max(c, vec3(0.0));
+            vec3 lo = cc * 12.92;
+            vec3 hi = 1.055 * pow(max(cc, vec3(1e-6)), vec3(1.0 / 2.4)) - 0.055;
+            return clamp(mix(lo, hi, step(vec3(0.0031308), cc)), 0.0, 1.0);
+        }
 
-        uniform float uHasColorGrading;
-        uniform vec4 uCgShadowTint;
-        uniform vec4 uCgMidTint;
-        uniform vec4 uCgHighlightTint;
-        uniform vec4 uCgGlobalTint;
-        uniform vec2 uCgBlendBalance;
+        float softShoulderChan(float x, float knee) {
+            if (x <= 0.0) return 0.0;
+            if (knee >= 0.999 || x <= knee) return min(x, 1.0);
+            float excess = x - knee;
+            float span = max(1.0 - knee, 0.01);
+            return knee + span * (excess / (excess + span));
+        }
 
-        uniform vec4 uVignetteParams1;
-        uniform vec2 uVignetteParams2;
-        uniform vec3 uGrainParams;
-        uniform vec2 uHalationBloom;
-        uniform float uAnamorphicStreak;
+        vec3 applySoftShoulder(vec3 lin, float knee) {
+            return vec3(
+                softShoulderChan(lin.r, knee),
+                softShoulderChan(lin.g, knee),
+                softShoulderChan(lin.b, knee)
+            );
+        }
 
-        uniform float uHasLut;
-        uniform float uLutSize;
-        uniform float uLutCols;
-        uniform float uLutRows;
-        uniform float uLutIs1D;
-        uniform vec3 uDomainMin;
-        uniform vec3 uDomainRangeInv;
-        uniform float uLutIntensity;
-
-        uniform float uMaskCount;
-        uniform vec4 uMaskGeomA0;
-        uniform vec4 uMaskGeomA1;
-        uniform vec4 uMaskGeomA2;
-        uniform vec4 uMaskGeomA3;
-        uniform vec4 uMaskGeomB0;
-        uniform vec4 uMaskGeomB1;
-        uniform vec4 uMaskGeomB2;
-        uniform vec4 uMaskGeomB3;
-        uniform vec4 uMaskAdjA0;
-        uniform vec4 uMaskAdjA1;
-        uniform vec4 uMaskAdjA2;
-        uniform vec4 uMaskAdjA3;
-        uniform float uMaskSharp0;
-        uniform float uMaskSharp1;
-        uniform float uMaskSharp2;
-        uniform float uMaskSharp3;
-
-        float lumaRec709(vec3 c) {
-            return dot(c, vec3(0.2126, 0.7152, 0.0722));
+        vec3 applySmoothContrast(vec3 c, float contrastNorm) {
+            if (abs(contrastNorm) <= 0.0005) return c;
+            vec3 cc = clamp(c, 0.0, 1.0);
+            if (contrastNorm > 0.0) {
+                vec3 s1 = cc * cc * (3.0 - 2.0 * cc);
+                vec3 s2 = s1 * s1 * (3.0 - 2.0 * s1);
+                vec3 target = mix(s1, s2, contrastNorm * 0.72);
+                return clamp(mix(cc, target, min(1.0, contrastNorm * 1.22)), 0.0, 1.0);
+            } else {
+                float t = -contrastNorm;
+                return clamp(vec3(0.5) + (cc - 0.5) * (1.0 - t * 0.68), 0.0, 1.0);
+            }
         }
 
         float bandWeight(float v, float center, float halfW) {
@@ -165,37 +232,20 @@ object GlGradingShaders {
             return t * t * (3.0 - 2.0 * t);
         }
 
-        float grainHash21(vec2 p) {
-            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-        }
-
-        float smoothNoise2D(vec2 p) {
-            vec2 i = floor(p);
-            vec2 f = fract(p);
-            vec2 u = f * f * (3.0 - 2.0 * f);
-            float a = grainHash21(i);
-            float b = grainHash21(i + vec2(1.0, 0.0));
-            float c = grainHash21(i + vec2(0.0, 1.0));
-            float d = grainHash21(i + vec2(1.0, 1.0));
-            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-        }
-
         vec3 rgbToHsl(vec3 c) {
             float maxC = max(c.r, max(c.g, c.b));
             float minC = min(c.r, min(c.g, c.b));
-            float delta = maxC - minC;
-            float l = (maxC + minC) * 0.5;
-            if (delta < 0.00002) {
-                return vec3(0.0, 0.0, l);
-            }
-            float s = (l > 0.5) ? (delta / (2.0 - maxC - minC)) : (delta / (maxC + minC));
+            float d = maxC - minC;
+            float l = 0.5 * (maxC + minC);
+            if (d < 0.00001) return vec3(0.0, 0.0, l);
+            float s = (l > 0.5) ? (d / max(2.0 - maxC - minC, 0.0001)) : (d / max(maxC + minC, 0.0001));
             float h = 0.0;
             if (maxC == c.r) {
-                h = ((c.g - c.b) / delta) + ((c.g < c.b) ? 6.0 : 0.0);
+                h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
             } else if (maxC == c.g) {
-                h = ((c.b - c.r) / delta) + 2.0;
+                h = (c.b - c.r) / d + 2.0;
             } else {
-                h = ((c.r - c.g) / delta) + 4.0;
+                h = (c.r - c.g) / d + 4.0;
             }
             h = mod(h * 60.0 + 360.0, 360.0);
             return vec3(h, clamp(s, 0.0, 1.0), clamp(l, 0.0, 1.0));
@@ -215,574 +265,308 @@ object GlGradingShaders {
             float h = hsl.x;
             float s = hsl.y;
             float l = hsl.z;
-            if (s < 0.00002) {
-                return vec3(l);
-            }
+            if (s <= 0.00001) return vec3(l);
             float q = (l < 0.5) ? (l * (1.0 + s)) : (l + s - l * s);
             float p = 2.0 * l - q;
             float hk = h / 360.0;
-            return vec3(
-                clamp(hue2rgb(p, q, hk + 1.0 / 3.0), 0.0, 1.0),
-                clamp(hue2rgb(p, q, hk), 0.0, 1.0),
-                clamp(hue2rgb(p, q, hk - 1.0 / 3.0), 0.0, 1.0)
-            );
+            return clamp(vec3(
+                hue2rgb(p, q, hk + 1.0 / 3.0),
+                hue2rgb(p, q, hk),
+                hue2rgb(p, q, hk - 1.0 / 3.0)
+            ), 0.0, 1.0);
         }
 
-        void accumHsl(float hueDeg, float center, float span, vec3 adj, inout vec3 acc, inout float wSum) {
+        vec2 mapToRawUv(vec2 uv) {
+            vec2 orientedUv = vec2(
+                mix(uCropRect.x, uCropRect.z, uv.x),
+                mix(uCropRect.y, uCropRect.w, uv.y)
+            );
+            vec3 mapped = uOrientMatrix * vec3(orientedUv, 1.0);
+            vec2 rawUv = mapped.xy / max(abs(mapped.z), 0.0001);
+            if (abs(uOptics.x) > 0.001) {
+                vec2 centered = rawUv - vec2(0.5);
+                float r2 = dot(centered, centered);
+                float k = uOptics.x * 0.45;
+                float edgeScale = 1.0 + max(0.0, k) * 0.35;
+                rawUv = vec2(0.5) + centered * (1.0 + k * r2) / edgeScale;
+            }
+            return rawUv;
+        }
+
+        vec3 sampleSourcePixel(vec2 rawUv) {
+            if (rawUv.x < 0.0 || rawUv.x > 1.0 || rawUv.y < 0.0 || rawUv.y > 1.0) {
+                return vec3(0.04, 0.045, 0.055);
+            }
+            vec3 c = texture2D(uImageTex, rawUv).rgb;
+            // Radial Chromatic Aberration (R/B channel radial UV shift from center)
+            if (abs(uOptics.y) > 0.0005) {
+                vec2 dir = rawUv - vec2(0.5);
+                float r2 = dot(dir, dir);
+                vec2 shift = dir * (uOptics.y * 0.022 * (0.45 + 1.65 * r2));
+                vec2 uvR = clamp(rawUv + shift, vec2(0.0), vec2(1.0));
+                vec2 uvB = clamp(rawUv - shift, vec2(0.0), vec2(1.0));
+                c.r = texture2D(uImageTex, uvR).r;
+                c.b = texture2D(uImageTex, uvB).b;
+            }
+            // Optional Lens Blur (smooth 8-tap radial bokeh)
+            if (uOptics.z > 0.005) {
+                vec2 d = vTexCoord - vec2(0.5);
+                d.x *= uImageInfo.z;
+                float dist = length(d);
+                float blurMask = smoothstep(0.18, 0.72, dist);
+                float radiusPx = uOptics.z * 9.0 * blurMask;
+                if (radiusPx > 0.35) {
+                    vec2 stepUv = uImageInfo.xy * radiusPx;
+                    vec3 acc = c * 0.20;
+                    acc += texture2D(uImageTex, clamp(rawUv + vec2(stepUv.x, 0.0), 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv - vec2(stepUv.x, 0.0), 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv + vec2(0.0, stepUv.y), 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv - vec2(0.0, stepUv.y), 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv + vec2(stepUv.x, stepUv.y) * 0.707, 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv + vec2(-stepUv.x, stepUv.y) * 0.707, 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv + vec2(stepUv.x, -stepUv.y) * 0.707, 0.0, 1.0)).rgb * 0.10;
+                    acc += texture2D(uImageTex, clamp(rawUv + vec2(-stepUv.x, -stepUv.y) * 0.707, 0.0, 1.0)).rgb * 0.10;
+                    c = acc;
+                }
+            }
+            return c;
+        }
+
+        vec3 applyCameraProfile(vec3 c) {
+            if (uOptics.w < 0.5) return c;
+            vec3 p = clamp(c * uProfGain.rgb, 0.0, 1.0);
+            float monoT = clamp(uProfColor.z, 0.0, 1.0);
+            if (monoT > 0.001) {
+                float bw = clamp(dot(p, uProfMono.rgb), 0.0, 1.0);
+                p = mix(p, vec3(bw), monoT);
+            }
+            if (monoT < 0.999) {
+                if (abs(uProfColor.y) > 0.001) {
+                    float maxC = max(p.r, max(p.g, p.b));
+                    float minC = min(p.r, min(p.g, p.b));
+                    float vibMult = max(0.0, 1.0 + uProfColor.y * (1.0 - (maxC - minC)) * 0.85);
+                    float lum = dot(p, vec3(0.2126, 0.7152, 0.0722));
+                    p = clamp(mix(vec3(lum), p, vibMult), 0.0, 1.0);
+                }
+                if (abs(uProfColor.x) > 0.001) {
+                    float satMult = max(0.0, 1.0 + uProfColor.x);
+                    float lum = dot(p, vec3(0.2126, 0.7152, 0.0722));
+                    p = clamp(mix(vec3(lum), p, satMult), 0.0, 1.0);
+                }
+            }
+            float pLuma = dot(p, vec3(0.2126, 0.7152, 0.0722));
+            float midMask = 4.0 * pLuma * (1.0 - pLuma);
+            float cGain = 1.0 + uProfTone.x + uProfTone.w * midMask;
+            p = clamp((p - 0.5) * cGain + 0.5, 0.0, 1.0);
+            if (abs(uProfTone.y) > 0.0005) {
+                float lum = dot(p, vec3(0.2126, 0.7152, 0.0722));
+                float toe = clamp(1.0 - lum, 0.0, 1.0);
+                p = clamp(p + vec3(uProfTone.y * toe * toe), 0.0, 1.0);
+            }
+            if (abs(uProfTone.z) > 0.0005) {
+                float lum = clamp(dot(p, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+                p = clamp(p - vec3(uProfTone.z * pow(max(lum, 0.0001), 1.8) * 0.35), 0.0, 1.0);
+            }
+            float l2 = clamp(dot(p, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+            float shW = pow(max(1.0 - l2, 0.0001), 1.6);
+            float hiW = pow(max(l2, 0.0001), 1.6);
+            p = clamp(p + uProfShCast.rgb * shW + uProfHiCast.rgb * hiW, 0.0, 1.0);
+            return p;
+        }
+
+        void accumHslBand(
+            float hueDeg, float center, float span, vec4 adj,
+            inout float dHue, inout float dSat, inout float dLum, inout float totalW
+        ) {
             float dist = abs(hueDeg - center);
             if (dist > 180.0) dist = 360.0 - dist;
             if (dist < span) {
                 float w = 1.0 - dist / span;
-                wSum += w;
-                acc += adj * w;
+                totalW += w;
+                dHue += adj.x * w;
+                dSat += adj.y * w;
+                dLum += adj.z * w;
             }
         }
 
         vec3 applyHslMixer(vec3 c) {
             vec3 hsl = rgbToHsl(c);
             if (hsl.y <= 0.002) return c;
-            vec3 acc = vec3(0.0);
-            float wSum = 0.0;
-            accumHsl(hsl.x, 0.0, 45.0, uHsl0, acc, wSum);
-            accumHsl(hsl.x, 30.0, 45.0, uHsl1, acc, wSum);
-            accumHsl(hsl.x, 60.0, 45.0, uHsl2, acc, wSum);
-            accumHsl(hsl.x, 120.0, 55.0, uHsl3, acc, wSum);
-            accumHsl(hsl.x, 180.0, 55.0, uHsl4, acc, wSum);
-            accumHsl(hsl.x, 240.0, 55.0, uHsl5, acc, wSum);
-            accumHsl(hsl.x, 285.0, 55.0, uHsl6, acc, wSum);
-            accumHsl(hsl.x, 330.0, 55.0, uHsl7, acc, wSum);
-            if (wSum > 0.0001) {
-                acc /= wSum;
+            float dHue = 0.0;
+            float dSat = 0.0;
+            float dLum = 0.0;
+            float totalW = 0.0;
+            accumHslBand(hsl.x, 0.0,   35.0, uHsl0, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 30.0,  35.0, uHsl1, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 60.0,  35.0, uHsl2, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 120.0, 55.0, uHsl3, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 180.0, 45.0, uHsl4, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 230.0, 45.0, uHsl5, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 275.0, 40.0, uHsl6, dHue, dSat, dLum, totalW);
+            accumHslBand(hsl.x, 325.0, 40.0, uHsl7, dHue, dSat, dLum, totalW);
+            if (totalW > 0.0001) {
+                dHue /= totalW;
+                dSat /= totalW;
+                dLum /= totalW;
             }
-            float newH = mod(hsl.x + (acc.x / 100.0) * 32.0 + 360.0, 360.0);
-            float newS = clamp(hsl.y * (1.0 + acc.y / 100.0), 0.0, 1.0);
-            float newL = clamp(hsl.z + (acc.z / 100.0) * 0.22 * hsl.y, 0.0, 1.0);
+            float newH = mod(hsl.x + (dHue / 100.0) * 32.0 + 360.0, 360.0);
+            float newS = clamp(hsl.y * (1.0 + dSat / 100.0), 0.0, 1.0);
+            float newL = clamp(hsl.z + (dLum / 100.0) * 0.22 * hsl.y, 0.0, 1.0);
             return hslToRgb(vec3(newH, newS, newL));
         }
 
-        float smoothRamp(float e0, float e1, float x) {
-            float t = clamp((x - e0) / max(e1 - e0, 0.0001), 0.0, 1.0);
-            return t * t * (3.0 - 2.0 * t);
-        }
-
-        vec3 srgbToLinear(vec3 c) {
-            vec3 cc = clamp(c, 0.0, 1.0);
-            vec3 low = cc / 12.92;
-            vec3 high = pow(max((cc + 0.055) / 1.055, vec3(0.0001)), vec3(2.4));
-            vec3 mask = step(vec3(0.04045), cc);
-            return mix(low, high, mask);
-        }
-
-        vec3 linearToSrgb(vec3 c) {
-            vec3 cc = max(c, vec3(0.0));
-            vec3 low = cc * 12.92;
-            vec3 high = 1.055 * pow(max(cc, vec3(0.0031308)), vec3(1.0 / 2.4)) - 0.055;
-            vec3 mask = step(vec3(0.0031308), cc);
-            return clamp(mix(low, high, mask), 0.0, 1.0);
-        }
-
-        vec3 applyPointColor(vec3 c) {
-            vec3 hsl = rgbToHsl(c);
-            if (hsl.y <= 0.01) return c;
-            float rangeNorm = clamp(uPointShift.w / 100.0, 0.0, 1.0);
-            float dh = abs(hsl.x - uPointSource.x);
-            if (dh > 180.0) dh = 360.0 - dh;
-            float hueW = mix(14.0, 75.0, rangeNorm);
-            float hw = 1.0 - smoothRamp(0.0, hueW, dh);
-
-            float satW = mix(0.20, 0.88, rangeNorm);
-            float sw = clamp(1.0 - abs(hsl.y - uPointSource.y) / satW, 0.0, 1.0);
-
-            float lumW = mix(0.28, 0.92, rangeNorm);
-            float lw = clamp(1.0 - abs(hsl.z - uPointSource.z) / lumW, 0.0, 1.0);
-
-            float mask = hw * mix(0.45, 1.0, sw) * mix(0.55, 1.0, lw);
-            if (mask <= 0.001) return c;
-
-            float newH = mod(hsl.x + (uPointShift.x / 100.0) * 45.0 * mask + 360.0, 360.0);
-            float newS = clamp(hsl.y * (1.0 + (uPointShift.y / 100.0) * mask), 0.0, 1.0);
-            float newL = clamp(hsl.z + (uPointShift.z / 100.0) * 0.25 * mask, 0.0, 1.0);
-            return hslToRgb(vec3(newH, newS, newL));
-        }
-
-        vec3 applyColorGradingWheels(vec3 cIn) {
-            float l = lumaRec709(cIn);
-            float blend = clamp(uCgBlendBalance.x, 0.0, 1.0);
-            float pivot = clamp(0.5 + uCgBlendBalance.y * 0.24, 0.22, 0.78);
-            float halfW = mix(0.22, 0.60, blend);
-
-            float shW = 1.0 - smoothRamp(max(0.0, pivot - halfW), min(1.0, pivot + halfW * 0.35), l);
-            float hiW = smoothRamp(max(0.0, pivot - halfW * 0.35), min(1.0, pivot + halfW), l);
-            float dMid = (l - pivot) / max(halfW * 0.9, 0.16);
-            float midW = exp(-dMid * dMid * 1.45);
-
-            vec3 outC = cIn;
-            outC += uCgShadowTint.rgb * shW * (1.0 - l * 0.35) + vec3(uCgShadowTint.a * shW * 0.65);
-            outC += uCgMidTint.rgb * midW + vec3(uCgMidTint.a * midW * 0.75);
-            outC += uCgHighlightTint.rgb * hiW * (0.45 + l * 0.55) + vec3(uCgHighlightTint.a * hiW * 0.65);
-            outC += uCgGlobalTint.rgb + vec3(uCgGlobalTint.a);
-            return clamp(outC, 0.0, 1.0);
-        }
-
-        vec3 sampleLut3DTiled(vec3 rgb) {
-            vec3 norm = clamp((rgb - uDomainMin) * uDomainRangeInv, 0.0, 1.0);
-            float n = uLutSize;
-            float maxIdx = n - 1.0;
-
-            float fb = norm.b * maxIdx;
-            float b0 = floor(fb);
-            float b1 = min(b0 + 1.0, maxIdx);
-            float db = fb - b0;
-
-            float tileW = n;
-            float totalW = uLutCols * n;
-            float totalH = uLutRows * n;
-
-            float col0 = mod(b0, uLutCols);
-            float row0 = floor(b0 / uLutCols);
-            float u0 = (col0 * tileW + 0.5 + norm.r * maxIdx) / totalW;
-            float v0 = (row0 * tileW + 0.5 + norm.g * maxIdx) / totalH;
-
-            float col1 = mod(b1, uLutCols);
-            float row1 = floor(b1 / uLutCols);
-            float u1 = (col1 * tileW + 0.5 + norm.r * maxIdx) / totalW;
-            float v1 = (row1 * tileW + 0.5 + norm.g * maxIdx) / totalH;
-
-            vec3 c0 = texture2D(uLutTex, vec2(u0, v0)).rgb;
-            vec3 c1 = texture2D(uLutTex, vec2(u1, v1)).rgb;
-            return mix(c0, c1, db);
-        }
-
-        vec3 sampleLut1D(vec3 rgb) {
-            vec3 norm = clamp((rgb - uDomainMin) * uDomainRangeInv, 0.0, 1.0);
-            float n = uLutSize;
-            float maxIdx = n - 1.0;
-            float ur = (0.5 + norm.r * maxIdx) / n;
-            float ug = (0.5 + norm.g * maxIdx) / n;
-            float ub = (0.5 + norm.b * maxIdx) / n;
-            float rOut = texture2D(uLutTex, vec2(ur, 0.5)).r;
-            float gOut = texture2D(uLutTex, vec2(ug, 0.5)).g;
-            float bOut = texture2D(uLutTex, vec2(ub, 0.5)).b;
-            return vec3(rOut, gOut, bOut);
-        }
-
-        vec3 applyCameraProfile(vec3 cIn) {
-            float st = uProfStrength;
-            vec3 p = clamp(cIn * (vec3(1.0) + uProfGains * st), 0.0, 1.0);
-
-            if (uProfSelective.x != 0.0 || uProfSelective.y != 0.0 || uProfSelective.z != 0.0) {
-                float lumaS = lumaRec709(p);
-                float greenMask = clamp((p.g - max(p.r, p.b) * 0.88) * 3.0, 0.0, 1.0);
-                float skyMask = clamp((p.b - max(p.r, p.g) * 0.92) * 3.0, 0.0, 1.0);
-                float skinMask = clamp((p.r - p.b) * 2.2, 0.0, 1.0)
-                    * clamp((p.g - p.b * 0.9) * 2.0, 0.0, 1.0)
-                    * clamp(1.0 - abs(lumaS - 0.58) * 1.4, 0.0, 1.0);
-
-                float foil = uProfSelective.x * st * greenMask;
-                p.g = clamp(p.g + foil * 0.07, 0.0, 1.0);
-                p.b = clamp(p.b + foil * 0.03, 0.0, 1.0);
-
-                float skin = uProfSelective.y * st * skinMask;
-                p.r = clamp(p.r + skin * 0.05, 0.0, 1.0);
-                p.g = clamp(p.g + skin * 0.025, 0.0, 1.0);
-
-                float sky = uProfSelective.z * st * skyMask;
-                p.b = clamp(p.b + sky * 0.06, 0.0, 1.0);
-                p.r = clamp(p.r - sky * 0.025, 0.0, 1.0);
-            }
-
-            float monoT = clamp(uProfMono.x * st, 0.0, 1.0);
-            if (monoT > 0.001) {
-                float monoLuma = clamp(dot(p, uProfMono.yzw), 0.0, 1.0);
-                p = mix(p, vec3(monoLuma), monoT);
-            }
-
-            if (monoT < 0.999) {
-                if (uProfSat.y != 0.0) {
-                    float maxC = max(p.r, max(p.g, p.b));
-                    float minC = min(p.r, min(p.g, p.b));
-                    float vibMult = max(0.0, 1.0 + uProfSat.y * st * (1.0 - (maxC - minC)) * 0.85);
-                    float lum = lumaRec709(p);
-                    p = clamp(mix(vec3(lum), p, vibMult), 0.0, 1.0);
-                }
-                if (uProfSat.x != 0.0) {
-                    float satMult = max(0.0, 1.0 + uProfSat.x * st);
-                    float lum = lumaRec709(p);
-                    p = clamp(mix(vec3(lum), p, satMult), 0.0, 1.0);
-                }
-            }
-
-            float pLuma = lumaRec709(p);
-            float midMask = 4.0 * pLuma * (1.0 - pLuma);
-            float cGain = 1.0 + uProfTone.x * st + uProfTone.w * st * midMask;
-            p = clamp((p - 0.5) * cGain + 0.5, 0.0, 1.0);
-
-            if (uProfTone.y != 0.0) {
-                float toeW = pow(clamp(1.0 - lumaRec709(p), 0.0, 1.0), 2.0);
-                p = clamp(p + vec3(uProfTone.y * st * toeW), 0.0, 1.0);
-            }
-            if (uProfTone.z != 0.0) {
-                float hiW = pow(clamp(lumaRec709(p), 0.0, 1.0), 1.8);
-                p = clamp(p - vec3(uProfTone.z * st * hiW * 0.35), 0.0, 1.0);
-            }
-
-            float l2 = lumaRec709(p);
-            float shCastW = pow(max(1.0 - l2, 0.0), 1.6) * st;
-            float hiCastW = pow(max(l2, 0.0), 1.6) * st;
-            p = clamp(p + uProfShadowTint * shCastW + uProfHighlightTint * hiCastW, 0.0, 1.0);
-
-            return p;
-        }
-
-        vec2 mapViewUvToSource(vec2 viewUv, out bool oob) {
-            vec2 oUv = uCropRect.xy + viewUv * uCropRect.zw;
-            if (uHasGeometry < 0.5) {
-                oob = false;
-                return clamp(oUv, 0.0, 1.0);
-            }
-            vec3 h = vec3(oUv, 1.0);
-            float w = dot(uGeomRow2, h);
-            if (w <= 0.0001) {
-                oob = true;
-                return vec2(0.0);
-            }
-            vec2 su = vec2(dot(uGeomRow0, h), dot(uGeomRow1, h)) / w;
-            oob = (su.x < 0.0 || su.x > 1.0 || su.y < 0.0 || su.y > 1.0);
-            return su;
-        }
-
-        vec3 sampleSourceClamped(vec2 viewUv) {
-            bool dummyOob;
-            vec2 su = mapViewUvToSource(clamp(viewUv, 0.0, 1.0), dummyOob);
-            return texture2D(uImageTex, clamp(su, 0.0, 1.0)).rgb;
-        }
-
-        float evaluateMaskWeight(vec2 viewUv, vec4 geomA, vec4 geomB) {
+        vec3 applySingleMask(vec3 col, vec2 uv, vec4 mA, vec4 mB, vec4 mC) {
+            float feather = clamp(mA.z, 0.02, 1.0);
             float w = 0.0;
-            if (geomA.x < 0.5) {
-                // Radial gradient: geomA=(0, cx, cy, inv), geomB=(rx, ry, feather, 0)
-                float rx = max(geomB.x, 0.02);
-                float ry = max(geomB.y, 0.02);
-                vec2 d = vec2((viewUv.x - geomA.y) / rx, (viewUv.y - geomA.z) / ry);
-                float dist = length(d);
-                float f = clamp(geomB.z, 0.0, 1.0);
-                float inner = clamp(1.0 - f, 0.0, 0.98);
-                float outer = max(1.0 + f * 0.15, inner + 0.02);
-                w = 1.0 - smoothRamp(inner, outer, dist);
+            if (mA.x < 0.5) {
+                // Radial ellipse mask
+                vec2 d = (uv - mB.xy) / max(mB.zw, vec2(0.02));
+                float r = length(d);
+                float inner = max(0.0, 1.0 - feather);
+                float outer = 1.0 + feather * 0.15;
+                w = 1.0 - smoothstep(inner, max(inner + 0.02, outer), r);
             } else {
-                // Linear gradient: geomA=(1, sx, sy, inv), geomB=(ex, ey, aspect, 0)
-                float safeAspect = max(geomB.z, 0.1);
-                vec2 p = vec2((viewUv.x - geomA.y) * safeAspect, viewUv.y - geomA.z);
-                vec2 d = vec2((geomB.x - geomA.y) * safeAspect, geomB.y - geomA.z);
-                float len2 = max(dot(d, d), 0.0001);
-                float proj = clamp(dot(p, d) / len2, 0.0, 1.0);
-                w = 1.0 - (proj * proj * (3.0 - 2.0 * proj));
+                // Linear gradient mask
+                vec2 dir = mB.zw - mB.xy;
+                float len2 = max(dot(dir, dir), 0.0004);
+                float t = dot(uv - mB.xy, dir) / len2;
+                float halfF = max(0.04, feather * 0.5);
+                w = 1.0 - smoothstep(0.5 - halfF, 0.5 + halfF, t);
             }
-            if (geomA.w > 0.5) {
-                w = 1.0 - w;
-            }
-            return clamp(w, 0.0, 1.0);
-        }
+            if (mA.y > 0.5) w = 1.0 - w;
+            if (w <= 0.002) return col;
 
-        vec3 applySingleLocalMask(vec3 cIn, vec2 viewUv, vec4 geomA, vec4 geomB, vec4 adjA, float sharpNorm) {
-            float w = evaluateMaskWeight(viewUv, geomA, geomB);
-            if (w <= 0.001) return cIn;
-            vec3 mc = cIn;
-            // Exposure EV shift inside mask in linear light
-            if (abs(adjA.x) > 0.001) {
-                mc = linearToSrgb(srgbToLinear(mc) * pow(2.0, adjA.x * 1.15 * w));
+            // Local mask edits in linear + display space
+            vec3 lin = srgbToLinear(col);
+            if (abs(mA.w) > 0.001) {
+                lin *= exp2(mA.w * w);
             }
-            // Local Warmth
-            if (abs(adjA.z) > 0.001) {
-                float wn = adjA.z * w;
-                mc.r = clamp(mc.r * max(0.15, 1.0 + wn * 0.44), 0.0, 1.0);
-                mc.g = clamp(mc.g * max(0.15, 1.0 + wn * 0.06), 0.0, 1.0);
-                mc.b = clamp(mc.b * max(0.15, 1.0 - wn * 0.46), 0.0, 1.0);
+            if (abs(mC.y) > 0.001) {
+                float lt = mC.y * w;
+                vec3 mWb = vec3(exp(lt * 0.42), exp(lt * 0.04), exp(-lt * 0.46));
+                float mLuma = max(dot(mWb, vec3(0.2126, 0.7152, 0.0722)), 0.0001);
+                lin *= (mWb / mLuma);
             }
-            // Local Contrast
-            if (abs(adjA.y) > 0.001) {
-                float cScale = (adjA.y >= 0.0) ? 1.25 : 0.85;
-                float cFac = max(0.15, 1.0 + adjA.y * cScale * w);
-                mc = clamp((mc - 0.5) * cFac + 0.5, 0.0, 1.0);
+            vec3 mc = linearToSrgb(applySoftShoulder(lin, 0.88));
+            if (abs(mC.x) > 0.001) {
+                mc = applySmoothContrast(mc, mC.x * w);
             }
-            // Local Saturation
-            if (abs(adjA.w) > 0.001) {
-                float lum = lumaRec709(mc);
-                float satScale = (adjA.w >= 0.0) ? 1.40 : 1.0;
-                float satFac = max(0.0, 1.0 + adjA.w * satScale * w);
-                mc = clamp(mix(vec3(lum), mc, satFac), 0.0, 1.0);
+            if (abs(mC.z) > 0.001) {
+                float lum = dot(mc, vec3(0.2126, 0.7152, 0.0722));
+                mc = clamp(mix(vec3(lum), mc, max(0.0, 1.0 + mC.z * w)), 0.0, 1.0);
             }
-            // Local Sharpness (only samples neighbors for masked pixels)
-            if (sharpNorm > 0.001) {
-                vec2 sOff = uTexelSize * 1.35;
-                float lC = lumaRec709(sampleSourceClamped(viewUv));
-                float lL = lumaRec709(sampleSourceClamped(viewUv - vec2(sOff.x, 0.0)));
-                float lR = lumaRec709(sampleSourceClamped(viewUv + vec2(sOff.x, 0.0)));
-                float lU = lumaRec709(sampleSourceClamped(viewUv - vec2(0.0, sOff.y)));
-                float lD = lumaRec709(sampleSourceClamped(viewUv + vec2(0.0, sOff.y)));
-                float avgNearL = (lL + lR + lU + lD) * 0.25;
-                mc = clamp(mc + vec3((lC - avgNearL) * sharpNorm * 1.55 * w), 0.0, 1.0);
-            }
-            return mc;
+            return clamp(mc, 0.0, 1.0);
         }
 
         void main() {
-            vec2 uv = vTexCoord;
-            bool oob = false;
-            vec2 srcUv = mapViewUvToSource(uv, oob);
-            vec4 texel;
-            if (uHasOptics > 0.5) {
-                vec2 d = uv - vec2(0.5);
-                float r2 = dot(d, d);
-                float radialScale = 1.0 + uLensDistortion * r2;
-                uv = clamp(vec2(0.5) + d * radialScale, 0.0, 1.0);
-                srcUv = mapViewUvToSource(uv, oob);
-                if (oob) {
-                    gl_FragColor = vec4(0.043, 0.055, 0.078, 1.0);
-                    return;
-                }
-                texel = texture2D(uImageTex, clamp(srcUv, 0.0, 1.0));
-                if (abs(uChromaticAberration) > 0.00001) {
-                    texel.r = sampleSourceClamped(vec2(0.5) + d * (radialScale + uChromaticAberration)).r;
-                    texel.b = sampleSourceClamped(vec2(0.5) + d * (radialScale - uChromaticAberration)).b;
-                }
-            } else {
-                if (oob) {
-                    gl_FragColor = vec4(0.043, 0.055, 0.078, 1.0);
-                    return;
-                }
-                texel = texture2D(uImageTex, clamp(srcUv, 0.0, 1.0));
+            vec2 rawUv = mapToRawUv(vTexCoord);
+            vec3 c = sampleSourcePixel(rawUv);
+
+            // Optional Camera Profile base transform
+            c = applyCameraProfile(c);
+
+            // =========================================================================
+            // STEP 1: Convert sRGB input pixels to linear light space
+            // =========================================================================
+            vec3 lin = srgbToLinear(c);
+
+            // =========================================================================
+            // STEP 2: Photographic Exposure in linear light: color *= pow(2.0, EV)
+            // =========================================================================
+            if (abs(uToneA.x) > 0.0005) {
+                lin *= exp2(uToneA.x);
             }
 
-            if (uIsOriginal > 0.5 || (uSplitRatio >= 0.0 && vTexCoord.x < uSplitRatio)) {
-                gl_FragColor = texel;
-                return;
+            // =========================================================================
+            // STEP 3: White Balance (Temp & Tint) in linear light space
+            // =========================================================================
+            if (abs(uToneA.y) > 0.0005 || abs(uToneA.z) > 0.0005) {
+                lin *= uWbMult.rgb;
             }
 
-            vec3 c = texel.rgb;
+            // =========================================================================
+            // STEP 4: Highlights, Shadows, Whites, Blacks, Soft Shoulder & Contrast
+            // =========================================================================
+            float hiNorm = uToneB.x;
+            float shNorm = uToneB.y;
+            float whNorm = uToneB.z;
+            float blNorm = uToneB.w;
+            if (abs(hiNorm) > 0.0005 || abs(shNorm) > 0.0005 || abs(whNorm) > 0.0005 || abs(blNorm) > 0.0005) {
+                float linLum = max(dot(lin, vec3(0.2126, 0.7152, 0.0722)), 0.00001);
+                float lumNorm = (linLum / (linLum + 0.35)) * 1.35;
 
-            // 0. Lens Blur (radial depth-of-field bokeh disk blur)
-            if (uLensBlurAmount > 0.001) {
-                float radial = length(uv - vec2(0.5)) * 1.4142135;
-                float focusRadius = uBokehFocus * 0.62;
-                float blurMask = smoothstep(focusRadius * 0.45, focusRadius + 0.36, radial);
-                if (blurMask > 0.01) {
-                    float minDim = min(uImageRes.x, uImageRes.y);
-                    vec2 blurRadius = (minDim / uImageRes) * (uLensBlurAmount * 0.018 * blurMask);
-                    vec3 acc = vec3(0.0);
-                    float wTotal = 0.0;
+                // Highlights: upper-tone smooth recovery/lift preserving highlight headroom
+                if (abs(hiNorm) > 0.0005) {
+                    float wHi = smoothstep(0.18, 0.95, lumNorm);
+                    float hiStops = (hiNorm < 0.0) ? (hiNorm * 1.35) : (hiNorm * 0.90);
+                    lin *= exp2(hiStops * wHi);
+                }
 
-                    // Center + 12-tap Poisson bokeh disk with highlight bloom weighting
-                    vec2 taps[12];
-                    taps[0] = vec2(-0.326, -0.406);
-                    taps[1] = vec2(-0.840, -0.074);
-                    taps[2] = vec2(-0.696,  0.457);
-                    taps[3] = vec2(-0.203,  0.621);
-                    taps[4] = vec2( 0.962, -0.195);
-                    taps[5] = vec2( 0.473, -0.480);
-                    taps[6] = vec2( 0.519,  0.767);
-                    taps[7] = vec2( 0.185, -0.893);
-                    taps[8] = vec2( 0.507,  0.064);
-                    taps[9] = vec2( 0.896,  0.412);
-                    taps[10] = vec2(-0.322, -0.933);
-                    taps[11] = vec2(-0.792, -0.598);
+                // Shadows: lower-tone smooth lift/deepening without crushing blacks
+                if (abs(shNorm) > 0.0005) {
+                    float wSh = 1.0 - smoothstep(0.02, 0.45, lumNorm);
+                    float shStops = (shNorm > 0.0) ? (shNorm * 1.35) : (shNorm * 1.05);
+                    lin *= exp2(shStops * wSh);
+                }
 
-                    float cLuma = lumaRec709(c);
-                    float cw = 1.0 + cLuma * cLuma * 1.4;
-                    acc += c * cw;
-                    wTotal += cw;
+                // Whites: smooth upper-range white-point gain
+                if (abs(whNorm) > 0.0005) {
+                    float wWh = smoothstep(0.08, 1.0, lumNorm);
+                    lin *= exp2(whNorm * 0.75 * wWh);
+                }
 
-                    for (int i = 0; i < 12; i++) {
-                        vec3 s = sampleSourceClamped(uv + taps[i] * blurRadius);
-                        float sLuma = lumaRec709(s);
-                        float w = 1.0 + sLuma * sLuma * 1.6;
-                        acc += s * w;
-                        wTotal += w;
+                // Blacks: soft toe lift (positive) or smooth multiplicative deepening (negative)
+                if (abs(blNorm) > 0.0005) {
+                    float wToe = 1.0 - smoothstep(0.0, 0.50, lumNorm);
+                    if (blNorm > 0.0) {
+                        lin += vec3(blNorm * 0.032 * wToe) * clamp(1.0 - lin, 0.0, 1.0);
+                    } else {
+                        lin *= exp2(blNorm * 1.15 * wToe);
                     }
-                    vec3 blurred = acc / max(wTotal, 0.001);
-                    c = mix(c, blurred, clamp(blurMask * 1.25, 0.0, 1.0));
                 }
             }
 
-            // Spatial Detail: Luminance Noise Reduction, Color Noise Reduction, Texture, Sharpening, Clarity
-            if (uHasSpatial > 0.5) {
-                vec3 cL = sampleSourceClamped(uv - vec2(uTexelSize.x, 0.0));
-                vec3 cR = sampleSourceClamped(uv + vec2(uTexelSize.x, 0.0));
-                vec3 cU = sampleSourceClamped(uv - vec2(0.0, uTexelSize.y));
-                vec3 cD = sampleSourceClamped(uv + vec2(0.0, uTexelSize.y));
-                vec3 avgNear = (cL + cR + cU + cD) * 0.25;
+            // C1-continuous soft highlight shoulder roll-off before display conversion
+            lin = applySoftShoulder(max(lin, vec3(0.0)), uWbMult.w);
 
-                // Luminance Noise Reduction (Amount + Detail + Contrast)
-                if (uNrParams.x > 0.001) {
-                    vec2 nrOff = uTexelSize * 2.5;
-                    vec3 nrL = sampleSourceClamped(uv - vec2(nrOff.x, 0.0));
-                    vec3 nrR = sampleSourceClamped(uv + vec2(nrOff.x, 0.0));
-                    vec3 nrU = sampleSourceClamped(uv - vec2(0.0, nrOff.y));
-                    vec3 nrD = sampleSourceClamped(uv + vec2(0.0, nrOff.y));
-                    float nrWideLuma = lumaRec709((nrL + nrR + nrU + nrD) * 0.25);
-                    float nrNearLuma = lumaRec709(avgNear);
-                    float nrTargetLuma = mix(nrWideLuma, nrNearLuma, 0.30 + uNrParams.y * 0.50);
+            // =========================================================================
+            // STEP 5: Convert back to sRGB display space + Smooth Contrast + Color
+            // =========================================================================
+            c = linearToSrgb(lin);
 
-                    float curLuma = lumaRec709(c);
-                    float dLumaMin = min(
-                        min(abs(curLuma - lumaRec709(cL)), abs(curLuma - lumaRec709(cR))),
-                        min(abs(curLuma - lumaRec709(cU)), abs(curLuma - lumaRec709(cD)))
-                    );
-                    float coherentEdge = max(abs(curLuma - nrTargetLuma) - dLumaMin * 0.85, 0.0);
-                    float detailScale = mix(1.8, 15.0, uNrParams.y);
-                    float edgeProtect = clamp(1.0 - coherentEdge * detailScale, 0.08, 1.0);
-                    float smoothedLuma = mix(curLuma, nrTargetLuma, uNrParams.x * 0.84 * edgeProtect);
-                    float contrastRestore = (smoothedLuma - nrWideLuma) * uNrParams.z * uNrParams.x * 0.50;
-                    float nrLumaDelta = (smoothedLuma + contrastRestore) - curLuma;
-                    c = clamp(c + vec3(nrLumaDelta), 0.0, 1.0);
-                }
-
-                // Color Noise Reduction (Amount + Detail + Smoothness; preserves luminance Y)
-                if (uColorNrParams.x > 0.001) {
-                    float curLumaCnr = lumaRec709(c);
-                    vec3 chromaC = c - vec3(curLumaCnr);
-
-                    float cRadius = mix(1.4, 4.5, uColorNrParams.z);
-                    vec2 cOff = uTexelSize * cRadius;
-                    vec3 cn0 = sampleSourceClamped(uv + vec2(-cOff.x, -cOff.y));
-                    vec3 cn1 = sampleSourceClamped(uv + vec2( cOff.x, -cOff.y));
-                    vec3 cn2 = sampleSourceClamped(uv + vec2(-cOff.x,  cOff.y));
-                    vec3 cn3 = sampleSourceClamped(uv + vec2( cOff.x,  cOff.y));
-
-                    vec3 ch0 = cn0 - vec3(lumaRec709(cn0));
-                    vec3 ch1 = cn1 - vec3(lumaRec709(cn1));
-                    vec3 ch2 = cn2 - vec3(lumaRec709(cn2));
-                    vec3 ch3 = cn3 - vec3(lumaRec709(cn3));
-                    vec3 chNear = avgNear - vec3(lumaRec709(avgNear));
-                    vec3 avgChroma = (ch0 + ch1 + ch2 + ch3 + chNear * 2.0) / 6.0;
-
-                    vec3 chL = cL - vec3(lumaRec709(cL));
-                    vec3 chR = cR - vec3(lumaRec709(cR));
-                    vec3 chU = cU - vec3(lumaRec709(cU));
-                    vec3 chD = cD - vec3(lumaRec709(cD));
-                    float dChromaMin = min(
-                        min(length(chromaC - chL), length(chromaC - chR)),
-                        min(length(chromaC - chU), length(chromaC - chD))
-                    );
-                    float chromaEdge = max(length(chromaC - avgChroma) - dChromaMin * 0.85, 0.0);
-                    float chromaProtect = clamp(1.0 - chromaEdge * mix(0.25, 4.2, uColorNrParams.y), 0.14, 1.0);
-                    vec3 cleanChroma = mix(chromaC, avgChroma, uColorNrParams.x * 0.94 * chromaProtect);
-                    c = clamp(vec3(curLumaCnr) + cleanChroma, 0.0, 1.0);
-                }
-
-                float lumaC = lumaRec709(c);
-                float lumaNear = lumaRec709(avgNear);
-                float localDelta = (lumaC - lumaNear) * uTextureAmount;
-
-                // Sharpening (Amount + Radius + Detail + Masking)
-                if (uSharpenParams.x > 0.001) {
-                    vec2 sOff = uTexelSize * uSharpenParams.y;
-                    vec3 sL = sampleSourceClamped(uv - vec2(sOff.x, 0.0));
-                    vec3 sR = sampleSourceClamped(uv + vec2(sOff.x, 0.0));
-                    vec3 sU = sampleSourceClamped(uv - vec2(0.0, sOff.y));
-                    vec3 sD = sampleSourceClamped(uv + vec2(0.0, sOff.y));
-                    float lumaRing = lumaRec709((sL + sR + sU + sD) * 0.25);
-
-                    float unsharpDelta = lumaC - lumaRing;
-                    float fineDelta = lumaC - lumaNear;
-                    float detailN = uSharpenParams.z;
-                    float sharpSignal = unsharpDelta * (0.85 - 0.15 * detailN) + fineDelta * (0.15 + detailN * 0.95);
-
-                    float edgeMask = 1.0;
-                    if (uSharpenParams.w > 0.001) {
-                        float g1 = abs(lumaRec709(cR) - lumaRec709(cL)) + abs(lumaRec709(cD) - lumaRec709(cU));
-                        float gR = abs(lumaRec709(sR) - lumaRec709(sL)) + abs(lumaRec709(sD) - lumaRec709(sU));
-                        float edgeMag = max(g1, gR) * 0.5;
-                        float thresh = uSharpenParams.w * 0.18;
-                        edgeMask = smoothRamp(thresh * 0.45, max(thresh * 1.45, 0.002), edgeMag);
-                    }
-                    localDelta += sharpSignal * uSharpenParams.x * 1.45 * edgeMask;
-                }
-
-                if (uClarityAmount != 0.0) {
-                    vec2 wideOff = uTexelSize * 4.0;
-                    vec3 wL = sampleSourceClamped(uv - vec2(wideOff.x, 0.0));
-                    vec3 wR = sampleSourceClamped(uv + vec2(wideOff.x, 0.0));
-                    vec3 wU = sampleSourceClamped(uv - vec2(0.0, wideOff.y));
-                    vec3 wD = sampleSourceClamped(uv + vec2(0.0, wideOff.y));
-                    float wideLuma = lumaRec709((wL + wR + wU + wD) * 0.25);
-                    float midMask = clamp(1.0 - abs(lumaC - 0.5) * 1.8, 0.2, 1.0);
-                    localDelta += (lumaC - wideLuma) * uClarityAmount * midMask;
-                }
-                c = clamp(c + vec3(localDelta), 0.0, 1.0);
+            // Smooth S-curve Contrast with soft toe & shoulder roll-off
+            if (abs(uToneA.w) > 0.0005) {
+                c = applySmoothContrast(c, uToneA.w);
             }
 
-            // 0.5. Foundational Camera Profile (non-destructive base layer before user sliders)
-            if (uHasProfile > 0.5) {
-                c = applyCameraProfile(c);
+            // Parametric Tones (4-band smooth tonal shaping)
+            if (abs(uParamTone.x) > 0.001 || abs(uParamTone.y) > 0.001 ||
+                abs(uParamTone.z) > 0.001 || abs(uParamTone.w) > 0.001) {
+                float pLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                float pDelta =
+                    uParamTone.w * 0.22 * bandWeight(pLum, 0.12, 0.24) +
+                    uParamTone.z * 0.20 * bandWeight(pLum, 0.36, 0.26) +
+                    uParamTone.y * 0.20 * bandWeight(pLum, 0.64, 0.26) +
+                    uParamTone.x * 0.22 * bandWeight(pLum, 0.88, 0.24);
+                c = clamp(c + vec3(pDelta), 0.0, 1.0);
             }
 
-            // 1. Exposure (in linear light) + Temperature + Tint
-            if (abs(uExposureMult - 1.0) > 0.0005) {
-                c = linearToSrgb(srgbToLinear(c) * uExposureMult);
-            }
-            c *= uTempMult;
-            c = clamp(c, 0.0, 1.0);
-
-            // 2. Dehaze
-            if (uDehazeNorm != 0.0) {
-                float dContrast = max(0.25, 1.0 + uDehazeNorm * 0.48);
-                float dShift = -uDehazeNorm * 0.11;
-                c = clamp((c - 0.5) * dContrast + 0.5 + dShift, 0.0, 1.0);
-                float luma = lumaRec709(c);
-                c = clamp(mix(vec3(luma), c, max(0.0, 1.0 + uDehazeNorm * 0.36)), 0.0, 1.0);
+            // Tone Curves (256x2 packed texture: row 0 = R,G,B; row 1 = Master)
+            if (uImageInfo.w > 0.5) {
+                float mR = texture2D(uCurveTex, vec2(c.r, 0.75)).r;
+                float mG = texture2D(uCurveTex, vec2(c.g, 0.75)).r;
+                float mB = texture2D(uCurveTex, vec2(c.b, 0.75)).r;
+                c.r = texture2D(uCurveTex, vec2(mR, 0.25)).r;
+                c.g = texture2D(uCurveTex, vec2(mG, 0.25)).g;
+                c.b = texture2D(uCurveTex, vec2(mB, 0.25)).b;
             }
 
-            // 3. Whites & Blacks (tonally tapered so negative Whites don't crush shadows)
-            if (uBlackLift != 0.0 || uWhiteGain != 1.0) {
-                float wbLuma = lumaRec709(c);
-                float hiMask = smoothRamp(0.28, 0.96, wbLuma);
-                float shMask = 1.0 - smoothRamp(0.0, 0.62, wbLuma);
-                vec3 whiteAdj = mix(c, c * uWhiteGain, hiMask) + vec3((uWhiteGain - 1.0) * 0.22 * hiMask * hiMask);
-                c = clamp(whiteAdj + vec3(uBlackLift * shMask), 0.0, 1.0);
-            }
+            // Camera Calibration (Row-normalized RGB Primary Hue & Saturation)
+            if (uCalibB.w > 0.5) {
+                float rShift = uCalibA.x * 0.18;
+                float gShift = uCalibA.z * 0.18;
+                float bShift = uCalibB.x * 0.18;
 
-            // 4. Highlights, Shadows & Parametric Tones
-            if (uHighlightsStrength != 0.0 || uShadowsStrength != 0.0 || uHasParametric > 0.5) {
-                float luma = lumaRec709(c);
-                float delta = 0.0;
-                if (uShadowsStrength != 0.0) {
-                    float shT = clamp((0.64 - luma) / 0.64, 0.0, 1.0);
-                    delta += uShadowsStrength * (shT * shT * (3.0 - 2.0 * shT)) * 0.56;
-                }
-                if (uHighlightsStrength != 0.0) {
-                    float hiT = clamp((luma - 0.36) / 0.64, 0.0, 1.0);
-                    delta += uHighlightsStrength * (hiT * hiT * (3.0 - 2.0 * hiT)) * 0.56;
-                }
-                if (uHasParametric > 0.5) {
-                    delta += (
-                        uParametric.x * bandWeight(luma, 0.12, 0.28) +
-                        uParametric.y * bandWeight(luma, 0.35, 0.26) +
-                        uParametric.z * bandWeight(luma, 0.65, 0.26) +
-                        uParametric.w * bandWeight(luma, 0.88, 0.28)
-                    ) * 0.22;
-                }
-                c = clamp(c + vec3(delta), 0.0, 1.0);
-            }
-
-            // 5. Contrast
-            c = clamp((c - 0.5) * uContrastFactor + 0.5, 0.0, 1.0);
-
-            // 6. Tone Curves (Master in row 1 v=0.75, R/G/B in row 0 v=0.25)
-            if (uHasCurve > 0.5) {
-                float mR = texture2D(uCurveTex, vec2((0.5 + c.r * 255.0) / 256.0, 0.75)).r;
-                float mG = texture2D(uCurveTex, vec2((0.5 + c.g * 255.0) / 256.0, 0.75)).r;
-                float mB = texture2D(uCurveTex, vec2((0.5 + c.b * 255.0) / 256.0, 0.75)).r;
-                c.r = texture2D(uCurveTex, vec2((0.5 + mR * 255.0) / 256.0, 0.25)).r;
-                c.g = texture2D(uCurveTex, vec2((0.5 + mG * 255.0) / 256.0, 0.25)).g;
-                c.b = texture2D(uCurveTex, vec2((0.5 + mB * 255.0) / 256.0, 0.25)).b;
-            }
-
-            // 7. RGB Primary Calibration (row-normalized to preserve neutral grays)
-            if (uHasCal > 0.5) {
-                float rShift = uCalHue.r * 0.18;
-                float gShift = uCalHue.g * 0.18;
-                float bShift = uCalHue.b * 0.18;
                 float r00 = 1.0 - abs(rShift) * 0.25;
                 float r01 = max(0.0, -gShift);
                 float r02 = max(0.0, bShift);
@@ -798,262 +582,615 @@ object GlGradingShaders {
                 float b22 = 1.0 - abs(bShift) * 0.25;
                 float nb = (c.r * b20 + c.g * b21 + c.b * b22) / max(b20 + b21 + b22, 0.001);
 
-                vec3 calRgb = vec3(nr, ng, nb);
-                float luma = lumaRec709(calRgb);
-                c = clamp(vec3(luma) + (calRgb - vec3(luma)) * uCalSat, 0.0, 1.0);
+                float cLum = dot(vec3(nr, ng, nb), vec3(0.2126, 0.7152, 0.0722));
+                c = clamp(vec3(
+                    cLum + (nr - cLum) * (1.0 + uCalibA.y * 0.5),
+                    cLum + (ng - cLum) * (1.0 + uCalibA.w * 0.5),
+                    cLum + (nb - cLum) * (1.0 + uCalibB.y * 0.5)
+                ), 0.0, 1.0);
             }
 
-            // 8. 8-Band HSL Color Mixer
-            if (uHasHsl > 0.5 && uIsGrayscale < 0.5) {
+            // 8-band HSL Mixer
+            if (uWheelMix.w > 0.5) {
                 c = applyHslMixer(c);
             }
 
-            // 8.5. Point Color (targeted single-color isolation)
-            if (uHasPointColor > 0.5 && uIsGrayscale < 0.5) {
-                c = applyPointColor(c);
+            // Point Color targeted swatch shift
+            if (uPointB.w > 0.5) {
+                vec3 hsl = rgbToHsl(c);
+                float dH = abs(hsl.x - uPointA.x);
+                if (dH > 180.0) dH = 360.0 - dH;
+                float hTol = 18.0 + uPointA.w * 42.0;
+                float sTol = 0.22 + uPointA.w * 0.45;
+                float lTol = 0.22 + uPointA.w * 0.45;
+                float wH = 1.0 - smoothstep(0.0, hTol, dH);
+                float wS = 1.0 - smoothstep(0.0, sTol, abs(hsl.y - uPointA.y));
+                float wL = 1.0 - smoothstep(0.0, lTol, abs(hsl.z - uPointA.z));
+                float pw = wH * wS * wL * smoothstep(0.02, 0.12, hsl.y);
+                if (pw > 0.002) {
+                    float nh = mod(hsl.x + uPointB.x * 45.0 * pw + 360.0, 360.0);
+                    float ns = clamp(hsl.y * (1.0 + uPointB.y * pw), 0.0, 1.0);
+                    float nl = clamp(hsl.z + uPointB.z * 0.28 * pw, 0.0, 1.0);
+                    c = hslToRgb(vec3(nh, ns, nl));
+                }
             }
 
-            // 9. Grayscale or Vibrance + Saturation
-            if (uIsGrayscale > 0.5) {
-                c = vec3(lumaRec709(c));
+            // Grayscale OR Vibrance (protecting saturated colors + skin tones) & Saturation
+            if (uColorA.z > 0.5) {
+                float bw = dot(c, vec3(0.299, 0.587, 0.114));
+                c = vec3(bw);
             } else {
-                if (uVibranceNorm != 0.0) {
+                // Vibrance: smart saturation protecting already-saturated colors AND skin tones
+                if (abs(uColorA.x) > 0.0005) {
+                    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
                     float maxC = max(c.r, max(c.g, c.b));
                     float minC = min(c.r, min(c.g, c.b));
-                    float vibMult = max(0.0, 1.0 + uVibranceNorm * (1.0 - (maxC - minC) * 0.75) * 1.35);
-                    float luma = lumaRec709(c);
-                    c = clamp(mix(vec3(luma), c, vibMult), 0.0, 1.0);
-                }
-                if (uSaturationFactor != 1.0) {
-                    float luma = lumaRec709(c);
-                    c = clamp(mix(vec3(luma), c, uSaturationFactor), 0.0, 1.0);
-                }
-            }
+                    float sat = (maxC - minC) / max(maxC, 0.001);
+                    float lowSatWeight = pow(max(1.0 - clamp(sat, 0.0, 1.0), 0.0), 1.35);
 
-            // 10. Split Toning
-            if (uHasSplitTone > 0.5) {
-                float luma = lumaRec709(c);
-                float shW = pow(max(1.0 - luma, 0.0), 1.4) * uSplitParams.x * 0.35 * uSplitParams.z;
-                float hiW = pow(max(luma, 0.0), 1.4) * uSplitParams.y * 0.35 * uSplitParams.w;
-                c = clamp(c + uSplitShadowTint * shW + uSplitHighlightTint * hiW, 0.0, 1.0);
-            }
+                    // Skin-tone protection mask (warm orange/peach hue range ~12..46 deg where R > G > B)
+                    float rgDiff = max(0.0, c.r - c.g);
+                    float gbDiff = max(0.0, c.g - c.b);
+                    float skinOrder = smoothstep(0.0, 0.08, rgDiff) * smoothstep(0.0, 0.06, gbDiff);
+                    float hueFrac = (c.g - c.b) / max(c.r - c.b, 0.001);
+                    float skinHue = smoothstep(0.10, 0.28, hueFrac) * (1.0 - smoothstep(0.62, 0.85, hueFrac));
+                    float skinMask = skinOrder * skinHue * smoothstep(0.12, 0.28, lum) * (1.0 - smoothstep(0.82, 0.96, lum));
+                    float skinProtect = (uColorA.x > 0.0) ? (1.0 - 0.72 * skinMask) : (1.0 - 0.30 * skinMask);
 
-            // 10.5. Color Grading (Shadows / Midtones / Highlights / Global Color Wheels)
-            if (uHasColorGrading > 0.5) {
-                c = applyColorGradingWheels(c);
-            }
+                    float vibGain = 1.0 + uColorA.x * 0.95 * lowSatWeight * skinProtect;
+                    c = clamp(mix(vec3(lum), c, max(0.0, vibGain)), 0.0, 1.0);
+                }
 
-            // 10.8. Selective Local Masks (Radial & Linear gradients)
-            if (uMaskCount > 0.5) {
-                c = applySingleLocalMask(c, vTexCoord, uMaskGeomA0, uMaskGeomB0, uMaskAdjA0, uMaskSharp0);
-                if (uMaskCount > 1.5) {
-                    c = applySingleLocalMask(c, vTexCoord, uMaskGeomA1, uMaskGeomB1, uMaskAdjA1, uMaskSharp1);
-                }
-                if (uMaskCount > 2.5) {
-                    c = applySingleLocalMask(c, vTexCoord, uMaskGeomA2, uMaskGeomB2, uMaskAdjA2, uMaskSharp2);
-                }
-                if (uMaskCount > 3.5) {
-                    c = applySingleLocalMask(c, vTexCoord, uMaskGeomA3, uMaskGeomB3, uMaskAdjA3, uMaskSharp3);
+                // Saturation: uniform chroma scaling
+                if (abs(uColorA.y) > 0.0005) {
+                    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    c = clamp(mix(vec3(lum), c, max(0.0, 1.0 + uColorA.y)), 0.0, 1.0);
                 }
             }
 
-            // 11. Vignette (Highlight Priority, Color Priority, Paint Overlay + Midpoint/Feather/Roundness/Highlights)
-            if (abs(uVignetteParams1.x) > 0.001) {
-                float vigNorm = uVignetteParams1.x;
-                float vigMidpoint = uVignetteParams1.y;
-                float vigFeather = uVignetteParams1.z;
-                float vigRoundness = uVignetteParams1.w;
-                float vigStyle = uVignetteParams2.x;
-                float vigHiProtect = uVignetteParams2.y;
-
-                float minRes = max(min(uImageRes.x, uImageRes.y), 1.0);
-                vec2 aspectVec = uImageRes / minRes;
-                vec2 dNorm = (vTexCoord - vec2(0.5)) * 2.0;
-                vec2 dSquare = dNorm * aspectVec;
-                vec2 dShape = (vigRoundness >= 0.0) ? mix(dNorm, dSquare, vigRoundness * 0.72) : dNorm;
-                float pExp = (vigRoundness < 0.0) ? mix(2.0, 5.0, -vigRoundness) : 2.0;
-                float dist = pow(
-                    pow(max(abs(dShape.x), 0.0001), pExp) + pow(max(abs(dShape.y), 0.0001), pExp),
-                    1.0 / pExp
-                );
-                if (vigRoundness < 0.0) {
-                    dist *= mix(1.0, 1.18, -vigRoundness);
-                }
-
-                float midR = mix(0.16, 1.14, vigMidpoint);
-                float halfFeather = mix(0.025, 0.96, vigFeather);
-                float edge0 = max(midR - halfFeather * 0.5, 0.0);
-                float edge1 = max(midR + halfFeather * 0.5, edge0 + 0.02);
-                float mask = smoothstep(edge0, edge1, dist);
-
-                float lum = lumaRec709(c);
-                float hiFactor = smoothstep(0.52, 0.98, lum);
-                float protect = (vigNorm < 0.0) ? (1.0 - hiFactor * vigHiProtect * 0.88) : 1.0;
-
-                if (vigStyle > 1.5) {
-                    // Paint Overlay
-                    vec3 target = (vigNorm < 0.0) ? vec3(0.0) : vec3(1.0);
-                    float amt = clamp(abs(vigNorm) * mask * protect * 0.92, 0.0, 0.95);
-                    c = mix(c, target, amt);
-                } else if (vigStyle > 0.5) {
-                    // Color Priority (preserves chroma richness while darkening/brightening)
-                    float effectiveVig = vigNorm * mask * protect;
-                    float targetLum = clamp(lum * (1.0 + effectiveVig * 0.92), 0.0, 1.0);
-                    float ratio = (lum > 0.002) ? (targetLum / lum) : (1.0 + effectiveVig);
-                    vec3 colored = clamp(c * ratio, 0.0, 1.0);
-                    if (effectiveVig < 0.0) {
-                        float chromaKeep = 1.0 + (-effectiveVig) * 0.16;
-                        colored = clamp(mix(vec3(targetLum), colored, chromaKeep), 0.0, 1.0);
-                    }
-                    c = colored;
-                } else {
-                    // Highlight Priority (smooth exposure rolloff + highlight recovery protection)
-                    float vigGain = clamp(1.0 + vigNorm * mask * protect, 0.04, 1.92);
-                    vec3 vigCol = c * vigGain;
-                    if (vigNorm < 0.0 && vigHiProtect > 0.001) {
-                        vigCol = mix(vigCol, max(vigCol, c * (1.0 - mask * 0.20)), hiFactor * vigHiProtect);
-                    }
-                    c = clamp(vigCol, 0.0, 1.0);
-                }
+            // Split Toning
+            if (uSplitSh.w > 0.001 || uSplitHi.w > 0.001) {
+                float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                float pivot = clamp(0.5 - uCalibB.z * 0.25, 0.15, 0.85);
+                float shW = (1.0 - smoothstep(0.0, pivot, lum)) * uSplitSh.w;
+                float hiW = smoothstep(pivot, 1.0, lum) * uSplitHi.w;
+                c = clamp(c + uSplitSh.rgb * shW * 0.35 + uSplitHi.rgb * hiW * 0.35, 0.0, 1.0);
             }
 
-            // 12. Film Grain (Amount + Size + Roughness clumping)
-            if (uGrainParams.x > 0.0005) {
-                float gStrength = uGrainParams.x;
-                float gSize = uGrainParams.y;
-                float gRough = uGrainParams.z;
-
-                float cellPx = mix(0.75, 4.6, gSize * gSize * 0.65 + gSize * 0.35);
-                vec2 gCoord = (vTexCoord * uImageRes) / cellPx;
-
-                float nFine = smoothNoise2D(gCoord) - 0.5;
-                float nClump = smoothNoise2D(gCoord * 0.42 + vec2(17.3, 9.2)) - 0.5;
-                float nCrisp = grainHash21(floor(gCoord)) - 0.5;
-
-                // Roughness blends uniform fine noise toward organic clumped silver-halide grain
-                float uniformNoise = mix(nFine, nCrisp, 0.35);
-                float clumpedNoise = nFine * 0.45 + nClump * 0.65 + nCrisp * 0.35;
-                float noise = mix(uniformNoise, clumpedNoise, gRough);
-                float luma = lumaRec709(c);
-                float midWeight = clamp(1.0 - abs(luma - 0.5) * 1.25, 0.32, 1.0);
-                float amp = mix(0.85, 1.35, gRough);
-                c = clamp(c + vec3(noise * gStrength * midWeight * amp), 0.0, 1.0);
+            // 4-Way Color Grading Wheels
+            if (uWheelMix.z > 0.5) {
+                float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                float pivot = clamp(0.5 - uWheelMix.y * 0.28, 0.15, 0.85);
+                float soft = 0.12 + uWheelMix.x * 0.38;
+                float wSh = 1.0 - smoothstep(max(0.0, pivot - soft), min(1.0, pivot + soft * 0.4), lum);
+                float wHi = smoothstep(max(0.0, pivot - soft * 0.4), min(1.0, pivot + soft), lum);
+                float wMid = clamp(1.0 - wSh - wHi + 0.35 * (1.0 - abs(lum - pivot) * 2.0), 0.0, 1.0);
+                vec3 wheelTint = uWheelSh.rgb * wSh + uWheelMid.rgb * wMid + uWheelHi.rgb * wHi + uWheelGl.rgb;
+                float wheelLum = uWheelSh.w * wSh + uWheelMid.w * wMid + uWheelHi.w * wHi + uWheelGl.w;
+                c = clamp(c + wheelTint * 0.32 + vec3(wheelLum * 0.22), 0.0, 1.0);
             }
 
-            // 13. 3D / 1D .cube LUT + Intensity blend
-            if (uHasLut > 0.5 && uLutIntensity > 0.001) {
-                vec3 lutColor = (uLutIs1D > 0.5) ? sampleLut1D(c) : sampleLut3DTiled(c);
-                c = mix(c, clamp(lutColor, 0.0, 1.0), uLutIntensity);
-            }
+            // Selective Local Masks (up to 4 unrolled cleanly)
+            if (uMaskMeta.x > 0.5) c = applySingleMask(c, vTexCoord, uMask0A, uMask0B, uMask0C);
+            if (uMaskMeta.x > 1.5) c = applySingleMask(c, vTexCoord, uMask1A, uMask1B, uMask1C);
+            if (uMaskMeta.x > 2.5) c = applySingleMask(c, vTexCoord, uMask2A, uMask2B, uMask2C);
+            if (uMaskMeta.x > 3.5) c = applySingleMask(c, vTexCoord, uMask3A, uMask3B, uMask3C);
 
-            // 14. Film Halation & Bloom (live GPU highlight threshold + radial Gaussian scatter)
-            if (uHalationBloom.x > 0.001 || uHalationBloom.y > 0.001) {
-                float minRes = max(min(uImageRes.x, uImageRes.y), 1.0);
-                vec2 stepScale = vec2(minRes / max(uImageRes.x, 1.0), minRes / max(uImageRes.y, 1.0));
-                vec2 halRadius = stepScale * 0.022;
-                vec2 blmRadius = stepScale * 0.015;
-                vec3 halAcc = vec3(0.0);
-                vec3 blmAcc = vec3(0.0);
-                float halW = 0.0;
-                float blmW = 0.0;
-
-                for (int ring = 0; ring < 2; ring++) {
-                    float rFrac = (ring == 0) ? 0.45 : 1.0;
-                    float gWt = (ring == 0) ? 1.0 : 0.48;
-                    for (int dir = 0; dir < 8; dir++) {
-                        float ang = float(dir) * 0.78539816 + float(ring) * 0.39269908;
-                        vec2 dirVec = vec2(cos(ang), sin(ang));
-
-                        if (uHalationBloom.x > 0.001) {
-                            vec3 sH = sampleSourceClamped(uv + dirVec * (halRadius * rFrac));
-                            float lumH = lumaRec709(sH);
-                            float rawH = smoothRamp(0.65, 0.96, lumH);
-                            float tH = rawH * (0.45 + 0.55 * rawH);
-                            vec3 halTint = vec3(min(1.0, (sH.r * 1.12 + 0.14) * tH), sH.g * 0.30 * tH, sH.b * 0.07 * tH);
-                            halAcc += halTint * gWt;
-                            halW += gWt;
-                        }
-                        if (uHalationBloom.y > 0.001) {
-                            vec3 sB = sampleSourceClamped(uv + dirVec * (blmRadius * rFrac));
-                            float lumB = lumaRec709(sB);
-                            float rawB = smoothRamp(0.54, 0.94, lumB);
-                            float tB = rawB * (0.55 + 0.45 * rawB);
-                            blmAcc += sB * tB * gWt;
-                            blmW += gWt;
-                        }
-                    }
-                }
-
-                vec3 glow = vec3(0.0);
-                if (uHalationBloom.x > 0.001 && halW > 0.0) {
-                    glow += (halAcc / halW) * (uHalationBloom.x * 0.90);
-                }
-                if (uHalationBloom.y > 0.001 && blmW > 0.0) {
-                    glow += (blmAcc / blmW) * (uHalationBloom.y * 0.80);
-                }
-                glow = clamp(glow, 0.0, 1.0);
-                c = clamp(1.0 - (1.0 - c) * (1.0 - glow), 0.0, 1.0);
-            }
-
-            // 15. Anamorphic Streak (live GPU horizontal highlight threshold + wide 1D Gaussian cyan/blue streak)
-            if (uAnamorphicStreak > 0.001) {
-                float spanX = 0.04 + 0.14 * uAnamorphicStreak;
-                float sAcc = 0.0;
-                float sW = 0.0;
-                for (int i = -6; i <= 6; i++) {
-                    float tNorm = float(i) / 6.0;
-                    float gWt = exp(-tNorm * tNorm * 2.2);
-                    vec3 sTap = sampleSourceClamped(vec2(uv.x + tNorm * spanX, uv.y));
-                    float sLum = lumaRec709(sTap);
-                    float sMax = max(sTap.r, max(sTap.g, sTap.b));
-                    float hiSig = max(sLum, sMax * 0.92);
-                    float rawS = smoothRamp(0.68, 0.96, hiSig);
-                    sAcc += (rawS * rawS) * gWt;
-                    sW += gWt;
-                }
-                float streak = (sW > 0.0) ? (sAcc / sW) * (uAnamorphicStreak * 1.65) : 0.0;
-                c = clamp(c + vec3(0.24, 0.74, 1.00) * streak, 0.0, 1.0);
-            }
-
-            gl_FragColor = vec4(c, texel.a);
+            gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
         }
     """
 
-    fun createQuadBuffer(readbackFlipY: Boolean): FloatBuffer {
-        val vTop = if (readbackFlipY) 1f else 0f
-        val vBot = if (readbackFlipY) 0f else 1f
-        val coords = floatArrayOf(
-            -1f, -1f, 0f, vBot,
-             1f, -1f, 1f, vBot,
-            -1f,  1f, 0f, vTop,
-             1f,  1f, 1f, vTop
-        )
-        return ByteBuffer.allocateDirect(coords.size * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-            .apply {
-                put(coords)
-                position(0)
+    /**
+     * Pass 2 Fragment Shader: Step 6 Real Spatial Detail Filtering on Pass-1 Graded Texture
+     * (`uGradedTex`) + Finishing (Vignette, Film Grain, 3D/1D LUT, Halation/Bloom, Anamorphic
+     * Streak, and pixel-exact Before/After original & split comparison reading `uRawTex`).
+     */
+    private const val SPATIAL_FINISH_FRAGMENT_SHADER = """
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+        #else
+        precision mediump float;
+        #endif
+
+        varying vec2 vTexCoord;
+
+        uniform sampler2D uGradedTex;   // Unit 0: Pass-1 tone & color graded FBO texture
+        uniform sampler2D uLutTex;      // Unit 1: 3D/1D .cube LUT tiled atlas
+        uniform sampler2D uRawTex;      // Unit 2: Original unmodified source texture (for compare)
+
+        uniform vec4 uTexelInfo;        // (invW, invH, outW, outH)
+        uniform vec4 uDetailA;          // (textureNorm, clarityNorm, dehazeNorm, sharpeningNorm)
+        uniform vec4 uDetailB;          // (sharpenRadius, sharpenDetail, sharpenMasking, lumaNrNorm)
+        uniform vec4 uDetailC;          // (colorNrNorm, vignetteNorm, grainNorm, grainSizeNorm)
+        uniform vec4 uEffectsA;         // (grainRoughNorm, halationNorm, bloomNorm, anamorphicNorm)
+
+        uniform vec4 uLutParams;        // (lutType, lutSize, lutIntensity, lutTilesPerRow)
+        uniform vec3 uLutDomainMin;
+        uniform vec3 uLutDomainMax;
+
+        uniform vec4 uCompare;          // (isOriginal, splitRatio, applyCrop, clippingMask: bit0=hi, bit1=sh)
+        uniform mat3 uOrientMatrix;
+        uniform vec4 uCropRect;
+
+        vec3 sampleRawOriginal(vec2 uv) {
+            vec2 orientedUv = vec2(
+                mix(uCropRect.x, uCropRect.z, uv.x),
+                mix(uCropRect.y, uCropRect.w, uv.y)
+            );
+            vec3 mapped = uOrientMatrix * vec3(orientedUv, 1.0);
+            vec2 rawUv = mapped.xy / max(abs(mapped.z), 0.0001);
+            if (rawUv.x < 0.0 || rawUv.x > 1.0 || rawUv.y < 0.0 || rawUv.y > 1.0) {
+                return vec3(0.04, 0.045, 0.055);
             }
+            return texture2D(uRawTex, rawUv).rgb;
+        }
+
+        // 9-tap separable-weighted Gaussian blur at given pixel radius on the graded FBO texture
+        vec3 sampleGaussian9(vec2 uv, vec2 stepUv) {
+            vec3 c0 = texture2D(uGradedTex, uv).rgb * 4.0;
+            vec3 ax =
+                texture2D(uGradedTex, clamp(uv + vec2( stepUv.x, 0.0), 0.0, 1.0)).rgb +
+                texture2D(uGradedTex, clamp(uv + vec2(-stepUv.x, 0.0), 0.0, 1.0)).rgb +
+                texture2D(uGradedTex, clamp(uv + vec2(0.0,  stepUv.y), 0.0, 1.0)).rgb +
+                texture2D(uGradedTex, clamp(uv + vec2(0.0, -stepUv.y), 0.0, 1.0)).rgb;
+            vec3 dg =
+                texture2D(uGradedTex, clamp(uv + vec2( stepUv.x,  stepUv.y), 0.0, 1.0)).rgb +
+                texture2D(uGradedTex, clamp(uv + vec2(-stepUv.x,  stepUv.y), 0.0, 1.0)).rgb +
+                texture2D(uGradedTex, clamp(uv + vec2( stepUv.x, -stepUv.y), 0.0, 1.0)).rgb +
+                texture2D(uGradedTex, clamp(uv + vec2(-stepUv.x, -stepUv.y), 0.0, 1.0)).rgb;
+            return (c0 + ax * 2.0 + dg) * (1.0 / 16.0);
+        }
+
+        float grainHash(vec2 p) {
+            vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+            p3 += dot(p3, p3.yzx + 33.33);
+            return fract((p3.x + p3.y) * p3.z);
+        }
+
+        float smoothGrainNoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(
+                mix(grainHash(i), grainHash(i + vec2(1.0, 0.0)), u.x),
+                mix(grainHash(i + vec2(0.0, 1.0)), grainHash(i + vec2(1.0, 1.0)), u.x),
+                u.y
+            );
+        }
+
+        vec3 sampleLutSlice(float rNorm, float gNorm, float bSlice, float size, float tilesPerRow) {
+            float tileCol = mod(bSlice, tilesPerRow);
+            float tileRow = floor(bSlice / tilesPerRow);
+            float atlasW = tilesPerRow * size;
+            float atlasH = ceil(size / tilesPerRow) * size;
+            float u = (tileCol * size + 0.5 + rNorm * (size - 1.0)) / atlasW;
+            float v = (tileRow * size + 0.5 + gNorm * (size - 1.0)) / atlasH;
+            return texture2D(uLutTex, vec2(u, v)).rgb;
+        }
+
+        vec3 applyCubeLut(vec3 c) {
+            float lutType = uLutParams.x;
+            float size = uLutParams.y;
+            float intensity = uLutParams.z;
+            float tilesPerRow = uLutParams.w;
+            if (lutType < 0.5 || size < 2.0 || intensity <= 0.001) return c;
+            vec3 denom = max(uLutDomainMax - uLutDomainMin, vec3(0.0001));
+            vec3 n = clamp((c - uLutDomainMin) / denom, 0.0, 1.0);
+            vec3 mapped;
+            if (lutType < 1.5) {
+                float uR = (0.5 + n.r * (size - 1.0)) / size;
+                float uG = (0.5 + n.g * (size - 1.0)) / size;
+                float uB = (0.5 + n.b * (size - 1.0)) / size;
+                mapped = vec3(
+                    texture2D(uLutTex, vec2(uR, 0.5)).r,
+                    texture2D(uLutTex, vec2(uG, 0.5)).g,
+                    texture2D(uLutTex, vec2(uB, 0.5)).b
+                );
+            } else {
+                float bIdx = n.b * (size - 1.0);
+                float b0 = floor(bIdx);
+                float b1 = min(size - 1.0, b0 + 1.0);
+                float fb = bIdx - b0;
+                vec3 s0 = sampleLutSlice(n.r, n.g, b0, size, tilesPerRow);
+                vec3 s1 = sampleLutSlice(n.r, n.g, b1, size, tilesPerRow);
+                mapped = mix(s0, s1, fb);
+            }
+            return mix(c, mapped, clamp(intensity, 0.0, 1.0));
+        }
+
+        void main() {
+            // Instant pixel-exact Before/After comparison reading unmodified uRawTex
+            if (uCompare.x > 0.5) {
+                gl_FragColor = vec4(sampleRawOriginal(vTexCoord), 1.0);
+                return;
+            }
+            if (uCompare.y >= 0.0 && vTexCoord.x < uCompare.y) {
+                gl_FragColor = vec4(sampleRawOriginal(vTexCoord), 1.0);
+                return;
+            }
+
+            vec2 texel = uTexelInfo.xy;
+            vec3 c = texture2D(uGradedTex, vTexCoord).rgb;
+
+            // =========================================================================
+            // STEP 6: Real Multi-Pixel Spatial Detail Passes on the Graded Image
+            // =========================================================================
+
+            // 6a. Edge-preserving Luminance & Color Noise Reduction (distinguishes isolated speckles from coherent edges)
+            if (uDetailB.w > 0.005 || uDetailC.x > 0.005) {
+                vec3 nL = texture2D(uGradedTex, clamp(vTexCoord - vec2(texel.x, 0.0), 0.0, 1.0)).rgb;
+                vec3 nR = texture2D(uGradedTex, clamp(vTexCoord + vec2(texel.x, 0.0), 0.0, 1.0)).rgb;
+                vec3 nU = texture2D(uGradedTex, clamp(vTexCoord - vec2(0.0, texel.y), 0.0, 1.0)).rgb;
+                vec3 nD = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0, texel.y), 0.0, 1.0)).rgb;
+                vec3 nearAvg = 0.25 * (nL + nR + nU + nD);
+                vec3 wideSmooth = sampleGaussian9(vTexCoord, texel * 1.65);
+                vec3 targetSmooth = mix(nearAvg, wideSmooth, 0.45);
+
+                if (uDetailB.w > 0.005) {
+                    float cLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    float sLum = dot(targetSmooth, vec3(0.2126, 0.7152, 0.0722));
+                    float dMin = min(
+                        min(abs(cLum - dot(nL, vec3(0.2126, 0.7152, 0.0722))), abs(cLum - dot(nR, vec3(0.2126, 0.7152, 0.0722)))),
+                        min(abs(cLum - dot(nU, vec3(0.2126, 0.7152, 0.0722))), abs(cLum - dot(nD, vec3(0.2126, 0.7152, 0.0722))))
+                    );
+                    float coherentEdge = max(abs(cLum - sLum) - dMin * 0.85, 0.0);
+                    float edgeKeep = clamp(1.0 - coherentEdge * 6.5, 0.08, 1.0);
+                    float newLum = mix(cLum, sLum, uDetailB.w * 0.86 * edgeKeep);
+                    c = clamp(c + vec3(newLum - cLum), 0.0, 1.0);
+                }
+                if (uDetailC.x > 0.005) {
+                    float cLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    float sLum = dot(targetSmooth, vec3(0.2126, 0.7152, 0.0722));
+                    vec3 cCh = c - vec3(cLum);
+                    vec3 sCh = targetSmooth - vec3(sLum);
+                    float dChMin = min(
+                        min(length(cCh - (nL - vec3(dot(nL, vec3(0.2126, 0.7152, 0.0722))))),
+                            length(cCh - (nR - vec3(dot(nR, vec3(0.2126, 0.7152, 0.0722)))))),
+                        min(length(cCh - (nU - vec3(dot(nU, vec3(0.2126, 0.7152, 0.0722))))),
+                            length(cCh - (nD - vec3(dot(nD, vec3(0.2126, 0.7152, 0.0722))))))
+                    );
+                    float chromaEdge = max(length(cCh - sCh) - dChMin * 0.85, 0.0);
+                    float chromaKeep = clamp(1.0 - chromaEdge * 3.0, 0.14, 1.0);
+                    c = clamp(vec3(cLum) + mix(cCh, sCh, uDetailC.x * 0.94 * chromaKeep), 0.0, 1.0);
+                }
+            }
+
+            // 6b. Dehaze: Local dark-channel atmospheric veil estimation + radiance & saturation recovery
+            if (abs(uDetailA.z) > 0.0005) {
+                vec2 dhStep = texel * 4.0;
+                float minDc = min(c.r, min(c.g, c.b));
+                float avgDc = minDc;
+
+                vec3 s1 = texture2D(uGradedTex, clamp(vTexCoord + vec2( dhStep.x, 0.0), 0.0, 1.0)).rgb;
+                vec3 s2 = texture2D(uGradedTex, clamp(vTexCoord + vec2(-dhStep.x, 0.0), 0.0, 1.0)).rgb;
+                vec3 s3 = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0,  dhStep.y), 0.0, 1.0)).rgb;
+                vec3 s4 = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0, -dhStep.y), 0.0, 1.0)).rgb;
+                vec3 s5 = texture2D(uGradedTex, clamp(vTexCoord + vec2( dhStep.x,  dhStep.y), 0.0, 1.0)).rgb;
+                vec3 s6 = texture2D(uGradedTex, clamp(vTexCoord + vec2(-dhStep.x,  dhStep.y), 0.0, 1.0)).rgb;
+                vec3 s7 = texture2D(uGradedTex, clamp(vTexCoord + vec2( dhStep.x, -dhStep.y), 0.0, 1.0)).rgb;
+                vec3 s8 = texture2D(uGradedTex, clamp(vTexCoord + vec2(-dhStep.x, -dhStep.y), 0.0, 1.0)).rgb;
+
+                float d1 = min(s1.r, min(s1.g, s1.b));
+                float d2 = min(s2.r, min(s2.g, s2.b));
+                float d3 = min(s3.r, min(s3.g, s3.b));
+                float d4 = min(s4.r, min(s4.g, s4.b));
+                float d5 = min(s5.r, min(s5.g, s5.b));
+                float d6 = min(s6.r, min(s6.g, s6.b));
+                float d7 = min(s7.r, min(s7.g, s7.b));
+                float d8 = min(s8.r, min(s8.g, s8.b));
+
+                minDc = min(minDc, min(min(d1, d2), min(d3, d4)));
+                minDc = min(minDc, min(min(d5, d6), min(d7, d8)));
+                avgDc = (avgDc + d1 + d2 + d3 + d4 + d5 + d6 + d7 + d8) * (1.0 / 9.0);
+
+                // Smooth local atmospheric veil estimate (blends min dark channel with local mean to avoid halos)
+                float veil = clamp(mix(minDc, avgDc, 0.35), 0.0, 0.92);
+
+                if (uDetailA.z > 0.0) {
+                    float dAmt = uDetailA.z;
+                    float omega = dAmt * 0.78;
+                    float tMin = mix(1.0, 0.28, dAmt);
+                    float transmission = max(1.0 - omega * veil, tMin);
+                    vec3 atmos = vec3(0.95);
+                    vec3 recovered = (c - atmos * (1.0 - transmission) * 0.85) / transmission;
+                    recovered = clamp(recovered, 0.0, 1.0);
+                    // Proportional contrast & saturation recovery
+                    float rLum = dot(recovered, vec3(0.2126, 0.7152, 0.0722));
+                    float satRecovery = 1.0 + dAmt * 0.32 * (0.35 + 0.65 * veil);
+                    c = clamp(mix(vec3(rLum), recovered, satRecovery), 0.0, 1.0);
+                } else {
+                    float hAmt = -uDetailA.z;
+                    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    vec3 hazeColor = vec3(0.86, 0.89, 0.93);
+                    float veilMix = hAmt * 0.48 * (1.0 - 0.32 * lum);
+                    c = mix(c, hazeColor, veilMix);
+                    float hLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    c = clamp(mix(vec3(hLum), c, 1.0 - hAmt * 0.24), 0.0, 1.0);
+                }
+            }
+
+            // 6c. Texture: Small-radius Gaussian blur difference (fine detail without major edge halos)
+            if (abs(uDetailA.x) > 0.0005) {
+                vec3 blurSmall = sampleGaussian9(vTexCoord, texel * 1.25);
+                vec3 highFreq = c - blurSmall;
+                float hfEnergy = dot(highFreq, highFreq);
+                float haloGuard = 1.0 / (1.0 + 22.0 * hfEnergy);
+                c = clamp(c + highFreq * (uDetailA.x * 1.45) * haloGuard, 0.0, 1.0);
+            }
+
+            // 6d. Clarity: Larger-radius midtone local contrast enhancement protecting pure blacks & whites
+            if (abs(uDetailA.y) > 0.0005) {
+                vec3 blurMid = sampleGaussian9(vTexCoord, texel * 3.0);
+                vec3 blurWide = sampleGaussian9(vTexCoord, texel * 6.0);
+                vec3 blurLarge = mix(blurMid, blurWide, 0.55);
+                vec3 midFreq = c - blurLarge;
+                float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                float midtoneMask = smoothstep(0.05, 0.28, lum) * (1.0 - smoothstep(0.72, 0.95, lum));
+                c = clamp(c + midFreq * (uDetailA.y * 0.90) * midtoneMask, 0.0, 1.0);
+            }
+
+            // 6e. Sharpen: Unsharp mask + Laplacian high-pass with flat-area noise threshold protection
+            if (uDetailA.w > 0.0005) {
+                float rPx = max(0.75, uDetailB.x);
+                vec3 blurSharp = sampleGaussian9(vTexCoord, texel * rPx);
+                vec3 usm = c - blurSharp;
+
+                // 5-tap micro-edge Laplacian at 1.0px
+                vec3 n1 = texture2D(uGradedTex, clamp(vTexCoord + vec2( texel.x, 0.0), 0.0, 1.0)).rgb;
+                vec3 n2 = texture2D(uGradedTex, clamp(vTexCoord + vec2(-texel.x, 0.0), 0.0, 1.0)).rgb;
+                vec3 n3 = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0,  texel.y), 0.0, 1.0)).rgb;
+                vec3 n4 = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0, -texel.y), 0.0, 1.0)).rgb;
+                vec3 lap = c - 0.25 * (n1 + n2 + n3 + n4);
+
+                float detailMix = 0.25 + 0.45 * clamp(uDetailB.y, 0.0, 1.0);
+                vec3 highPass = mix(usm, lap, detailMix);
+
+                // Flat-area noise threshold protection (blocks 1-LSB flat noise and scales smoothly with masking)
+                float edgeMag = abs(dot(usm, vec3(0.2126, 0.7152, 0.0722))) +
+                                0.5 * abs(dot(lap, vec3(0.2126, 0.7152, 0.0722)));
+                float threshold = 0.008 + uDetailB.z * 0.14;
+                float edgeWeight = smoothstep(threshold * 0.5, threshold * 1.5, edgeMag);
+
+                c = clamp(c + highPass * (uDetailA.w * 2.15) * edgeWeight, 0.0, 1.0);
+            }
+
+            // =========================================================================
+            // FINISHING PASSES (Vignette, Film Grain, 3D LUT, Halation/Bloom, Streak)
+            // =========================================================================
+
+            // Vignette
+            if (abs(uDetailC.y) > 0.001) {
+                vec2 d = (vTexCoord - vec2(0.5)) * 2.0;
+                float r2 = clamp(dot(d, d) * 0.5, 0.0, 1.5);
+                if (uDetailC.y < 0.0) {
+                    float factor = clamp(1.0 + uDetailC.y * 0.65 * r2, 0.12, 1.0);
+                    c *= factor;
+                } else {
+                    float lift = clamp(uDetailC.y * 0.45 * r2, 0.0, 0.65);
+                    c = mix(c, vec3(1.0), lift);
+                }
+            }
+
+            // Film Grain
+            if (uDetailC.z > 0.005) {
+                float cellSize = mix(1.0, 5.2, clamp(uDetailC.w, 0.0, 1.0));
+                vec2 pxCoord = vTexCoord * uTexelInfo.zw / cellSize;
+                float coarse = smoothGrainNoise(pxCoord) - 0.5;
+                float fine = grainHash(floor(pxCoord * 1.7 + vec2(17.3, 41.9))) - 0.5;
+                float grain = mix(coarse, fine, clamp(uEffectsA.x, 0.0, 1.0));
+                float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                float midWeight = 0.55 + 0.45 * (1.0 - abs(lum - 0.5) * 1.6);
+                c = clamp(c + vec3(grain * uDetailC.z * 0.24 * midWeight), 0.0, 1.0);
+            }
+
+            // 3D / 1D .cube LUT
+            c = applyCubeLut(c);
+
+            // Film Halation & Bloom (multi-tap highlight halo sampled on graded FBO)
+            if (uEffectsA.y > 0.001 || uEffectsA.z > 0.001) {
+                vec3 halAccum = vec3(0.0);
+                vec3 bloomAccum = vec3(0.0);
+                float totalW = 0.0;
+                float maxR = max(uEffectsA.y, uEffectsA.z);
+                vec2 step1 = texel * (3.5 + 8.5 * maxR);
+                vec2 step2 = step1 * 2.15;
+
+                // Ring 1 (8 taps)
+                vec2 o0 = vec2( 1.0,  0.0);
+                vec2 o1 = vec2(-1.0,  0.0);
+                vec2 o2 = vec2( 0.0,  1.0);
+                vec2 o3 = vec2( 0.0, -1.0);
+                vec2 o4 = vec2( 0.707,  0.707);
+                vec2 o5 = vec2(-0.707,  0.707);
+                vec2 o6 = vec2( 0.707, -0.707);
+                vec2 o7 = vec2(-0.707, -0.707);
+
+                for (int rIdx = 0; rIdx < 2; rIdx++) {
+                    vec2 rad = (rIdx == 0) ? step1 : step2;
+                    float wt = (rIdx == 0) ? 1.0 : 0.62;
+                    vec3 t0 = texture2D(uGradedTex, clamp(vTexCoord + o0 * rad, 0.0, 1.0)).rgb;
+                    vec3 t1 = texture2D(uGradedTex, clamp(vTexCoord + o1 * rad, 0.0, 1.0)).rgb;
+                    vec3 t2 = texture2D(uGradedTex, clamp(vTexCoord + o2 * rad, 0.0, 1.0)).rgb;
+                    vec3 t3 = texture2D(uGradedTex, clamp(vTexCoord + o3 * rad, 0.0, 1.0)).rgb;
+                    vec3 t4 = texture2D(uGradedTex, clamp(vTexCoord + o4 * rad, 0.0, 1.0)).rgb;
+                    vec3 t5 = texture2D(uGradedTex, clamp(vTexCoord + o5 * rad, 0.0, 1.0)).rgb;
+                    vec3 t6 = texture2D(uGradedTex, clamp(vTexCoord + o6 * rad, 0.0, 1.0)).rgb;
+                    vec3 t7 = texture2D(uGradedTex, clamp(vTexCoord + o7 * rad, 0.0, 1.0)).rgb;
+
+                    vec3 avg = (t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7) * 0.125;
+                    float l0 = dot(t0, vec3(0.2126, 0.7152, 0.0722));
+                    float l1 = dot(t1, vec3(0.2126, 0.7152, 0.0722));
+                    float l2 = dot(t2, vec3(0.2126, 0.7152, 0.0722));
+                    float l3 = dot(t3, vec3(0.2126, 0.7152, 0.0722));
+                    float l4 = dot(t4, vec3(0.2126, 0.7152, 0.0722));
+                    float l5 = dot(t5, vec3(0.2126, 0.7152, 0.0722));
+                    float l6 = dot(t6, vec3(0.2126, 0.7152, 0.0722));
+                    float l7 = dot(t7, vec3(0.2126, 0.7152, 0.0722));
+
+                    float hiSum =
+                        smoothstep(0.68, 0.96, l0) + smoothstep(0.68, 0.96, l1) +
+                        smoothstep(0.68, 0.96, l2) + smoothstep(0.68, 0.96, l3) +
+                        smoothstep(0.68, 0.96, l4) + smoothstep(0.68, 0.96, l5) +
+                        smoothstep(0.68, 0.96, l6) + smoothstep(0.68, 0.96, l7);
+                    float hiAvg = hiSum * 0.125;
+                    halAccum += vec3(1.0, 0.24, 0.05) * (hiAvg * wt);
+                    bloomAccum += avg * (hiAvg * wt);
+                    totalW += wt;
+                }
+                if (totalW > 0.001) {
+                    halAccum /= totalW;
+                    bloomAccum /= totalW;
+                    vec3 addGlow = halAccum * (uEffectsA.y * 0.95) + bloomAccum * (uEffectsA.z * 0.85);
+                    c = clamp(1.0 - (1.0 - c) * (1.0 - clamp(addGlow, 0.0, 1.0)), 0.0, 1.0);
+                }
+            }
+
+            // Anamorphic Streak: horizontal 1D Gaussian cyan/blue highlight streak
+            if (uEffectsA.w > 0.001) {
+                float streakAccum = 0.0;
+                float weightSum = 0.0;
+                float span = 0.045 + 0.125 * uEffectsA.w;
+                for (int i = -6; i <= 6; i++) {
+                    float fi = float(i) / 6.0;
+                    float w = exp(-fi * fi * 2.4);
+                    vec2 sUv = clamp(vec2(vTexCoord.x + fi * span, vTexCoord.y), 0.0, 1.0);
+                    vec3 sc = texture2D(uGradedTex, sUv).rgb;
+                    float sLum = dot(sc, vec3(0.2126, 0.7152, 0.0722));
+                    float sPeak = max(sLum, max(sc.r, max(sc.g, sc.b)) * 0.92);
+                    float hi = smoothstep(0.68, 0.96, sPeak);
+                    streakAccum += (hi * hi) * w;
+                    weightSum += w;
+                }
+                float streak = (streakAccum / max(weightSum, 0.001)) * (uEffectsA.w * 1.45);
+                c = clamp(c + vec3(0.24, 0.74, 1.0) * streak, 0.0, 1.0);
+            }
+
+            // Preview-only Highlight (Red) & Shadow (Blue) Clipping Warning Overlay
+            // Never active during full-resolution export (uCompare.w == 0.0).
+            if (uCompare.w > 0.5) {
+                float clipFlags = floor(uCompare.w + 0.5);
+                bool showHiClip = mod(clipFlags, 2.0) > 0.5;
+                bool showShClip = clipFlags >= 1.5;
+                float minCh = min(c.r, min(c.g, c.b));
+                float maxCh = max(c.r, max(c.g, c.b));
+                if (showHiClip && minCh >= 0.988) {
+                    c = vec3(1.0, 0.14, 0.14);
+                } else if (showShClip && maxCh <= 0.012) {
+                    c = vec3(0.12, 0.48, 1.0);
+                }
+            }
+
+            gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+        }
+    """
+
+    class ToneColorUniformHandles(program: Int) {
+        val aPosition = GLES20.glGetAttribLocation(program, "aPosition")
+        val aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
+
+        val uImageTex = GLES20.glGetUniformLocation(program, "uImageTex")
+        val uCurveTex = GLES20.glGetUniformLocation(program, "uCurveTex")
+
+        val uOrientMatrix = GLES20.glGetUniformLocation(program, "uOrientMatrix")
+        val uCropRect = GLES20.glGetUniformLocation(program, "uCropRect")
+        val uOptics = GLES20.glGetUniformLocation(program, "uOptics")
+        val uImageInfo = GLES20.glGetUniformLocation(program, "uImageInfo")
+
+        val uProfTone = GLES20.glGetUniformLocation(program, "uProfTone")
+        val uProfGain = GLES20.glGetUniformLocation(program, "uProfGain")
+        val uProfColor = GLES20.glGetUniformLocation(program, "uProfColor")
+        val uProfMono = GLES20.glGetUniformLocation(program, "uProfMono")
+        val uProfShCast = GLES20.glGetUniformLocation(program, "uProfShCast")
+        val uProfHiCast = GLES20.glGetUniformLocation(program, "uProfHiCast")
+
+        val uToneA = GLES20.glGetUniformLocation(program, "uToneA")
+        val uToneB = GLES20.glGetUniformLocation(program, "uToneB")
+        val uWbMult = GLES20.glGetUniformLocation(program, "uWbMult")
+        val uParamTone = GLES20.glGetUniformLocation(program, "uParamTone")
+        val uColorA = GLES20.glGetUniformLocation(program, "uColorA")
+
+        val uCalibA = GLES20.glGetUniformLocation(program, "uCalibA")
+        val uCalibB = GLES20.glGetUniformLocation(program, "uCalibB")
+        val uSplitSh = GLES20.glGetUniformLocation(program, "uSplitSh")
+        val uSplitHi = GLES20.glGetUniformLocation(program, "uSplitHi")
+
+        val uWheelSh = GLES20.glGetUniformLocation(program, "uWheelSh")
+        val uWheelMid = GLES20.glGetUniformLocation(program, "uWheelMid")
+        val uWheelHi = GLES20.glGetUniformLocation(program, "uWheelHi")
+        val uWheelGl = GLES20.glGetUniformLocation(program, "uWheelGl")
+        val uWheelMix = GLES20.glGetUniformLocation(program, "uWheelMix")
+
+        val uPointA = GLES20.glGetUniformLocation(program, "uPointA")
+        val uPointB = GLES20.glGetUniformLocation(program, "uPointB")
+
+        val uHsl = IntArray(8) { i -> GLES20.glGetUniformLocation(program, "uHsl$i") }
+
+        val uMaskMeta = GLES20.glGetUniformLocation(program, "uMaskMeta")
+        val uMaskA = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMask${i}A") }
+        val uMaskB = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMask${i}B") }
+        val uMaskC = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMask${i}C") }
+
+        // Pre-allocated scratch buffers (zero heap allocation during live slider drags)
+        val orientMat = FloatArray(9)
+        val scratchMatA = FloatArray(9)
+        val scratchMatB = FloatArray(9)
+        val wbScratch = FloatArray(3)
+        val splitShScratch = FloatArray(3)
+        val splitHiScratch = FloatArray(3)
+        val wheelShScratch = FloatArray(3)
+        val wheelMidScratch = FloatArray(3)
+        val wheelHiScratch = FloatArray(3)
+        val wheelGlScratch = FloatArray(3)
     }
 
-    fun compileProgram(): Int {
-        val vs = compileShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
-        val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
-        val prog = GLES20.glCreateProgram()
-        GLES20.glAttachShader(prog, vs)
-        GLES20.glAttachShader(prog, fs)
-        GLES20.glLinkProgram(prog)
+    class SpatialFinishUniformHandles(program: Int) {
+        val aPosition = GLES20.glGetAttribLocation(program, "aPosition")
+        val aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
+
+        val uGradedTex = GLES20.glGetUniformLocation(program, "uGradedTex")
+        val uLutTex = GLES20.glGetUniformLocation(program, "uLutTex")
+        val uRawTex = GLES20.glGetUniformLocation(program, "uRawTex")
+
+        val uTexelInfo = GLES20.glGetUniformLocation(program, "uTexelInfo")
+        val uDetailA = GLES20.glGetUniformLocation(program, "uDetailA")
+        val uDetailB = GLES20.glGetUniformLocation(program, "uDetailB")
+        val uDetailC = GLES20.glGetUniformLocation(program, "uDetailC")
+        val uEffectsA = GLES20.glGetUniformLocation(program, "uEffectsA")
+
+        val uLutParams = GLES20.glGetUniformLocation(program, "uLutParams")
+        val uLutDomainMin = GLES20.glGetUniformLocation(program, "uLutDomainMin")
+        val uLutDomainMax = GLES20.glGetUniformLocation(program, "uLutDomainMax")
+
+        val uCompare = GLES20.glGetUniformLocation(program, "uCompare")
+        val uOrientMatrix = GLES20.glGetUniformLocation(program, "uOrientMatrix")
+        val uCropRect = GLES20.glGetUniformLocation(program, "uCropRect")
+
+        val orientMat = FloatArray(9)
+        val scratchMatA = FloatArray(9)
+        val scratchMatB = FloatArray(9)
+    }
+
+    fun compileToneColorProgram(): Int = compileLinkedProgram(VERTEX_SHADER, TONE_COLOR_FRAGMENT_SHADER)
+
+    fun compileSpatialFinishProgram(): Int = compileLinkedProgram(VERTEX_SHADER, SPATIAL_FINISH_FRAGMENT_SHADER)
+
+    private fun compileLinkedProgram(vertexSource: String, fragmentSource: String): Int {
+        val vs = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource)
+        val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource)
+        val program = GLES20.glCreateProgram()
+        GLES20.glAttachShader(program, vs)
+        GLES20.glAttachShader(program, fs)
+        GLES20.glLinkProgram(program)
         val status = IntArray(1)
-        GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, status, 0)
-        if (status[0] == 0) {
-            val log = GLES20.glGetProgramInfoLog(prog)
-            GLES20.glDeleteProgram(prog)
-            throw IllegalStateException("GL program link failed: $log")
-        }
+        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0)
         GLES20.glDeleteShader(vs)
         GLES20.glDeleteShader(fs)
-        return prog
+        if (status[0] == 0) {
+            val log = GLES20.glGetProgramInfoLog(program)
+            GLES20.glDeleteProgram(program)
+            throw IllegalStateException("GLSL program link failed: $log")
+        }
+        return program
     }
 
     private fun compileShader(type: Int, source: String): Int {
@@ -1065,211 +1202,37 @@ object GlGradingShaders {
         if (status[0] == 0) {
             val log = GLES20.glGetShaderInfoLog(shader)
             GLES20.glDeleteShader(shader)
-            throw IllegalStateException("GL shader compile failed: $log")
+            throw IllegalStateException("GLSL compile failed (type=$type): $log")
         }
         return shader
     }
 
-    data class PackedLutTexture(
-        val bitmap: Bitmap,
-        val size: Int,
-        val cols: Int,
-        val rows: Int,
-        val is1D: Boolean
-    )
-
-    fun packLutToTiledBitmap(lut: CubeLut): PackedLutTexture {
-        val n = lut.size.coerceAtLeast(2)
-        val t = lut.table
-        if (lut.type == LutType.LUT_1D) {
-            val pixels = IntArray(n)
-            for (i in 0 until n) {
-                val baseIdx = i * 3
-                if (baseIdx + 2 < t.size) {
-                    val rf = t[baseIdx].takeIf { it.isFinite() } ?: 0f
-                    val gf = t[baseIdx + 1].takeIf { it.isFinite() } ?: 0f
-                    val bf = t[baseIdx + 2].takeIf { it.isFinite() } ?: 0f
-                    val r = (rf * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    val g = (gf * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    val b = (bf * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                } else {
-                    val v = ((i.toFloat() / (n - 1).coerceAtLeast(1)) * 255f + 0.5f).toInt().coerceIn(0, 255)
-                    pixels[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
-                }
-            }
-            val bmp = createBitmap(n, 1)
-            bmp.setPixels(pixels, 0, n, 0, 0, n, 1)
-            return PackedLutTexture(bmp, n, 1, 1, true)
+    fun createQuadBuffer(readbackFlipY: Boolean): FloatBuffer {
+        val vertices = if (readbackFlipY) {
+            floatArrayOf(
+                -1f, -1f, 0f, 0f,
+                1f, -1f, 1f, 0f,
+                -1f, 1f, 0f, 1f,
+                1f, 1f, 1f, 1f
+            )
+        } else {
+            floatArrayOf(
+                -1f, -1f, 0f, 1f,
+                1f, -1f, 1f, 1f,
+                -1f, 1f, 0f, 0f,
+                1f, 1f, 1f, 0f
+            )
         }
-
-        val cols = ceil(sqrt(n.toDouble())).toInt().coerceAtLeast(1)
-        val rows = ceil(n.toDouble() / cols.toDouble()).toInt().coerceAtLeast(1)
-        val texW = cols * n
-        val texH = rows * n
-        val pixels = IntArray(texW * texH)
-        val s2 = n * n
-
-        for (b in 0 until n) {
-            val tileCol = b % cols
-            val tileRow = b / cols
-            val baseX = tileCol * n
-            val baseY = tileRow * n
-            for (g in 0 until n) {
-                val rowOffset = (baseY + g) * texW + baseX
-                for (r in 0 until n) {
-                    val idx = (r + g * n + b * s2) * 3
-                    if (idx + 2 < t.size) {
-                        val rf = t[idx].takeIf { it.isFinite() } ?: 0f
-                        val gf = t[idx + 1].takeIf { it.isFinite() } ?: 0f
-                        val bf = t[idx + 2].takeIf { it.isFinite() } ?: 0f
-                        val ri = (rf * 255f + 0.5f).toInt().coerceIn(0, 255)
-                        val gi = (gf * 255f + 0.5f).toInt().coerceIn(0, 255)
-                        val bi = (bf * 255f + 0.5f).toInt().coerceIn(0, 255)
-                        pixels[rowOffset + r] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
-                    }
-                }
+        return ByteBuffer.allocateDirect(vertices.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .apply {
+                put(vertices)
+                position(0)
             }
-        }
-
-        val bmp = createBitmap(texW, texH)
-        bmp.setPixels(pixels, 0, texW, 0, 0, texW, texH)
-        return PackedLutTexture(bmp, n, cols, rows, false)
-    }
-
-    /**
-     * Caches every OpenGL attribute and uniform location once upon shader link, along with
-     * reusable scratch arrays, eliminating ~65 glGetUniformLocation JNI calls and heap
-     * allocations on every 120Hz frame.
-     */
-    class ShaderUniformHandles(val program: Int) {
-        val aPosition = GLES20.glGetAttribLocation(program, "aPosition")
-        val aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
-
-        val uImageTex = GLES20.glGetUniformLocation(program, "uImageTex")
-        val uLutTex = GLES20.glGetUniformLocation(program, "uLutTex")
-        val uCurveTex = GLES20.glGetUniformLocation(program, "uCurveTex")
-
-        val uIsOriginal = GLES20.glGetUniformLocation(program, "uIsOriginal")
-        val uSplitRatio = GLES20.glGetUniformLocation(program, "uSplitRatio")
-        val uTexelSize = GLES20.glGetUniformLocation(program, "uTexelSize")
-        val uImageRes = GLES20.glGetUniformLocation(program, "uImageRes")
-
-        val uHasGeometry = GLES20.glGetUniformLocation(program, "uHasGeometry")
-        val uGeomRow0 = GLES20.glGetUniformLocation(program, "uGeomRow0")
-        val uGeomRow1 = GLES20.glGetUniformLocation(program, "uGeomRow1")
-        val uGeomRow2 = GLES20.glGetUniformLocation(program, "uGeomRow2")
-        val uCropRect = GLES20.glGetUniformLocation(program, "uCropRect")
-
-        val uHasOptics = GLES20.glGetUniformLocation(program, "uHasOptics")
-        val uLensDistortion = GLES20.glGetUniformLocation(program, "uLensDistortion")
-        val uChromaticAberration = GLES20.glGetUniformLocation(program, "uChromaticAberration")
-
-        val uLensBlurAmount = GLES20.glGetUniformLocation(program, "uLensBlurAmount")
-        val uBokehFocus = GLES20.glGetUniformLocation(program, "uBokehFocus")
-
-        val uHasSpatial = GLES20.glGetUniformLocation(program, "uHasSpatial")
-        val uTextureAmount = GLES20.glGetUniformLocation(program, "uTextureAmount")
-        val uClarityAmount = GLES20.glGetUniformLocation(program, "uClarityAmount")
-        val uSharpenParams = GLES20.glGetUniformLocation(program, "uSharpenParams")
-        val uNrParams = GLES20.glGetUniformLocation(program, "uNrParams")
-        val uColorNrParams = GLES20.glGetUniformLocation(program, "uColorNrParams")
-
-        val uHasProfile = GLES20.glGetUniformLocation(program, "uHasProfile")
-        val uProfStrength = GLES20.glGetUniformLocation(program, "uProfStrength")
-        val uProfTone = GLES20.glGetUniformLocation(program, "uProfTone")
-        val uProfGains = GLES20.glGetUniformLocation(program, "uProfGains")
-        val uProfSat = GLES20.glGetUniformLocation(program, "uProfSat")
-        val uProfShadowTint = GLES20.glGetUniformLocation(program, "uProfShadowTint")
-        val uProfHighlightTint = GLES20.glGetUniformLocation(program, "uProfHighlightTint")
-        val uProfMono = GLES20.glGetUniformLocation(program, "uProfMono")
-        val uProfSelective = GLES20.glGetUniformLocation(program, "uProfSelective")
-
-        val uExposureMult = GLES20.glGetUniformLocation(program, "uExposureMult")
-        val uTempMult = GLES20.glGetUniformLocation(program, "uTempMult")
-        val uDehazeNorm = GLES20.glGetUniformLocation(program, "uDehazeNorm")
-        val uWhiteGain = GLES20.glGetUniformLocation(program, "uWhiteGain")
-        val uBlackLift = GLES20.glGetUniformLocation(program, "uBlackLift")
-        val uHighlightsStrength = GLES20.glGetUniformLocation(program, "uHighlightsStrength")
-        val uShadowsStrength = GLES20.glGetUniformLocation(program, "uShadowsStrength")
-        val uHasParametric = GLES20.glGetUniformLocation(program, "uHasParametric")
-        val uParametric = GLES20.glGetUniformLocation(program, "uParametric")
-        val uContrastFactor = GLES20.glGetUniformLocation(program, "uContrastFactor")
-
-        val uHasCurve = GLES20.glGetUniformLocation(program, "uHasCurve")
-
-        val uHasCal = GLES20.glGetUniformLocation(program, "uHasCal")
-        val uCalHue = GLES20.glGetUniformLocation(program, "uCalHue")
-        val uCalSat = GLES20.glGetUniformLocation(program, "uCalSat")
-
-        val uHasHsl = GLES20.glGetUniformLocation(program, "uHasHsl")
-        val uHsl = IntArray(8) { i -> GLES20.glGetUniformLocation(program, "uHsl$i") }
-
-        val uIsGrayscale = GLES20.glGetUniformLocation(program, "uIsGrayscale")
-        val uVibranceNorm = GLES20.glGetUniformLocation(program, "uVibranceNorm")
-        val uSaturationFactor = GLES20.glGetUniformLocation(program, "uSaturationFactor")
-
-        val uHasSplitTone = GLES20.glGetUniformLocation(program, "uHasSplitTone")
-        val uSplitShadowTint = GLES20.glGetUniformLocation(program, "uSplitShadowTint")
-        val uSplitHighlightTint = GLES20.glGetUniformLocation(program, "uSplitHighlightTint")
-        val uSplitParams = GLES20.glGetUniformLocation(program, "uSplitParams")
-
-        val uHasPointColor = GLES20.glGetUniformLocation(program, "uHasPointColor")
-        val uPointSource = GLES20.glGetUniformLocation(program, "uPointSource")
-        val uPointShift = GLES20.glGetUniformLocation(program, "uPointShift")
-
-        val uHasColorGrading = GLES20.glGetUniformLocation(program, "uHasColorGrading")
-        val uCgShadowTint = GLES20.glGetUniformLocation(program, "uCgShadowTint")
-        val uCgMidTint = GLES20.glGetUniformLocation(program, "uCgMidTint")
-        val uCgHighlightTint = GLES20.glGetUniformLocation(program, "uCgHighlightTint")
-        val uCgGlobalTint = GLES20.glGetUniformLocation(program, "uCgGlobalTint")
-        val uCgBlendBalance = GLES20.glGetUniformLocation(program, "uCgBlendBalance")
-
-        val uVignetteParams1 = GLES20.glGetUniformLocation(program, "uVignetteParams1")
-        val uVignetteParams2 = GLES20.glGetUniformLocation(program, "uVignetteParams2")
-        val uGrainParams = GLES20.glGetUniformLocation(program, "uGrainParams")
-        val uHalationBloom = GLES20.glGetUniformLocation(program, "uHalationBloom")
-        val uAnamorphicStreak = GLES20.glGetUniformLocation(program, "uAnamorphicStreak")
-
-        val uHasLut = GLES20.glGetUniformLocation(program, "uHasLut")
-        val uLutSize = GLES20.glGetUniformLocation(program, "uLutSize")
-        val uLutCols = GLES20.glGetUniformLocation(program, "uLutCols")
-        val uLutRows = GLES20.glGetUniformLocation(program, "uLutRows")
-        val uLutIs1D = GLES20.glGetUniformLocation(program, "uLutIs1D")
-        val uDomainMin = GLES20.glGetUniformLocation(program, "uDomainMin")
-        val uDomainRangeInv = GLES20.glGetUniformLocation(program, "uDomainRangeInv")
-        val uLutIntensity = GLES20.glGetUniformLocation(program, "uLutIntensity")
-
-        val uMaskCount = GLES20.glGetUniformLocation(program, "uMaskCount")
-        val uMaskGeomA = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMaskGeomA$i") }
-        val uMaskGeomB = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMaskGeomB$i") }
-        val uMaskAdjA = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMaskAdjA$i") }
-        val uMaskSharp = IntArray(4) { i -> GLES20.glGetUniformLocation(program, "uMaskSharp$i") }
-
-        // Pre-allocated scratch buffers owned by the GL thread (zero per-frame GC allocations)
-        val geomOut = FloatArray(9)
-        val geomScratchA = FloatArray(9)
-        val geomScratchB = FloatArray(9)
-        val tintScratch = FloatArray(3)
-    }
-
-    fun packToneCurveBitmap(curve: ToneCurveData): Bitmap {
-        val pixels = curve.buildPackedRgba512()
-        val bmp = createBitmap(256, 2)
-        bmp.setPixels(pixels, 0, 256, 0, 0, 256, 2)
-        return bmp
-    }
-
-    /**
-     * Zero-allocation tone curve packer into caller-owned 512-entry pixel array and 256x2 bitmap.
-     */
-    fun packToneCurveInto(curve: ToneCurveData, pixelBuffer: IntArray, targetBitmap: Bitmap) {
-        curve.buildPackedRgba512Into(pixelBuffer)
-        targetBitmap.setPixels(pixelBuffer, 0, 256, 0, 0, 256, 2)
     }
 
     fun uploadTexture(texId: Int, bitmap: Bitmap) {
-        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
@@ -1278,414 +1241,398 @@ object GlGradingShaders {
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
     }
 
-    /**
-     * Updates an already-allocated GPU texture in-place without reallocating GPU storage.
-     */
     fun uploadTextureSubImage(texId: Int, bitmap: Bitmap) {
-        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
         GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
     }
 
-    fun bindUniforms(
-        program: Int,
-        params: GradingParams,
-        lut: CubeLut?,
-        packedLut: PackedLutTexture?,
-        imageWidth: Int,
-        imageHeight: Int,
-        isOriginal: Boolean,
-        splitRatio: Float = -1f,
-        applyCrop: Boolean = true,
-        outputWidth: Int = imageWidth,
-        outputHeight: Int = imageHeight
-    ) {
-        bindUniforms(
-            handles = ShaderUniformHandles(program),
-            params = params,
-            lut = lut,
-            packedLut = packedLut,
-            imageWidth = imageWidth,
-            imageHeight = imageHeight,
-            isOriginal = isOriginal,
-            splitRatio = splitRatio,
-            applyCrop = applyCrop,
-            outputWidth = outputWidth,
-            outputHeight = outputHeight
-        )
+    data class PackedLutTexture(
+        val bitmap: Bitmap,
+        val tilesPerRow: Int,
+        val lutType: Int,
+        val size: Int
+    )
+
+    fun packLutToTiledBitmap(lut: CubeLut): PackedLutTexture {
+        if (lut.type == LutType.LUT_1D) {
+            val size = lut.size.coerceAtLeast(2)
+            val bmp = createBitmap(size, 1)
+            val pixels = IntArray(size)
+            for (i in 0 until size) {
+                val base = i * 3
+                val r = (lut.table[base].coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val g = (lut.table[base + 1].coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val b = (lut.table[base + 2].coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                pixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+            bmp.setPixels(pixels, 0, size, 0, 0, size, 1)
+            return PackedLutTexture(bmp, tilesPerRow = 1, lutType = 1, size = size)
+        }
+
+        val size = lut.size.coerceAtLeast(2)
+        val tilesPerRow = ceil(sqrt(size.toDouble())).toInt().coerceAtLeast(1)
+        val tileRows = ceil(size.toDouble() / tilesPerRow.toDouble()).toInt().coerceAtLeast(1)
+        val atlasW = tilesPerRow * size
+        val atlasH = tileRows * size
+        val bmp = createBitmap(atlasW, atlasH)
+        val pixels = IntArray(atlasW * atlasH)
+
+        for (bIdx in 0 until size) {
+            val tileCol = bIdx % tilesPerRow
+            val tileRow = bIdx / tilesPerRow
+            val baseX = tileCol * size
+            val baseY = tileRow * size
+            for (gIdx in 0 until size) {
+                val rowOff = (baseY + gIdx) * atlasW + baseX
+                for (rIdx in 0 until size) {
+                    val lutIdx = ((bIdx * size + gIdx) * size + rIdx) * 3
+                    val r = (lut.table[lutIdx].coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    val g = (lut.table[lutIdx + 1].coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    val b = (lut.table[lutIdx + 2].coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                    pixels[rowOff + rIdx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+        }
+        bmp.setPixels(pixels, 0, atlasW, 0, 0, atlasW, atlasH)
+        return PackedLutTexture(bmp, tilesPerRow = tilesPerRow, lutType = 2, size = size)
     }
 
-    fun bindUniforms(
-        handles: ShaderUniformHandles,
+    /**
+     * Packs Master + R + G + B tone curves into a 256x2 opaque ARGB_8888 bitmap
+     * (row 0 = RGB channels, row 1 = Master channel in RGB) to avoid premultiplied alpha issues.
+     */
+    fun packToneCurveInto(
+        curve: ToneCurveData,
+        scratchPixels: IntArray,
+        targetBitmap: Bitmap
+    ) {
+        curve.buildPackedRgba512Into(scratchPixels)
+        targetBitmap.setPixels(scratchPixels, 0, 256, 0, 0, 256, 2)
+    }
+
+    fun packToneCurveBitmap(curve: ToneCurveData): Bitmap {
+        val bmp = createBitmap(256, 2)
+        val pixels = IntArray(512)
+        packToneCurveInto(curve, pixels, bmp)
+        return bmp
+    }
+
+    fun bindToneColorUniforms(
+        handles: ToneColorUniformHandles,
         params: GradingParams,
-        lut: CubeLut?,
-        packedLut: PackedLutTexture?,
         imageWidth: Int,
         imageHeight: Int,
-        isOriginal: Boolean,
-        splitRatio: Float = -1f,
-        applyCrop: Boolean = true,
-        outputWidth: Int = imageWidth,
-        outputHeight: Int = imageHeight
+        applyCrop: Boolean,
+        outputWidth: Int,
+        outputHeight: Int
     ) {
-        GLES20.glUniform1f(handles.uIsOriginal, if (isOriginal) 1f else 0f)
-        GLES20.glUniform1f(handles.uSplitRatio, splitRatio)
+        GeometryMath.buildOrientToRawSourceMatrixInto(
+            srcW = imageWidth,
+            srcH = imageHeight,
+            crop = params.crop,
+            out = handles.orientMat,
+            scratchA = handles.scratchMatA,
+            scratchB = handles.scratchMatB
+        )
+        GLES20.glUniformMatrix3fv(handles.uOrientMatrix, 1, false, handles.orientMat, 0)
 
-        val safeOutW = outputWidth.coerceAtLeast(1).toFloat()
-        val safeOutH = outputHeight.coerceAtLeast(1).toFloat()
-        GLES20.glUniform2f(handles.uTexelSize, 1f / safeOutW, 1f / safeOutH)
-        GLES20.glUniform2f(handles.uImageRes, safeOutW, safeOutH)
-
-        // Crop & Projective Geometry / Orientation
-        val crop = params.crop
-        val hasGeom = crop.hasOrientationEdits || crop.hasGeometryEdits
-        GLES20.glUniform1f(handles.uHasGeometry, if (hasGeom) 1f else 0f)
-        if (hasGeom) {
-            val m = handles.geomOut
-            com.example.editor.GeometryMath.buildOrientToRawSourceMatrixInto(
-                srcW = imageWidth.coerceAtLeast(1),
-                srcH = imageHeight.coerceAtLeast(1),
-                crop = crop,
-                out = m,
-                scratchA = handles.geomScratchA,
-                scratchB = handles.geomScratchB
-            )
-            GLES20.glUniform3f(handles.uGeomRow0, m[0], m[1], m[2])
-            GLES20.glUniform3f(handles.uGeomRow1, m[3], m[4], m[5])
-            GLES20.glUniform3f(handles.uGeomRow2, m[6], m[7], m[8])
-        } else {
-            GLES20.glUniform3f(handles.uGeomRow0, 1f, 0f, 0f)
-            GLES20.glUniform3f(handles.uGeomRow1, 0f, 1f, 0f)
-            GLES20.glUniform3f(handles.uGeomRow2, 0f, 0f, 1f)
-        }
         if (applyCrop) {
-            val eff = com.example.editor.GeometryMath.effectiveCropRect(
-                srcW = imageWidth.coerceAtLeast(1),
-                srcH = imageHeight.coerceAtLeast(1),
-                crop = crop
-            )
-            GLES20.glUniform4f(handles.uCropRect, eff.left, eff.top, eff.width, eff.height)
+            val rect = GeometryMath.effectiveCropRect(imageWidth, imageHeight, params.crop)
+            GLES20.glUniform4f(handles.uCropRect, rect.left, rect.top, rect.right, rect.bottom)
         } else {
             GLES20.glUniform4f(handles.uCropRect, 0f, 0f, 1f, 1f)
         }
 
-        // Optics
-        val hasOptics = params.lensDistortion != 0f || kotlin.math.abs(params.chromaticAberration) > 0.01f
-        GLES20.glUniform1f(handles.uHasOptics, if (hasOptics) 1f else 0f)
-        GLES20.glUniform1f(handles.uLensDistortion, -(params.lensDistortion / 100f) * 0.35f)
-        GLES20.glUniform1f(
-            handles.uChromaticAberration,
-            (params.chromaticAberration / 50f).coerceIn(-1f, 1f) * 0.012f
-        )
-
-        // Lens Blur
-        GLES20.glUniform1f(handles.uLensBlurAmount, (params.lensBlurAmount / 100f).coerceIn(0f, 1f))
-        GLES20.glUniform1f(handles.uBokehFocus, (params.bokehFocus / 100f).coerceIn(0f, 1f))
-
-        // Spatial
-        val hasSpatial = params.texture != 0f ||
-            params.clarity != 0f ||
-            params.sharpening > 0f ||
-            params.noiseReduction > 0f ||
-            params.colorNoiseReduction > 0f
-        GLES20.glUniform1f(handles.uHasSpatial, if (hasSpatial) 1f else 0f)
-        GLES20.glUniform1f(handles.uTextureAmount, (params.texture / 100f) * 0.85f)
-        GLES20.glUniform1f(handles.uClarityAmount, (params.clarity / 100f) * 1.05f)
+        val activeProfile = CameraProfiles.byId(params.profileId)
+        val profSt = params.profileAmount.coerceIn(0f, 2f)
+        val hasProfile = activeProfile.isCreative && profSt > 0.001f
+        val caNorm = (params.chromaticAberration / 50f).coerceIn(-1f, 1f)
         GLES20.glUniform4f(
-            handles.uSharpenParams,
-            (params.sharpening / 150f).coerceIn(0f, 1f),
-            params.sharpenRadius.coerceIn(0.5f, 3.0f),
-            (params.sharpenDetail / 100f).coerceIn(0f, 1f),
-            (params.sharpenMasking / 100f).coerceIn(0f, 1f)
-        )
-        GLES20.glUniform3f(
-            handles.uNrParams,
-            (params.noiseReduction / 100f).coerceIn(0f, 1f),
-            (params.noiseReductionDetail / 100f).coerceIn(0f, 1f),
-            (params.noiseReductionContrast / 100f).coerceIn(0f, 1f)
-        )
-        GLES20.glUniform3f(
-            handles.uColorNrParams,
-            (params.colorNoiseReduction / 100f).coerceIn(0f, 1f),
-            (params.colorNoiseReductionDetail / 100f).coerceIn(0f, 1f),
-            (params.colorNoiseReductionSmoothness / 100f).coerceIn(0f, 1f)
+            handles.uOptics,
+            params.lensDistortion / 100f,
+            caNorm,
+            (params.lensBlurAmount / 100f).coerceIn(0f, 1f),
+            if (hasProfile) 1f else 0f
         )
 
-        // Foundational Camera Profile
-        val profile = CameraProfiles.byId(params.profileId)
-        val hasProfile = profile.isCreative && params.profileAmount > 0.001f
-        GLES20.glUniform1f(handles.uHasProfile, if (hasProfile) 1f else 0f)
-        GLES20.glUniform1f(handles.uProfStrength, params.profileAmount.coerceIn(0f, 2f))
         GLES20.glUniform4f(
             handles.uProfTone,
-            profile.contrast,
-            profile.shadowLift,
-            profile.highlightCompress,
-            profile.midPunch
+            activeProfile.contrast * profSt,
+            activeProfile.shadowLift * profSt,
+            activeProfile.highlightCompress * profSt,
+            activeProfile.midPunch * profSt
         )
-        GLES20.glUniform3f(
-            handles.uProfGains,
-            profile.rGainDelta,
-            profile.gGainDelta,
-            profile.bGainDelta
+        GLES20.glUniform4f(
+            handles.uProfGain,
+            1f + activeProfile.rGainDelta * profSt,
+            1f + activeProfile.gGainDelta * profSt,
+            1f + activeProfile.bGainDelta * profSt,
+            0f
         )
-        GLES20.glUniform2f(handles.uProfSat, profile.satDelta, profile.vibDelta)
-        GLES20.glUniform3f(
-            handles.uProfShadowTint,
-            profile.shadowRedBias,
-            profile.shadowGreenBias,
-            profile.shadowBlueBias
-        )
-        GLES20.glUniform3f(
-            handles.uProfHighlightTint,
-            profile.highlightRedBias,
-            profile.highlightGreenBias,
-            profile.highlightBlueBias
+        GLES20.glUniform4f(
+            handles.uProfColor,
+            activeProfile.satDelta * profSt,
+            activeProfile.vibDelta * profSt,
+            (activeProfile.monoMix * profSt).coerceIn(0f, 1f),
+            0f
         )
         GLES20.glUniform4f(
             handles.uProfMono,
-            profile.monoMix,
-            profile.monoWeightR,
-            profile.monoWeightG,
-            profile.monoWeightB
+            activeProfile.monoWeightR,
+            activeProfile.monoWeightG,
+            activeProfile.monoWeightB,
+            0f
         )
-        GLES20.glUniform3f(
-            handles.uProfSelective,
-            profile.foliageBoost,
-            profile.skinSoftWarmth,
-            profile.skyDepth
-        )
-
-        // Light & Color Basics (calibrated for Lightroom-style strength at ±50 and full range at ±100)
-        val expMult = 2.0.pow(params.exposure.toDouble() * 1.15).toFloat()
-        val tempNorm = params.temperature / 100f
-        val tintNorm = params.tint / 100f
-        GLES20.glUniform1f(handles.uExposureMult, expMult)
-        GLES20.glUniform3f(
-            handles.uTempMult,
-            (1f + tempNorm * 0.44f + tintNorm * 0.16f).coerceAtLeast(0.15f),
-            (1f + tempNorm * 0.06f - tintNorm * 0.34f).coerceAtLeast(0.15f),
-            (1f - tempNorm * 0.46f + tintNorm * 0.16f).coerceAtLeast(0.15f)
-        )
-        GLES20.glUniform1f(handles.uDehazeNorm, params.dehaze / 100f)
-        GLES20.glUniform1f(handles.uWhiteGain, 1f + (params.whites / 100f) * 0.45f)
-        GLES20.glUniform1f(handles.uBlackLift, (params.blacks / 100f) * 0.28f)
-        GLES20.glUniform1f(handles.uHighlightsStrength, (params.highlights / 100f) * 0.88f)
-        GLES20.glUniform1f(handles.uShadowsStrength, (params.shadows / 100f) * 0.88f)
-
-        val hasParametric = params.parametricShadows != 0f ||
-            params.parametricDarks != 0f ||
-            params.parametricLights != 0f ||
-            params.parametricHighlights != 0f
-        GLES20.glUniform1f(handles.uHasParametric, if (hasParametric) 1f else 0f)
         GLES20.glUniform4f(
-            handles.uParametric,
-            params.parametricShadows / 100f,
-            params.parametricDarks / 100f,
+            handles.uProfShCast,
+            activeProfile.shadowRedBias * profSt,
+            activeProfile.shadowGreenBias * profSt,
+            activeProfile.shadowBlueBias * profSt,
+            0f
+        )
+        GLES20.glUniform4f(
+            handles.uProfHiCast,
+            activeProfile.highlightRedBias * profSt,
+            activeProfile.highlightGreenBias * profSt,
+            activeProfile.highlightBlueBias * profSt,
+            0f
+        )
+
+        val outAspect = (outputWidth.coerceAtLeast(1).toFloat() / outputHeight.coerceAtLeast(1).toFloat())
+        GLES20.glUniform4f(
+            handles.uImageInfo,
+            1f / max(1, imageWidth).toFloat(),
+            1f / max(1, imageHeight).toFloat(),
+            outAspect,
+            if (params.toneCurve.isDefault) 0f else 1f
+        )
+
+        val exposureEV = params.exposure.coerceIn(-2f, 2f)
+        val tempNorm = (params.temperature / 100f).coerceIn(-1f, 1f)
+        val tintNorm = (params.tint / 100f).coerceIn(-1f, 1f)
+        val contrastNorm = (params.contrast / 100f).coerceIn(-1f, 1f)
+        val hiNorm = (params.highlights / 100f).coerceIn(-1f, 1f)
+        val shNorm = (params.shadows / 100f).coerceIn(-1f, 1f)
+        val whNorm = (params.whites / 100f).coerceIn(-1f, 1f)
+        val blNorm = (params.blacks / 100f).coerceIn(-1f, 1f)
+
+        computeLinearWhiteBalanceMultipliers(tempNorm, tintNorm, handles.wbScratch)
+        val maxWb = max(handles.wbScratch[0], max(handles.wbScratch[1], handles.wbScratch[2]))
+        val shoulderKnee = computeSoftShoulderKnee(exposureEV, maxWb, hiNorm, whNorm)
+
+        GLES20.glUniform4f(handles.uToneA, exposureEV, tempNorm, tintNorm, contrastNorm)
+        GLES20.glUniform4f(handles.uToneB, hiNorm, shNorm, whNorm, blNorm)
+        GLES20.glUniform4f(
+            handles.uWbMult,
+            handles.wbScratch[0],
+            handles.wbScratch[1],
+            handles.wbScratch[2],
+            shoulderKnee
+        )
+        GLES20.glUniform4f(
+            handles.uParamTone,
+            params.parametricHighlights / 100f,
             params.parametricLights / 100f,
-            params.parametricHighlights / 100f
+            params.parametricDarks / 100f,
+            params.parametricShadows / 100f
         )
-        val contrastNorm = params.contrast / 100f
-        val contrastFactor = if (contrastNorm >= 0f) {
-            1f + contrastNorm * 1.25f
-        } else {
-            (1f + contrastNorm * 0.85f).coerceAtLeast(0.15f)
-        }
-        GLES20.glUniform1f(handles.uContrastFactor, contrastFactor)
+        GLES20.glUniform4f(
+            handles.uColorA,
+            (params.vibrance / 100f).coerceIn(-1f, 1f),
+            (params.saturation / 100f).coerceIn(-1f, 1f),
+            if (params.isGrayscale) 1f else 0f,
+            0f
+        )
 
-        // Tone Curve
-        GLES20.glUniform1f(handles.uHasCurve, if (!params.toneCurve.isDefault) 1f else 0f)
-
-        // Calibration
         val cal = params.calibration
-        GLES20.glUniform1f(handles.uHasCal, if (!cal.isDefault) 1f else 0f)
-        GLES20.glUniform3f(handles.uCalHue, cal.redHue / 100f, cal.greenHue / 100f, cal.blueHue / 100f)
-        GLES20.glUniform3f(
-            handles.uCalSat,
-            1f + (cal.redSaturation / 100f) * 0.5f,
-            1f + (cal.greenSaturation / 100f) * 0.5f,
-            1f + (cal.blueSaturation / 100f) * 0.5f
-        )
-
-        // 8-Band HSL
-        val hsl = params.hsl
-        GLES20.glUniform1f(handles.uHasHsl, if (!hsl.isDefault) 1f else 0f)
-        for (i in 0..7) {
-            val b = hsl.bands[i]
-            GLES20.glUniform3f(handles.uHsl[i], b.hue, b.saturation, b.luminance)
-        }
-
-        // Grayscale, Vibrance, Saturation
-        GLES20.glUniform1f(handles.uIsGrayscale, if (params.isGrayscale) 1f else 0f)
-        GLES20.glUniform1f(handles.uVibranceNorm, params.vibrance / 100f)
-        val satNorm = params.saturation / 100f
-        val satFactor = if (satNorm >= 0f) {
-            1f + satNorm * 1.40f
-        } else {
-            (1f + satNorm).coerceAtLeast(0f)
-        }
-        GLES20.glUniform1f(handles.uSaturationFactor, satFactor)
-
-        // Split Toning (zero allocations using scratch array)
-        val tintScratch = handles.tintScratch
-        val hasSplitTone = params.splitShadowSat > 0f || params.splitHighlightSat > 0f
-        GLES20.glUniform1f(handles.uHasSplitTone, if (hasSplitTone) 1f else 0f)
-        hueSatToRgbTintInto(params.splitShadowHue, params.splitShadowSat, tintScratch)
-        GLES20.glUniform3f(handles.uSplitShadowTint, tintScratch[0], tintScratch[1], tintScratch[2])
-        hueSatToRgbTintInto(params.splitHighlightHue, params.splitHighlightSat, tintScratch)
-        GLES20.glUniform3f(handles.uSplitHighlightTint, tintScratch[0], tintScratch[1], tintScratch[2])
-        val bal = params.splitBalance / 100f
         GLES20.glUniform4f(
-            handles.uSplitParams,
-            params.splitShadowSat / 100f,
-            params.splitHighlightSat / 100f,
-            (1f - bal * 0.5f).coerceIn(0.25f, 1.75f),
-            (1f + bal * 0.5f).coerceIn(0.25f, 1.75f)
+            handles.uCalibA,
+            cal.redHue / 100f,
+            cal.redSaturation / 100f,
+            cal.greenHue / 100f,
+            cal.greenSaturation / 100f
+        )
+        GLES20.glUniform4f(
+            handles.uCalibB,
+            cal.blueHue / 100f,
+            cal.blueSaturation / 100f,
+            params.splitBalance / 100f,
+            if (cal.isDefault) 0f else 1f
         )
 
-        // Point Color
-        val pc = params.pointColor
-        GLES20.glUniform1f(handles.uHasPointColor, if (pc.isModified) 1f else 0f)
-        GLES20.glUniform3f(handles.uPointSource, pc.sourceHueDeg, pc.sourceSat, pc.sourceLuma)
-        GLES20.glUniform4f(handles.uPointShift, pc.hueShift, pc.saturationShift, pc.luminanceShift, pc.range)
+        hueSatToRgbTintInto(params.splitShadowHue, params.splitShadowSat / 100f, handles.splitShScratch)
+        hueSatToRgbTintInto(params.splitHighlightHue, params.splitHighlightSat / 100f, handles.splitHiScratch)
+        GLES20.glUniform4f(
+            handles.uSplitSh,
+            handles.splitShScratch[0],
+            handles.splitShScratch[1],
+            handles.splitShScratch[2],
+            (params.splitShadowSat / 100f).coerceIn(0f, 1f)
+        )
+        GLES20.glUniform4f(
+            handles.uSplitHi,
+            handles.splitHiScratch[0],
+            handles.splitHiScratch[1],
+            handles.splitHiScratch[2],
+            (params.splitHighlightSat / 100f).coerceIn(0f, 1f)
+        )
 
-        // Color Grading (3-Way + Global Wheels — zero allocations)
         val cg = params.colorGrading
-        GLES20.glUniform1f(handles.uHasColorGrading, if (!cg.isDefault) 1f else 0f)
-        bindWheelUniform(handles.uCgShadowTint, cg.shadows, tintScratch)
-        bindWheelUniform(handles.uCgMidTint, cg.midtones, tintScratch)
-        bindWheelUniform(handles.uCgHighlightTint, cg.highlights, tintScratch)
-        bindWheelUniform(handles.uCgGlobalTint, cg.global, tintScratch)
-        GLES20.glUniform2f(
-            handles.uCgBlendBalance,
-            (cg.blending / 100f).coerceIn(0f, 1f),
-            (cg.balance / 100f).coerceIn(-1f, 1f)
+        hueSatToRgbTintInto(cg.shadows.hueDeg, cg.shadows.saturation / 100f, handles.wheelShScratch)
+        hueSatToRgbTintInto(cg.midtones.hueDeg, cg.midtones.saturation / 100f, handles.wheelMidScratch)
+        hueSatToRgbTintInto(cg.highlights.hueDeg, cg.highlights.saturation / 100f, handles.wheelHiScratch)
+        hueSatToRgbTintInto(cg.global.hueDeg, cg.global.saturation / 100f, handles.wheelGlScratch)
+        val sSat = cg.shadows.saturation / 100f
+        val mSat = cg.midtones.saturation / 100f
+        val hSat = cg.highlights.saturation / 100f
+        val gSat = cg.global.saturation / 100f
+        GLES20.glUniform4f(handles.uWheelSh, handles.wheelShScratch[0] * sSat, handles.wheelShScratch[1] * sSat, handles.wheelShScratch[2] * sSat, cg.shadows.luminance / 100f)
+        GLES20.glUniform4f(handles.uWheelMid, handles.wheelMidScratch[0] * mSat, handles.wheelMidScratch[1] * mSat, handles.wheelMidScratch[2] * mSat, cg.midtones.luminance / 100f)
+        GLES20.glUniform4f(handles.uWheelHi, handles.wheelHiScratch[0] * hSat, handles.wheelHiScratch[1] * hSat, handles.wheelHiScratch[2] * hSat, cg.highlights.luminance / 100f)
+        GLES20.glUniform4f(handles.uWheelGl, handles.wheelGlScratch[0] * gSat, handles.wheelGlScratch[1] * gSat, handles.wheelGlScratch[2] * gSat, cg.global.luminance / 100f)
+        GLES20.glUniform4f(
+            handles.uWheelMix,
+            cg.blending / 100f,
+            cg.balance / 100f,
+            if (cg.isDefault) 0f else 1f,
+            if (params.hsl.isDefault) 0f else 1f
         )
 
-        // Vignette & Grain
+        val pt = params.pointColor
+        GLES20.glUniform4f(handles.uPointA, pt.sourceHueDeg, pt.sourceSat, pt.sourceLuma, pt.range / 100f)
         GLES20.glUniform4f(
-            handles.uVignetteParams1,
-            (params.vignette / 100f) * 0.90f,
-            (params.vignetteMidpoint / 100f).coerceIn(0f, 1f),
-            (params.vignetteFeather / 100f).coerceIn(0f, 1f),
-            (params.vignetteRoundness / 100f).coerceIn(-1f, 1f)
+            handles.uPointB,
+            pt.hueShift / 100f,
+            pt.saturationShift / 100f,
+            pt.luminanceShift / 100f,
+            if (pt.isModified) 1f else 0f
         )
-        GLES20.glUniform2f(
-            handles.uVignetteParams2,
-            params.vignetteStyle.shaderIndex.toFloat(),
-            (params.vignetteHighlights / 100f).coerceIn(0f, 1f)
+
+        val bands = HslBand.entries
+        for (i in 0 until 8) {
+            val adj = params.hsl[bands[i]]
+            GLES20.glUniform4f(handles.uHsl[i], adj.hue, adj.saturation, adj.luminance, 0f)
+        }
+
+        val activeMasks = params.masks.filter { it.enabled && it.hasAdjustments }.take(4)
+        GLES20.glUniform4f(handles.uMaskMeta, activeMasks.size.toFloat(), 0f, 0f, 0f)
+        for (i in activeMasks.indices) {
+            val m = activeMasks[i]
+            val typeFloat = if (m.type == MaskType.RADIAL) 0f else 1f
+            GLES20.glUniform4f(
+                handles.uMaskA[i],
+                typeFloat,
+                if (m.inverted) 1f else 0f,
+                m.feather.coerceIn(0.02f, 1f),
+                m.exposure
+            )
+            if (m.type == MaskType.RADIAL) {
+                GLES20.glUniform4f(handles.uMaskB[i], m.centerX, m.centerY, m.radiusX, m.radiusY)
+            } else {
+                GLES20.glUniform4f(handles.uMaskB[i], m.startX, m.startY, m.endX, m.endY)
+            }
+            GLES20.glUniform4f(
+                handles.uMaskC[i],
+                m.contrast / 100f,
+                m.warmth / 100f,
+                m.saturation / 100f,
+                m.sharpness / 100f
+            )
+        }
+    }
+
+    fun bindSpatialFinishUniforms(
+        handles: SpatialFinishUniformHandles,
+        params: GradingParams,
+        lut: CubeLut?,
+        packedLut: PackedLutTexture?,
+        fboWidth: Int,
+        fboHeight: Int,
+        imageWidth: Int,
+        imageHeight: Int,
+        isOriginal: Boolean,
+        splitRatio: Float,
+        applyCrop: Boolean,
+        showHighlightClipping: Boolean = false,
+        showShadowClipping: Boolean = false
+    ) {
+        val fw = max(1, fboWidth).toFloat()
+        val fh = max(1, fboHeight).toFloat()
+        GLES20.glUniform4f(handles.uTexelInfo, 1f / fw, 1f / fh, fw, fh)
+
+        GLES20.glUniform4f(
+            handles.uDetailA,
+            (params.texture / 100f).coerceIn(-1f, 1f),
+            (params.clarity / 100f).coerceIn(-1f, 1f),
+            (params.dehaze / 100f).coerceIn(-1f, 1f),
+            (params.sharpening / 150f).coerceIn(0f, 1f)
         )
-        GLES20.glUniform3f(
-            handles.uGrainParams,
-            (params.grain / 100f) * 0.16f,
-            (params.grainSize / 100f).coerceIn(0f, 1f),
-            (params.grainRoughness / 100f).coerceIn(0f, 1f)
+        GLES20.glUniform4f(
+            handles.uDetailB,
+            params.sharpenRadius.coerceIn(0.5f, 3.0f),
+            (params.sharpenDetail / 100f).coerceIn(0f, 1f),
+            (params.sharpenMasking / 100f).coerceIn(0f, 1f),
+            (params.noiseReduction / 100f).coerceIn(0f, 1f)
         )
-        GLES20.glUniform2f(
-            handles.uHalationBloom,
+        GLES20.glUniform4f(
+            handles.uDetailC,
+            (params.colorNoiseReduction / 100f).coerceIn(0f, 1f),
+            (params.vignette / 100f).coerceIn(-1f, 1f),
+            (params.grain / 100f).coerceIn(0f, 1f),
+            (params.grainSize / 100f).coerceIn(0f, 1f)
+        )
+        GLES20.glUniform4f(
+            handles.uEffectsA,
+            (params.grainRoughness / 100f).coerceIn(0f, 1f),
             (params.halation / 100f).coerceIn(0f, 1f),
-            (params.bloom / 100f).coerceIn(0f, 1f)
-        )
-        GLES20.glUniform1f(
-            handles.uAnamorphicStreak,
+            (params.bloom / 100f).coerceIn(0f, 1f),
             (params.anamorphicStreak / 100f).coerceIn(0f, 1f)
         )
 
-        // External .cube LUT (XMP presets populate sliders directly and do NOT apply baked LUT)
-        val effectiveLut = if (lut != null && lut.sourceFormat != LutSourceFormat.XMP) lut else null
-        val hasLut = effectiveLut != null && packedLut != null && params.lutIntensity > 0.001f
-        GLES20.glUniform1f(handles.uHasLut, if (hasLut) 1f else 0f)
-        if (hasLut) {
-            GLES20.glUniform1f(handles.uLutSize, packedLut.size.toFloat())
-            GLES20.glUniform1f(handles.uLutCols, packedLut.cols.toFloat())
-            GLES20.glUniform1f(handles.uLutRows, packedLut.rows.toFloat())
-            GLES20.glUniform1f(handles.uLutIs1D, if (packedLut.is1D) 1f else 0f)
-            GLES20.glUniform3f(
-                handles.uDomainMin,
-                effectiveLut.domainMin[0],
-                effectiveLut.domainMin[1],
-                effectiveLut.domainMin[2]
-            )
-            GLES20.glUniform3f(
-                handles.uDomainRangeInv,
-                1f / (effectiveLut.domainMax[0] - effectiveLut.domainMin[0]).coerceAtLeast(1e-5f),
-                1f / (effectiveLut.domainMax[1] - effectiveLut.domainMin[1]).coerceAtLeast(1e-5f),
-                1f / (effectiveLut.domainMax[2] - effectiveLut.domainMin[2]).coerceAtLeast(1e-5f)
-            )
-            GLES20.glUniform1f(handles.uLutIntensity, params.lutIntensity.coerceIn(0f, 1f))
-        } else {
-            GLES20.glUniform1f(handles.uLutIntensity, 0f)
-        }
-
-        // Selective Local Masks (Radial & Linear gradients)
-        val activeMasks = params.masks
-        val outAspect = safeOutW / safeOutH
-        var boundMaskCount = 0
-        for (idx in activeMasks.indices) {
-            if (boundMaskCount >= com.example.editor.MAX_LOCAL_MASKS) break
-            val m = activeMasks[idx]
-            if (!m.enabled || !m.hasAdjustments) continue
-            val invFlag = if (m.inverted) 1f else 0f
-            if (m.type == com.example.editor.MaskType.RADIAL) {
-                GLES20.glUniform4f(
-                    handles.uMaskGeomA[boundMaskCount],
-                    0f,
-                    m.centerX,
-                    m.centerY,
-                    invFlag
-                )
-                GLES20.glUniform4f(
-                    handles.uMaskGeomB[boundMaskCount],
-                    m.radiusX.coerceAtLeast(0.02f),
-                    m.radiusY.coerceAtLeast(0.02f),
-                    m.feather.coerceIn(0f, 1f),
-                    0f
-                )
-            } else {
-                GLES20.glUniform4f(
-                    handles.uMaskGeomA[boundMaskCount],
-                    1f,
-                    m.startX,
-                    m.startY,
-                    invFlag
-                )
-                GLES20.glUniform4f(
-                    handles.uMaskGeomB[boundMaskCount],
-                    m.endX,
-                    m.endY,
-                    outAspect,
-                    0f
-                )
-            }
+        if (lut != null && packedLut != null) {
             GLES20.glUniform4f(
-                handles.uMaskAdjA[boundMaskCount],
-                m.exposure.coerceIn(-2f, 2f),
-                (m.contrast / 100f).coerceIn(-1f, 1f),
-                (m.warmth / 100f).coerceIn(-1f, 1f),
-                (m.saturation / 100f).coerceIn(-1f, 1f)
+                handles.uLutParams,
+                packedLut.lutType.toFloat(),
+                packedLut.size.toFloat(),
+                params.lutIntensity.coerceIn(0f, 1f),
+                packedLut.tilesPerRow.toFloat()
             )
-            GLES20.glUniform1f(
-                handles.uMaskSharp[boundMaskCount],
-                (m.sharpness / 100f).coerceIn(0f, 1f)
-            )
-            boundMaskCount++
+            GLES20.glUniform3f(handles.uLutDomainMin, lut.domainMin[0], lut.domainMin[1], lut.domainMin[2])
+            GLES20.glUniform3f(handles.uLutDomainMax, lut.domainMax[0], lut.domainMax[1], lut.domainMax[2])
+        } else {
+            GLES20.glUniform4f(handles.uLutParams, 0f, 0f, 0f, 1f)
+            GLES20.glUniform3f(handles.uLutDomainMin, 0f, 0f, 0f)
+            GLES20.glUniform3f(handles.uLutDomainMax, 1f, 1f, 1f)
         }
-        GLES20.glUniform1f(handles.uMaskCount, boundMaskCount.toFloat())
-    }
 
-    private fun bindWheelUniform(
-        location: Int,
-        wheel: com.example.editor.ColorWheelValue,
-        scratch: FloatArray
-    ) {
-        hueSatToRgbTintInto(wheel.hueDeg, wheel.saturation, scratch)
-        val satGain = (wheel.saturation / 100f) * 0.42f
-        val lumDelta = (wheel.luminance / 100f) * 0.22f
-        GLES20.glUniform4f(location, scratch[0] * satGain, scratch[1] * satGain, scratch[2] * satGain, lumDelta)
+        val clippingMask = (if (showHighlightClipping) 1f else 0f) + (if (showShadowClipping) 2f else 0f)
+        GLES20.glUniform4f(
+            handles.uCompare,
+            if (isOriginal) 1f else 0f,
+            splitRatio,
+            if (applyCrop) 1f else 0f,
+            clippingMask
+        )
+
+        GeometryMath.buildOrientToRawSourceMatrixInto(
+            srcW = imageWidth,
+            srcH = imageHeight,
+            crop = params.crop,
+            out = handles.orientMat,
+            scratchA = handles.scratchMatA,
+            scratchB = handles.scratchMatB
+        )
+        GLES20.glUniformMatrix3fv(handles.uOrientMatrix, 1, false, handles.orientMat, 0)
+        if (applyCrop) {
+            val rect = GeometryMath.effectiveCropRect(imageWidth, imageHeight, params.crop)
+            GLES20.glUniform4f(handles.uCropRect, rect.left, rect.top, rect.right, rect.bottom)
+        } else {
+            GLES20.glUniform4f(handles.uCropRect, 0f, 0f, 1f, 1f)
+        }
     }
 
     private fun hueSatToRgbTintInto(hueDeg: Float, sat: Float, out: FloatArray) {
-        if (sat <= 0f) {
+        if (sat <= 0.0005f) {
             out[0] = 0f
             out[1] = 0f
             out[2] = 0f
