@@ -91,7 +91,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.ColorGradingEngine
 import com.example.editor.CropAspectPreset
 import com.example.editor.CropOverlayMode
