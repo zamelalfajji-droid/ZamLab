@@ -63,7 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.ui.theme.StudioActiveOffWhite
 import com.example.ui.theme.StudioAmberPillFill
 import com.example.ui.theme.StudioBackground
