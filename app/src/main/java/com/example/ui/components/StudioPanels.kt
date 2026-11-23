@@ -59,7 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.LutFolderGroup
 import com.example.editor.LutPresetItem
 import com.example.lut.CubeLut
