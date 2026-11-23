@@ -82,7 +82,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.ColorGradingData
 import com.example.editor.ColorWheelValue
 import com.example.editor.EyedropperMode
