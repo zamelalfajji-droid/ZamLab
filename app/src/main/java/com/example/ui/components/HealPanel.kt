@@ -48,7 +48,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.HealMode
 import com.example.editor.OfflineHealEngine
 import com.example.ui.theme.StudioAmber
