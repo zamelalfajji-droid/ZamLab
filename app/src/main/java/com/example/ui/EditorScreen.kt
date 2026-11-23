@@ -126,7 +126,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.R
+import com.zamalfajji.zamlab.R
 import com.example.editor.EditorUiState
 import com.example.editor.EditorViewModel
 import com.example.editor.ExportFormat
