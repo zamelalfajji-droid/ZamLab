@@ -73,3 +73,13 @@ still need a lot of  work to do this just the start
 * **Color-Accurate Darkroom UI:** Upgraded the workspace to a neutral **Calibrated Charcoal (`#121316`)** background with elevated graphite panels and **Cinema Amber (`#F5A623`)** active accents for accurate color judgment.
 * **Custom Monochrome Vector Icons:** Replaced generic icons across the top toolbar, adjustment tiles, and floating capsule dock with crisp custom-drawn stroke vector icons.
 
+## What's New in ZamLab v1.2.2
+
+* **Clipping Warning Overlays:** Live highlight and shadow clipping indicators so you can protect bright skies and deep shadows while editing.
+* **Rebuilt Real-Time OpenGL Pipeline & Live Histogram:** Smooth, lag-free slider scrubbing with physically accurate linear exposure, white balance, soft highlight roll-off, multi-pixel spatial detail (Texture, Clarity, Dehaze, Sharpen), and real-time RGB histogram updates.
+* **Redesigned `All` Parameters Tab & Save Recipe:** Adaptive split-screen workspace with a draggable handle, quick category jump pills, an **Edited Only** filter, and **Save Recipe** to save your custom edits as reusable presets in the LUTs tab.
+* **Universal Double-Tap-to-Reset:** Double-tap any slider, numeric readout, color wheel, or tool icon across the entire app to reset that individual setting with light haptic feedback.
+* **Explicit Apply Crop & Reset Workflow:** Dedicated **Apply Crop** and **Reset Crop** buttons for an instant cropped preview while keeping full non-destructive re-cropping anytime.
+* **Android Share Sheet & "Open With" Support:** Share or open photos directly into ZamLab from your phone's Gallery, Google Photos, or file manager.
+* **Multi-Format Import & 4-Format Export Studio:** Import DNG RAW, HEIC, TIFF, WebP, PNG, and JPG photos, and export full-resolution **JPG**, **Lossless PNG**, **WebP**, or **Print-Ready PDF** with a one-tap post-export Share toast.
+* **360dp Responsive Polish & Stability:** Optimized layout spacing for compact screens and improved memory/URI safety for crash-free editing and exporting.
