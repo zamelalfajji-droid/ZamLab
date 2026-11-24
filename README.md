@@ -83,3 +83,41 @@ still need a lot of  work to do this just the start
 * **Android Share Sheet & "Open With" Support:** Share or open photos directly into ZamLab from your phone's Gallery, Google Photos, or file manager.
 * **Multi-Format Import & 4-Format Export Studio:** Import DNG RAW, HEIC, TIFF, WebP, PNG, and JPG photos, and export full-resolution **JPG**, **Lossless PNG**, **WebP**, or **Print-Ready PDF** with a one-tap post-export Share toast.
 * **360dp Responsive Polish & Stability:** Optimized layout spacing for compact screens and improved memory/URI safety for crash-free editing and exporting.
+
+v 1.3.0
+
+
+Here is everything included in this update:
+
+1. Rebranded to Z-Effect
+Updated the app name to Z-Effect across strings.xml, AndroidManifest.xml, Gradle/project metadata, and native C++ engine labels while keeping your internal Kotlin package (com.zamalfajji.zamlab) intact so builds and workflows stay compatible.
+
+Updated exported file prefixes to Z-Effect_* and output folders to Pictures/Z-Effect and Downloads/Z-Effect.
+
+2. Offline AI Object Removal (Spot Heal / migan_pipeline_v2.onnx)
+Integrated ONNX Runtime (com.microsoft.onnxruntime:onnxruntime-android 1.32.0) with lazy extraction of migan_pipeline_v2.onnx into cacheDir/onnx/ and XNNPACK/CPU execution, keeping zero internet permissions.
+
+Fixed black-smudge and high-contrast border artifacts by inspecting inputInfo/outputInfo tensor formats dynamically, expanding the MI-GAN context crop by 64px with 4px mask dilation, and restricting the preview fallback solver to interior gradient pixels with 8px boundary feathering.
+
+3. Native OpenGL ES 3.0 Masking Engine (MASKS Tab)
+Built modular GLSL ES 3.00 (#version 300 es) masking shaders (MaskShaderCommon.kt, MaskSubMaskShaders.kt, GuidedFilterShaders.kt, MaskLocalAdjustShader.kt, MaskRubylithOverlayShader.kt).
+
+Added Guided Image Filter edge-snap feathering, Luminance Range (Rec. 709) and Color Range (CIELAB + eyedropper) parametric masks, resolution-independent UV vector brushes, Linear/Radial gradients with draggable handles, Boolean sub-mask operations (Add, Subtract, Intersect), and a real-time Rubylith red overlay (O shortcut) connected to 8 local adjustments.
+
+4. Offline 2× & 4× AI Super-Resolution (UPSCALE Tab)
+Added the UPSCALE tab right next to ALL (LocalUpscaleEngine.kt + UpscalePanel.kt) with 2× and 4× scaling, pixel/megapixel target readout, progress bar, and single-step Undo/Redo.
+
+Uses overlapping 256×256 tiles with 16px feathering via realesrgan_x2.onnx (falling back to multi-pass Lanczos3 + unsharp detail sharpening when no ONNX model is bundled).
+
+5. Non-Destructive RAW/Photo Noise Reduction (DENOISE Tab)
+Added the DENOISE tab next to UPSCALE (LocalDenoiseEngine.kt + DenoisePanel.kt) with one-tap presets (Off, Subtle, Natural, High ISO / Night, AI Clean), 5 sliders (Luminance, Detail, Contrast, Color, Smoothness), press-and-hold Before/After split comparison, and optional tiled nafnet_denoise.onnx / scunet_denoise.onnx support.
+
+6. Composition Grid Overlays (Grid Button & Crop Panel)
+Added a Grid toggle button in the floating utility pill below the photo and inside the Crop panel (CompositionGrid.kt + CompositionGridOverlay.kt) with crisp dual-stroke lines that never bake into exports.
+
+Supports Rule of Thirds (3×3), Square/Alignment (8×8), Golden Ratio (Phi), Fibonacci Spiral (with 4-corner Flip), Dynamic Symmetry, and Center Crosshair & Safe Zones (90% Action / 80% Title).
+
+7. Unified OLED Studio Precision Ruler-Dial UI
+Upgraded the palette to true OLED black (#000000), elevated charcoal (#121214) pills with 1dp (#242428) borders, and warm amber-gold (#F5A623) active highlights.
+
+Replaced plain slider bars across Adjust, All, Denoise, Masks, LUTs, Crop, and Color with tactile tick-mark ruler dials, tabular monospace readouts, haptic tick detents, and double-tap zero reset, plus a unified floating utility pill (Touch Adjust, Histogram, Info HUD, Mask Overlay, Grid).
