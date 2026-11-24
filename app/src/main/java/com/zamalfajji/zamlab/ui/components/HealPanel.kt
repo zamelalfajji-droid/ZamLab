@@ -422,7 +422,8 @@ fun HealPanel(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 2.dp),
+                    .padding(vertical = 2.dp)
+                    .testTag("heal_panel_progress"),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) {
@@ -433,7 +434,11 @@ fun HealPanel(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Applying offline ${healMode.label.lowercase()}…",
+                    text = if (healMode == HealMode.SPOT_HEAL) {
+                        stringResource(R.string.heal_processing_ai_spot)
+                    } else {
+                        stringResource(R.string.heal_processing_generic, healMode.label.lowercase())
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = StudioTextSecondary
                 )

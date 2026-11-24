@@ -61,6 +61,9 @@ android {
     compose = true
     buildConfig = true
   }
+  androidResources {
+    noCompress += "onnx"
+  }
   testOptions {
     unitTests {
       isIncludeAndroidResources = true
@@ -122,6 +125,7 @@ dependencies {
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.onnxruntime.android)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

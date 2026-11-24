@@ -46,6 +46,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
 private const val TAG = "EditorViewModel"
+private const val DEFAULT_LUT_INTENSITY = 1.0f
 
 enum class StudioTab {
     ADJUST,
@@ -112,7 +113,8 @@ data class EditorSnapshot(
     val gradingParams: GradingParams,
     val selectedLutId: String?,
     val healStrokes: List<HealStroke>,
-    val label: String
+    val label: String,
+    val selectedUserPresetId: String? = null
 )
 
 data class CopiedEdits(
@@ -274,8 +276,10 @@ class EditorViewModel(
     private var profileThumbJob: Job? = null
     private var userPresetThumbJob: Job? = null
     private var histPrepareJob: Job? = null
+    private var healJob: Job? = null
     private val photoGeneration = AtomicLong(0L)
     private val photoLoadRequestSeq = AtomicLong(0L)
+    private val lutSelectionSeq = AtomicLong(0L)
     private val hasExternalOrUserPhoto = AtomicBoolean(false)
     private val maskIdCounter = AtomicLong(0L)
     private var touchSwipeZone: TouchToneZone = TouchToneZone.MIDTONES
@@ -304,6 +308,8 @@ class EditorViewModel(
         userPresetThumbJob = null
         histPrepareJob?.cancel()
         histPrepareJob = null
+        healJob?.cancel()
+        healJob = null
 
         val toRecycle = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
         toRecycle.addAll(thumbnailCache.values)
@@ -823,13 +829,13 @@ class EditorViewModel(
         return if (xmp != null) {
             ColorGradingEngine.processFullResolution(
                 thumbBase,
-                GradingParams.fromXmpSettings(xmp, 0.75f),
+                GradingParams.fromXmpSettings(xmp, DEFAULT_LUT_INTENSITY),
                 null
             )
         } else {
             ColorGradingEngine.processFullResolution(
                 thumbBase,
-                GradingParams(lutIntensity = 0.75f),
+                GradingParams(lutIntensity = DEFAULT_LUT_INTENSITY),
                 lut
             )
         }
@@ -843,7 +849,8 @@ class EditorViewModel(
             gradingParams = state.gradingParams,
             selectedLutId = state.selectedLutId,
             healStrokes = state.healStrokes,
-            label = label
+            label = label,
+            selectedUserPresetId = state.selectedUserPresetId
         )
     }
 
@@ -869,6 +876,8 @@ class EditorViewModel(
 
     fun openPhotoFromUri(uri: Uri) {
         hasExternalOrUserPhoto.set(true)
+        healJob?.cancel()
+        healJob = null
         val requestToken = photoLoadRequestSeq.incrementAndGet()
         viewModelScope.launch {
             val ctx = getApplication<Application>()
@@ -973,6 +982,8 @@ class EditorViewModel(
      */
     fun openIncomingPhotoFromIntent(uri: Uri) {
         hasExternalOrUserPhoto.set(true)
+        healJob?.cancel()
+        healJob = null
         val requestToken = photoLoadRequestSeq.incrementAndGet()
         viewModelScope.launch {
             val ctx = getApplication<Application>()
@@ -1065,11 +1076,13 @@ class EditorViewModel(
     }
 
     fun importCubeLutFromUri(uri: Uri) {
+        val seq = lutSelectionSeq.incrementAndGet()
         viewModelScope.launch {
             val ctx = getApplication<Application>()
             runCatching {
                 LutImporter.importFromUri(ctx, uri)
             }.onSuccess { summary ->
+                if (lutSelectionSeq.get() != seq) return@launch
                 val newDescriptors = summary.importedLuts.map { lut ->
                     parsedLutCache[lut.id] = lut
                     val desc = PresetDescriptor(
@@ -1102,16 +1115,14 @@ class EditorViewModel(
                         descriptors = allDescriptors,
                         previousExpanded = previouslyExpanded
                     )
-                    val xmp = firstLut.xmpSettings
-                    val updatedParams = if (xmp != null) {
-                        GradingParams.fromXmpSettings(xmp, 0.75f).copy(
-                            profileId = state.gradingParams.profileId,
-                            profileAmount = state.gradingParams.profileAmount,
-                            crop = state.gradingParams.crop
-                        )
-                    } else {
-                        state.gradingParams.copy(lutIntensity = 0.75f)
-                    }
+                    val updatedParams = buildReplacedLutParams(
+                        currentParams = state.gradingParams,
+                        previousLut = state.activeLut,
+                        nextLut = firstLut,
+                        targetIntensity = DEFAULT_LUT_INTENSITY
+                    )
+                    // Clear previous active LUT from grading pipeline before applying the imported LUT
+                    gradingInput.value = updatedParams.copy(lutIntensity = 0f) to null
                     gradingInput.value = updatedParams to firstLut
                     val statusMsg = if (summary.importedLuts.size == 1) {
                         val fmt = firstLut.sourceFormat.name
@@ -1124,6 +1135,7 @@ class EditorViewModel(
                             lutFolders = updatedFolders,
                             selectedLutId = firstLut.id,
                             activeLut = firstLut,
+                            selectedUserPresetId = null,
                             gradingParams = updatedParams,
                             activeTab = StudioTab.LUTS,
                             statusBannerMessage = statusMsg
@@ -1149,6 +1161,8 @@ class EditorViewModel(
 
     fun deleteCustomLut(lutId: String) {
         viewModelScope.launch {
+            val removingActive = _uiState.value.selectedLutId == lutId
+            val removedLut = parsedLutCache[lutId] ?: if (removingActive) _uiState.value.activeLut else null
             LutImporter.deleteCustomLut(getApplication(), lutId)
             descriptorById.remove(lutId)
             parsedLutCache.remove(lutId)
@@ -1166,13 +1180,26 @@ class EditorViewModel(
                         )
                     }
                 }
-                val nextSelectedId = if (state.selectedLutId == lutId) null else state.selectedLutId
-                val nextLut = nextSelectedId?.let { parsedLutCache[it] }
-                gradingInput.value = state.gradingParams to nextLut
+                val wasActive = state.selectedLutId == lutId
+                val nextSelectedId = if (wasActive) null else state.selectedLutId
+                val nextLut = if (wasActive) null else nextSelectedId?.let { parsedLutCache[it] }
+                val nextParams = if (wasActive) {
+                    buildReplacedLutParams(
+                        currentParams = state.gradingParams,
+                        previousLut = removedLut ?: state.activeLut,
+                        nextLut = null,
+                        targetIntensity = DEFAULT_LUT_INTENSITY
+                    )
+                } else {
+                    state.gradingParams
+                }
+                gradingInput.value = nextParams to nextLut
                 state.copy(
                     lutFolders = updatedFolders,
                     selectedLutId = nextSelectedId,
                     activeLut = nextLut,
+                    selectedUserPresetId = if (wasActive) null else state.selectedUserPresetId,
+                    gradingParams = nextParams,
                     statusBannerMessage = "Removed custom preset"
                 )
             }
@@ -1301,7 +1328,9 @@ class EditorViewModel(
     fun applyUserPreset(presetId: String) {
         val currentState = _uiState.value
         val preset = currentState.userPresets.firstOrNull { it.id == presetId } ?: return
+        val seq = lutSelectionSeq.incrementAndGet()
         viewModelScope.launch {
+            if (lutSelectionSeq.get() != seq) return@launch
             val ctx = getApplication<Application>()
             val lid = preset.lutId
             val resolvedLut = if (lid != null) {
@@ -2295,7 +2324,8 @@ class EditorViewModel(
             GradingParams.fromXmpSettings(activeXmp, clamped).copy(
                 profileId = currentState.gradingParams.profileId,
                 profileAmount = currentState.gradingParams.profileAmount,
-                crop = currentState.gradingParams.crop
+                crop = currentState.gradingParams.crop,
+                masks = currentState.gradingParams.masks
             )
         } else {
             currentState.gradingParams.copy(lutIntensity = clamped)
@@ -2307,73 +2337,142 @@ class EditorViewModel(
         _uiState.update { syncHistoryFlags(it.copy(gradingParams = updated)) }
     }
 
+    private fun buildReplacedLutParams(
+        currentParams: GradingParams,
+        previousLut: CubeLut?,
+        nextLut: CubeLut?,
+        targetIntensity: Float
+    ): GradingParams {
+        val curProfileId = currentParams.profileId
+        val curProfileAmount = currentParams.profileAmount
+        val curCrop = currentParams.crop
+        val curMasks = currentParams.masks
+        return when {
+            nextLut?.xmpSettings != null -> {
+                GradingParams.fromXmpSettings(nextLut.xmpSettings, targetIntensity).copy(
+                    profileId = curProfileId,
+                    profileAmount = curProfileAmount,
+                    crop = curCrop,
+                    masks = curMasks
+                )
+            }
+            previousLut?.xmpSettings != null -> {
+                GradingParams(
+                    profileId = curProfileId,
+                    profileAmount = curProfileAmount,
+                    crop = curCrop,
+                    masks = curMasks,
+                    lutIntensity = targetIntensity
+                )
+            }
+            else -> {
+                currentParams.copy(lutIntensity = targetIntensity)
+            }
+        }
+    }
+
     fun selectLut(lutId: String?) {
         val currentState = _uiState.value
-        if (lutId == currentState.selectedLutId) return
+        val seq = lutSelectionSeq.incrementAndGet()
 
-        if (lutId == null) {
-            applyResolvedLutSelection(null, null)
+        // Selecting "None" or tapping the currently active LUT again clears the active LUT cleanly
+        if (lutId == null || lutId == currentState.selectedLutId) {
+            if (currentState.selectedLutId == null &&
+                currentState.activeLut == null &&
+                currentState.selectedUserPresetId == null
+            ) {
+                return
+            }
+            applyResolvedLutSelection(lutId = null, selectedLut = null)
             return
         }
 
         val cached = parsedLutCache[lutId]
         if (cached != null) {
-            applyResolvedLutSelection(lutId, cached)
+            applyResolvedLutSelection(lutId = lutId, selectedLut = cached)
             return
         }
 
         val descriptor = descriptorById[lutId] ?: return
+        val preSwitchLabel = if (descriptor.sourceFormat == LutSourceFormat.XMP) {
+            "Preset: ${descriptor.title}"
+        } else {
+            "LUT: ${descriptor.title}"
+        }
+        val preSwitchSnapshot = captureCurrentSnapshot(preSwitchLabel)
+        val previousLut = currentState.activeLut
+        val previousParams = currentState.gradingParams
+        val clearedParams = buildReplacedLutParams(
+            currentParams = previousParams,
+            previousLut = previousLut,
+            nextLut = null,
+            targetIntensity = DEFAULT_LUT_INTENSITY
+        )
+        // Immediately clear previously active LUT from the color grading pipeline while loading next LUT
+        gradingInput.value = clearedParams to null
+        _uiState.update {
+            it.copy(
+                selectedLutId = lutId,
+                activeLut = null,
+                selectedUserPresetId = null,
+                gradingParams = clearedParams
+            )
+        }
+
         viewModelScope.launch {
             val ctx = getApplication<Application>()
             val loaded = runCatching {
                 LutImporter.loadPreset(ctx, descriptor, bakeXmpTable = false)
             }.onFailure { err ->
                 Log.e(TAG, "Failed to load preset $lutId", err)
-            }.getOrNull() ?: return@launch
+            }.getOrNull()
+
+            if (lutSelectionSeq.get() != seq) return@launch
+
+            if (loaded == null) {
+                if (preSwitchSnapshot != null) {
+                    restoreSnapshot(preSwitchSnapshot)
+                }
+                return@launch
+            }
 
             parsedLutCache[lutId] = loaded
-            applyResolvedLutSelection(lutId, loaded)
+            applyResolvedLutSelection(
+                lutId = lutId,
+                selectedLut = loaded,
+                snapshotOverride = preSwitchSnapshot,
+                previousLutOverride = previousLut,
+                previousParamsOverride = previousParams
+            )
         }
     }
 
-    private fun applyResolvedLutSelection(lutId: String?, selectedLut: CubeLut?) {
+    private fun applyResolvedLutSelection(
+        lutId: String?,
+        selectedLut: CubeLut?,
+        snapshotOverride: EditorSnapshot? = null,
+        previousLutOverride: CubeLut? = null,
+        previousParamsOverride: GradingParams? = null
+    ) {
         val currentState = _uiState.value
-        if (lutId == currentState.selectedLutId && selectedLut === currentState.activeLut) return
-
         val label = selectedLut?.let {
             if (it.sourceFormat == LutSourceFormat.XMP) "Preset: ${it.title}" else "LUT: ${it.title}"
         } ?: "LUT: Off"
-        pushUndoSnapshot(captureCurrentSnapshot(label))
+        pushUndoSnapshot(snapshotOverride ?: captureCurrentSnapshot(label))
 
-        val targetIntensity = if (lutId != null) {
-            0.75f
-        } else {
-            currentState.gradingParams.lutIntensity
+        val baseParams = previousParamsOverride ?: currentState.gradingParams
+        val prevLut = previousLutOverride ?: currentState.activeLut
+        val updatedParams = buildReplacedLutParams(
+            currentParams = baseParams,
+            previousLut = prevLut,
+            nextLut = selectedLut,
+            targetIntensity = DEFAULT_LUT_INTENSITY
+        )
+
+        // Ensure the previously active LUT is cleared from the grading pipeline before applying the new LUT
+        if (currentState.activeLut != null && selectedLut != null && currentState.activeLut !== selectedLut) {
+            gradingInput.value = updatedParams.copy(lutIntensity = 0f) to null
         }
-
-        val curProfileId = currentState.gradingParams.profileId
-        val curProfileAmount = currentState.gradingParams.profileAmount
-        val curCrop = currentState.gradingParams.crop
-        val updatedParams = when {
-            selectedLut?.xmpSettings != null -> {
-                GradingParams.fromXmpSettings(selectedLut.xmpSettings, targetIntensity).copy(
-                    profileId = curProfileId,
-                    profileAmount = curProfileAmount,
-                    crop = curCrop
-                )
-            }
-            lutId == null && currentState.activeLut?.xmpSettings != null -> {
-                GradingParams(
-                    profileId = curProfileId,
-                    profileAmount = curProfileAmount,
-                    crop = curCrop
-                )
-            }
-            else -> {
-                currentState.gradingParams.copy(lutIntensity = targetIntensity)
-            }
-        }
-
         gradingInput.value = updatedParams to selectedLut
         _uiState.update {
             syncHistoryFlags(
@@ -2440,7 +2539,9 @@ class EditorViewModel(
 
     fun pasteEdits() {
         val clipboard = copiedEdits ?: return
+        val seq = lutSelectionSeq.incrementAndGet()
         viewModelScope.launch {
+            if (lutSelectionSeq.get() != seq) return@launch
             val targetId = clipboard.selectedLutId
             val resolvedLut = if (targetId != null) {
                 parsedLutCache[targetId] ?: descriptorById[targetId]?.let { desc ->
@@ -2475,6 +2576,8 @@ class EditorViewModel(
     }
 
     fun resetAllAdjustments() {
+        if (_uiState.value.isHealProcessing) return
+        lutSelectionSeq.incrementAndGet()
         val currentState = _uiState.value
         if (currentState.gradingParams.isDefault && currentState.selectedLutId == null) {
             _uiState.update { it.copy(viewportResetToken = it.viewportResetToken + 1L) }
@@ -2505,6 +2608,8 @@ class EditorViewModel(
     }
 
     fun undo() {
+        if (_uiState.value.isHealProcessing) return
+        lutSelectionSeq.incrementAndGet()
         val target = undoStack.removeLastOrNull() ?: return
         val current = captureCurrentSnapshot(target.label)
         if (current != null) {
@@ -2514,6 +2619,8 @@ class EditorViewModel(
     }
 
     fun redo() {
+        if (_uiState.value.isHealProcessing) return
+        lutSelectionSeq.incrementAndGet()
         val target = redoStack.removeLastOrNull() ?: return
         val current = captureCurrentSnapshot(target.label)
         if (current != null) {
@@ -2563,6 +2670,7 @@ class EditorViewModel(
                         gradingParams = snapshot.gradingParams,
                         selectedLutId = resolvedLutId,
                         activeLut = resolvedLut,
+                        selectedUserPresetId = snapshot.selectedUserPresetId,
                         healStrokes = snapshot.healStrokes,
                         activeHealStroke = null,
                         isHealProcessing = false,
@@ -2582,6 +2690,7 @@ class EditorViewModel(
                         gradingParams = snapshot.gradingParams,
                         selectedLutId = resolvedLutId,
                         activeLut = resolvedLut,
+                        selectedUserPresetId = snapshot.selectedUserPresetId,
                         healStrokes = snapshot.healStrokes,
                         activeHealStroke = null,
                         isHealProcessing = false,
@@ -2726,12 +2835,23 @@ class EditorViewModel(
             return
         }
 
+        val expectedPhotoGen = photoGeneration.get()
         _uiState.update { it.copy(isHealProcessing = true) }
 
-        viewModelScope.launch {
+        healJob?.cancel()
+        healJob = viewModelScope.launch {
+            var healedBitmap: Bitmap? = null
             try {
-                val healedBitmap = withContext(Dispatchers.Default) {
-                    OfflineHealEngine.applyStroke(source, mappedStroke)
+                val appContext = getApplication<Application>()
+                healedBitmap = withContext(Dispatchers.Default) {
+                    OfflineHealEngine.applyStroke(source, mappedStroke, appContext)
+                }
+                if (photoGeneration.get() != expectedPhotoGen) {
+                    if (healedBitmap !== source && !healedBitmap.isRecycled) {
+                        healedBitmap.recycle()
+                    }
+                    _uiState.update { it.copy(activeHealStroke = null, isHealProcessing = false) }
+                    return@launch
                 }
                 val latestState = _uiState.value
                 pushUndoSnapshot(captureCurrentSnapshot("Heal: ${mappedStroke.mode.label}"))
@@ -2749,6 +2869,10 @@ class EditorViewModel(
                     nextHealStrokes = nextStrokes
                 )
             } catch (e: CancellationException) {
+                if (healedBitmap != null && healedBitmap !== source && !healedBitmap.isRecycled) {
+                    healedBitmap.recycle()
+                }
+                _uiState.update { it.copy(activeHealStroke = null, isHealProcessing = false) }
                 throw e
             } catch (oom: OutOfMemoryError) {
                 Log.e(TAG, "Offline heal stroke ran out of memory", oom)
@@ -2773,6 +2897,7 @@ class EditorViewModel(
     }
 
     fun undoHealStroke() {
+        if (_uiState.value.isHealProcessing) return
         val currentBitmap = fullSourceBitmap.value ?: return
         val previous = healUndoStack.removeLastOrNull() ?: return
         val currentStrokes = _uiState.value.healStrokes
@@ -2792,6 +2917,7 @@ class EditorViewModel(
     }
 
     fun redoHealStroke() {
+        if (_uiState.value.isHealProcessing) return
         val currentBitmap = fullSourceBitmap.value ?: return
         val next = healRedoStack.removeLastOrNull() ?: return
         val currentStrokes = _uiState.value.healStrokes
@@ -2811,6 +2937,7 @@ class EditorViewModel(
     }
 
     fun resetHeal() {
+        if (_uiState.value.isHealProcessing) return
         val initial = initialPhotoSourceBitmap ?: return
         val state = _uiState.value
         if (!state.hasHealEdits && fullSourceBitmap.value === initial) return
@@ -2933,8 +3060,9 @@ class EditorViewModel(
                 if (decoded != null) {
                     decodedNative = decoded
                     if (healStrokes.isNotEmpty()) {
+                        val appContext = getApplication<Application>()
                         val healed = withContext(Dispatchers.Default) {
-                            OfflineHealEngine.applyAllStrokes(decoded, healStrokes)
+                            OfflineHealEngine.applyAllStrokes(decoded, healStrokes, appContext)
                         }
                         healedNative = healed
                         healed

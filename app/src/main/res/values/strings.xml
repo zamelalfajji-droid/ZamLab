@@ -64,11 +64,15 @@
     <string name="badge_original">Original</string>
     <string name="cd_shadow_clipping_toggle">Toggle shadow clipping warning overlay</string>
     <string name="cd_highlight_clipping_toggle">Toggle highlight clipping warning overlay</string>
-    <string name="lut_none_label">Original</string>
+    <string name="lut_none_label">None</string>
     <string name="lut_strength_label">LUT Strength</string>
     <string name="preset_strength_label">Preset Strength</string>
     <string name="lut_my_presets_tab">My Presets</string>
     <string name="lut_action_save">Save</string>
     <string name="lut_action_import">Import</string>
     <string name="lut_empty_my_presets">Tap Save to store your current look as a reusable preset.</string>
+    <string name="heal_processing_ai_spot">Running offline AI object removal…</string>
+    <string name="heal_processing_generic">Applying offline %1$s…</string>
+    <string name="heal_badge_removing_object">Removing object…</string>
+    <string name="heal_badge_healing">Healing…</string>
 </resources>

@@ -1116,7 +1116,9 @@ fun PhotoViewport(
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = StudioSurfaceElevated.copy(alpha = 0.94f),
-                    modifier = Modifier.border(1.dp, StudioCyan, RoundedCornerShape(20.dp))
+                    modifier = Modifier
+                        .border(1.dp, StudioCyan, RoundedCornerShape(20.dp))
+                        .testTag("heal_canvas_progress")
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -1129,7 +1131,11 @@ fun PhotoViewport(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "Healing…",
+                            text = if (healMode == HealMode.SPOT_HEAL) {
+                                stringResource(R.string.heal_badge_removing_object)
+                            } else {
+                                stringResource(R.string.heal_badge_healing)
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = StudioTextPrimary
                         )

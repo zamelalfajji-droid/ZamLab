@@ -1,5 +1,6 @@
 package com.zamalfajji.zamlab.editor
-import com.zamalfajji.zamlab.nativebridge.NativeBridge
+
+import android.content.Context
 import android.graphics.Bitmap
 import androidx.compose.runtime.Immutable
 import androidx.core.graphics.createBitmap
@@ -53,7 +54,8 @@ object OfflineHealEngine {
 
     fun applyStroke(
         sourceBitmap: Bitmap,
-        stroke: HealStroke
+        stroke: HealStroke,
+        context: Context? = null
     ): Bitmap {
         if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
             throw IllegalStateException("Source image unavailable for healing.")
@@ -64,21 +66,7 @@ object OfflineHealEngine {
         }
         return when (stroke.mode) {
             HealMode.SPOT_HEAL -> {
-                if (NativeBridge.isAvailable) {
-                    val out = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
-                    try {
-                        val radiusPx = (stroke.radiusNorm * maxOf(out.width, out.height)).toInt().coerceAtLeast(2)
-                        for ((nx, ny) in stroke.points) {
-                            val cx = (nx * out.width).toInt().coerceIn(0, out.width - 1)
-                            val cy = (ny * out.height).toInt().coerceIn(0, out.height - 1)
-                            NativeBridge.healSpotNative(out, cx, cy, radiusPx)
-                        }
-                        return out
-                    } catch (_: UnsatisfiedLinkError) {
-                        if (!out.isRecycled) out.recycle()
-                    }
-                }
-                LocalInpaintingEngine.inpaint(sourceBitmap, listOf(stroke))
+                LocalInpaintingEngine.inpaint(sourceBitmap, listOf(stroke), context)
             }
 
             HealMode.CLONE_STAMP -> applyCloneStamp(sourceBitmap, stroke)
@@ -88,14 +76,15 @@ object OfflineHealEngine {
 
     fun applyAllStrokes(
         originalSourceBitmap: Bitmap,
-        strokes: List<HealStroke>
+        strokes: List<HealStroke>,
+        context: Context? = null
     ): Bitmap {
         if (originalSourceBitmap.isRecycled || originalSourceBitmap.width <= 0 || originalSourceBitmap.height <= 0) {
             throw IllegalStateException("Source image unavailable for healing.")
         }
         var current = originalSourceBitmap
         for (stroke in strokes) {
-            val next = applyStroke(current, stroke)
+            val next = applyStroke(current, stroke, context)
             if (current !== originalSourceBitmap && current !== next && !current.isRecycled) {
                 current.recycle()
             }

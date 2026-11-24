@@ -1,9 +1,20 @@
 package com.zamalfajji.zamlab.ai
 
+import ai.onnxruntime.OnnxJavaType
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
+import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
+import androidx.annotation.VisibleForTesting
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
 import com.zamalfajji.zamlab.editor.HealStroke
+import java.io.File
+import java.io.FileNotFoundException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.exp
@@ -15,23 +26,65 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * Offline, structure-aware object removal engine with strict pixel preservation:
+ * 100% offline AI + algorithmic object removal engine with strict pixel preservation:
  *
- * 1. Crops a padded square bounding box around the masked object directly from the full-resolution
- *    photograph (never re-encoding or blurring pixels outside the brush mask).
- * 2. Runs a 3-level coarse-to-fine Directional Edge-Aware PatchMatch (comparing both RGB color and
- *    horizontal/vertical luminance gradients so cobblestones, walls, and lines stay crisp) +
- *    sharpened exemplar transfer.
- * 3. Solves a Red-Black Gauss-Seidel SOR Poisson gradient-domain seamless blend anchored to the
- *    exact surrounding unmasked pixels so shadows and lighting match smoothly.
- * 4. Composites only the synthesized masked area back onto the original full-resolution bitmap
- *    using a smooth 3-pixel alpha feather around the mask boundary, keeping 100% of surrounding
- *    pixels untouched and razor-sharp.
+ * - Primary backend (when `app/src/main/assets/migan_pipeline_v2.onnx` is present):
+ *   Lazily loads `migan_pipeline_v2.onnx` on the first Heal stroke using ONNX Runtime
+ *   (`onnxruntime-android`) with NNAPI / XNNPACK hardware acceleration.
+ *   Inputs:
+ *   - `image`: uint8 `[1, 3, H, W]` RGB
+ *   - `mask`: uint8 `[1, 1, H, W]` (`255 = keep`, `0 = remove/fill`)
+ *   Output:
+ *   - `result`: uint8 `[1, 3, H, W]` RGB
+ *
+ * - Automatic fallback backend (when `.onnx` asset is absent or unavailable):
+ *   3-level coarse-to-fine Directional Edge-Aware PatchMatch + Red-Black SOR Poisson
+ *   gradient-domain seamless blend.
+ *
+ * Both backends crop around the masked region and strictly preserve 100% of unmasked
+ * pixels (`alpha == 0`) bit-for-bit, feathering only across a 3px mask boundary.
  */
 object LocalInpaintingEngine {
 
+    private const val TAG = "LocalInpaintingEngine"
+    const val MODEL_ASSET_NAME = "migan_pipeline_v2.onnx"
+    const val ONNX_INPUT_IMAGE = "image"
+    const val ONNX_INPUT_MASK = "mask"
+    const val ONNX_OUTPUT_RESULT = "result"
+
+    private const val ONNX_MIN_CROP_SIDE = 512
+    private const val ONNX_MAX_WORK_DIM = 768
     private const val CROP_WORK_MAX_DIM = 448
     private const val BOUNDARY_FEATHER_PX = 3.0f
+
+    enum class InpaintBackend {
+        ONNX_MIGAN,
+        ALGORITHMIC_FALLBACK
+    }
+
+    data class InpaintResult(
+        val bitmap: Bitmap,
+        val backend: InpaintBackend,
+        val accelerationProvider: String? = null
+    )
+
+    private val sessionLock = Any()
+    private val inferenceLock = Any()
+
+    @Volatile
+    private var ortEnv: OrtEnvironment? = null
+
+    @Volatile
+    private var ortSession: OrtSession? = null
+
+    @Volatile
+    private var activeAccelerationLabel: String? = null
+
+    @Volatile
+    private var modelLoadAttempted = false
+
+    @Volatile
+    private var modelAssetPresent: Boolean? = null
 
     private class PyramidLevel(
         val width: Int,
@@ -44,10 +97,204 @@ object LocalInpaintingEngine {
         val mask: BooleanArray
     )
 
+    fun isModelLoaded(): Boolean = ortSession != null
+
+    fun activeAcceleration(): String? = activeAccelerationLabel
+
+    fun isModelAssetPresent(context: Context): Boolean {
+        modelAssetPresent?.let { return it }
+        val appCtx = context.applicationContext ?: context
+        val present = try {
+            appCtx.assets.open(MODEL_ASSET_NAME).use { true }
+        } catch (_: FileNotFoundException) {
+            false
+        } catch (_: Throwable) {
+            false
+        }
+        modelAssetPresent = present
+        return present
+    }
+
+    @VisibleForTesting
+    internal fun resetOnnxStateForTests() {
+        synchronized(sessionLock) {
+            runCatching { ortSession?.close() }
+            ortSession = null
+            activeAccelerationLabel = null
+            modelLoadAttempted = false
+            modelAssetPresent = null
+        }
+    }
+
+    private fun ensureOnnxSession(context: Context?): OrtSession? {
+        if (context == null) return null
+        ortSession?.let { return it }
+        if (modelLoadAttempted && modelAssetPresent == false) return null
+
+        synchronized(sessionLock) {
+            ortSession?.let { return it }
+            if (modelLoadAttempted && modelAssetPresent == false) return null
+
+            val appCtx = context.applicationContext ?: context
+            if (!isModelAssetPresent(appCtx)) {
+                modelLoadAttempted = true
+                Log.i(TAG, "$MODEL_ASSET_NAME not present in assets; using algorithmic inpainting fallback.")
+                return null
+            }
+
+            return try {
+                val cachedModelFile = extractAssetModelIfNeeded(appCtx)
+                    ?: run {
+                        modelLoadAttempted = true
+                        return null
+                    }
+                val env = ortEnv ?: OrtEnvironment.getEnvironment().also { ortEnv = it }
+                val (session, accelLabel) = createAcceleratedSession(env, cachedModelFile)
+                ortSession = session
+                activeAccelerationLabel = accelLabel
+                modelLoadAttempted = true
+                Log.i(TAG, "Lazily initialized $MODEL_ASSET_NAME via ONNX Runtime ($accelLabel)")
+                session
+            } catch (t: Throwable) {
+                modelLoadAttempted = true
+                Log.w(TAG, "Failed to initialize ONNX Runtime for $MODEL_ASSET_NAME; falling back to algorithmic inpainting", t)
+                null
+            }
+        }
+    }
+
+    private fun extractAssetModelIfNeeded(context: Context): File? {
+        val onnxDir = File(context.cacheDir, "onnx").apply { mkdirs() }
+        val targetFile = File(onnxDir, MODEL_ASSET_NAME)
+        val expectedAssetLen = runCatching {
+            context.assets.openFd(MODEL_ASSET_NAME).use { it.length }
+        }.getOrNull()?.takeIf { it > 0L }
+
+        if (targetFile.exists() && targetFile.length() > 0L &&
+            (expectedAssetLen == null || targetFile.length() == expectedAssetLen)
+        ) {
+            return targetFile
+        }
+
+        val tempFile = File(onnxDir, "$MODEL_ASSET_NAME.tmp")
+        context.assets.open(MODEL_ASSET_NAME).use { input ->
+            tempFile.outputStream().use { output ->
+                input.copyTo(output, bufferSize = 64 * 1024)
+            }
+        }
+        if (tempFile.length() <= 0L) {
+            tempFile.delete()
+            return null
+        }
+        if (targetFile.exists()) targetFile.delete()
+        if (!tempFile.renameTo(targetFile)) {
+            tempFile.copyTo(targetFile, overwrite = true)
+            tempFile.delete()
+        }
+        return targetFile.takeIf { it.exists() && it.length() > 0L }
+    }
+
+    private fun createAcceleratedSession(
+        env: OrtEnvironment,
+        modelFile: File
+    ): Pair<OrtSession, String> {
+        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        val tiers = listOf(
+            Triple(true, true, "NNAPI+XNNPACK"),
+            Triple(false, true, "XNNPACK"),
+            Triple(true, false, "NNAPI"),
+            Triple(false, false, "CPU")
+        )
+        var lastError: Throwable? = null
+        for ((useNnapi, useXnnpack, label) in tiers) {
+            val opts = OrtSession.SessionOptions()
+            try {
+                opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                opts.setIntraOpNumThreads(threads)
+                runCatching { opts.addConfigEntry("session.intra_op.allow_spinning", "0") }
+                if (useXnnpack) {
+                    opts.addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+                }
+                if (useNnapi) {
+                    opts.addNnapi()
+                }
+                val session = env.createSession(modelFile.absolutePath, opts)
+                return session to label
+            } catch (t: Throwable) {
+                lastError = t
+                Log.w(TAG, "ONNX Runtime session creation with $label failed; trying next provider", t)
+            } finally {
+                runCatching { opts.close() }
+            }
+        }
+        throw lastError ?: IllegalStateException("Unable to initialize ONNX Runtime session.")
+    }
+
+    /**
+     * Packs ARGB [pixels] into a direct uint8 `[1, 3, H, W]` RGB buffer (`image`)
+     * and a direct uint8 `[1, 1, H, W]` mask buffer (`mask`, where `255 = keep` and `0 = remove/fill`).
+     */
+    internal fun packOnnxInputTensors(
+        pixels: IntArray,
+        removeMask: BooleanArray,
+        width: Int,
+        height: Int
+    ): Pair<ByteBuffer, ByteBuffer> {
+        val hw = width * height
+        require(width > 0 && height > 0 && pixels.size >= hw && removeMask.size >= hw) {
+            "Invalid tensor packing dimensions ${width}x${height} (pixels=${pixels.size}, mask=${removeMask.size})"
+        }
+        val imageBuf = ByteBuffer.allocateDirect(3 * hw).order(ByteOrder.nativeOrder())
+        val maskBuf = ByteBuffer.allocateDirect(hw).order(ByteOrder.nativeOrder())
+
+        for (i in 0 until hw) {
+            val px = pixels[i]
+            imageBuf.put(i, ((px ushr 16) and 0xFF).toByte())
+            imageBuf.put(hw + i, ((px ushr 8) and 0xFF).toByte())
+            imageBuf.put(2 * hw + i, (px and 0xFF).toByte())
+            // Contract: 255 = keep (unmasked), 0 = remove/fill (masked)
+            maskBuf.put(i, if (removeMask[i]) 0.toByte() else 0xFF.toByte())
+        }
+        imageBuf.rewind()
+        maskBuf.rewind()
+        return imageBuf to maskBuf
+    }
+
+    /**
+     * Unpacks a uint8 `[1, 3, H, W]` RGB `result` tensor buffer back into ARGB IntArray pixels.
+     */
+    internal fun unpackOnnxResultTensor(
+        resultBuffer: ByteBuffer,
+        width: Int,
+        height: Int
+    ): IntArray {
+        val hw = width * height
+        val buf = resultBuffer.duplicate()
+        val base = buf.position()
+        require(width > 0 && height > 0 && buf.remaining() >= 3 * hw) {
+            "Unexpected ONNX output byte count: remaining=${buf.remaining()}, expected=${3 * hw}"
+        }
+        return IntArray(hw) { i ->
+            val r = buf.get(base + i).toInt() and 0xFF
+            val g = buf.get(base + hw + i).toInt() and 0xFF
+            val b = buf.get(base + 2 * hw + i).toInt() and 0xFF
+            (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+    }
+
     fun inpaint(
         sourceBitmap: Bitmap,
-        strokes: List<HealStroke>
+        strokes: List<HealStroke>,
+        context: Context? = null
     ): Bitmap {
+        return inpaintWithResult(sourceBitmap, strokes, context).bitmap
+    }
+
+    fun inpaintWithResult(
+        sourceBitmap: Bitmap,
+        strokes: List<HealStroke>,
+        context: Context? = null
+    ): InpaintResult {
         if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
             throw IllegalStateException("Source image unavailable for healing.")
         }
@@ -73,22 +320,39 @@ object LocalInpaintingEngine {
             }
         }
         if (fullMaxX < fullMinX || fullMaxY < fullMinY) {
-            return sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            val copy = sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
                 ?: throw IllegalStateException("Unable to copy source bitmap.")
+            return InpaintResult(
+                bitmap = copy,
+                backend = InpaintBackend.ALGORITHMIC_FALLBACK
+            )
         }
 
-        // 2. Smart padded square bounding-box crop around the masked object
+        // 2. Lazily initialize ONNX Runtime session on first Heal stroke (if asset exists)
+        val onnxSession = ensureOnnxSession(context)
+
+        // 3. Smart padded square bounding-box crop around the masked object
         val holeW = fullMaxX - fullMinX + 1
         val holeH = fullMaxY - fullMinY + 1
         val holeSpan = max(holeW, holeH)
-        val pad = max(36, (holeSpan * 0.75f).roundToInt())
-        val targetSquareSide = holeSpan + pad * 2
+        val pad = if (onnxSession != null) {
+            max(64, (holeSpan * 1.0f).roundToInt())
+        } else {
+            max(36, (holeSpan * 0.75f).roundToInt())
+        }
+        val targetSquareSide = if (onnxSession != null) {
+            max(ONNX_MIN_CROP_SIDE, holeSpan + pad * 2)
+        } else {
+            holeSpan + pad * 2
+        }
         val halfSide = targetSquareSide / 2
         val centerX = fullMinX + holeW / 2
         val centerY = fullMinY + holeH / 2
 
-        val sqX0 = (centerX - halfSide).coerceIn(0, max(0, srcW - 1))
-        val sqY0 = (centerY - halfSide).coerceIn(0, max(0, srcH - 1))
+        val maxStartX = max(0, srcW - min(srcW, targetSquareSide))
+        val maxStartY = max(0, srcH - min(srcH, targetSquareSide))
+        val sqX0 = (centerX - halfSide).coerceIn(0, maxStartX)
+        val sqY0 = (centerY - halfSide).coerceIn(0, maxStartY)
         val sqX1 = (sqX0 + targetSquareSide - 1).coerceIn(sqX0, srcW - 1)
         val sqY1 = (sqY0 + targetSquareSide - 1).coerceIn(sqY0, srcH - 1)
         val sqW = sqX1 - sqX0 + 1
@@ -105,26 +369,18 @@ object LocalInpaintingEngine {
             fullMask[(sqY0 + ly) * srcW + (sqX0 + lx)] > 32
         }
 
-        // Operate at native 1:1 pixel resolution whenever crop fits cleanly; otherwise scale just the crop
-        val workScale = min(1f, CROP_WORK_MAX_DIM.toFloat() / max(sqW, sqH).toFloat())
+        val maxWorkDim = if (onnxSession != null) ONNX_MAX_WORK_DIM else CROP_WORK_MAX_DIM
+        val workScale = min(1f, maxWorkDim.toFloat() / max(sqW, sqH).toFloat())
         val workW = max(8, (sqW * workScale).roundToInt())
         val workH = max(8, (sqH * workScale).roundToInt())
         val workLen = workW * workH
 
-        val workR = FloatArray(workLen)
-        val workG = FloatArray(workLen)
-        val workB = FloatArray(workLen)
+        val workPixels = IntArray(workLen)
         val workMask = BooleanArray(workLen)
 
         if (workW == sqW && workH == sqH) {
-            val localOrig = cropOrigPixels
-            for (i in 0 until workLen) {
-                val px = localOrig[i]
-                workR[i] = ((px ushr 16) and 0xFF).toFloat()
-                workG[i] = ((px ushr 8) and 0xFF).toFloat()
-                workB[i] = (px and 0xFF).toFloat()
-                workMask[i] = cropOrigMask[i]
-            }
+            cropOrigPixels.copyInto(workPixels)
+            cropOrigMask.copyInto(workMask)
         } else {
             var cropSrcBmp: Bitmap? = null
             var scaledWorkBmp: Bitmap? = null
@@ -133,19 +389,13 @@ object LocalInpaintingEngine {
                     setPixels(cropOrigPixels, 0, sqW, 0, 0, sqW, sqH)
                 }
                 scaledWorkBmp = cropSrcBmp.scale(workW, workH)
-                val scaledPixels = IntArray(workLen)
-                scaledWorkBmp.getPixels(scaledPixels, 0, workW, 0, 0, workW, workH)
+                scaledWorkBmp.getPixels(workPixels, 0, workW, 0, 0, workW, workH)
                 for (wy in 0 until workH) {
                     val sy = ((wy + 0.5f) * sqH / workH).toInt().coerceIn(0, sqH - 1)
                     val rowOff = wy * workW
                     for (wx in 0 until workW) {
                         val sx = ((wx + 0.5f) * sqW / workW).toInt().coerceIn(0, sqW - 1)
-                        val idx = rowOff + wx
-                        val px = scaledPixels[idx]
-                        workR[idx] = ((px ushr 16) and 0xFF).toFloat()
-                        workG[idx] = ((px ushr 8) and 0xFF).toFloat()
-                        workB[idx] = (px and 0xFF).toFloat()
-                        workMask[idx] = cropOrigMask[sy * sqW + sx]
+                        workMask[rowOff + wx] = cropOrigMask[sy * sqW + sx]
                     }
                 }
             } finally {
@@ -159,23 +409,40 @@ object LocalInpaintingEngine {
             cropOrigPixels = null
         }
 
-        val baseLevel = PyramidLevel(
-            width = workW,
-            height = workH,
-            r = workR,
-            g = workG,
-            b = workB,
-            gx = FloatArray(workLen),
-            gy = FloatArray(workLen),
-            mask = workMask
-        )
-        recomputeGradients(baseLevel)
+        var usedBackend = InpaintBackend.ALGORITHMIC_FALLBACK
+        var usedAccel: String? = null
+        var workOutPixels: IntArray? = null
 
-        // 3. Directional Edge-Aware Multi-Scale PatchMatch + Sharp Exemplar Synthesis
-        runEdgeAwarePatchMatch(baseLevel)
+        if (onnxSession != null) {
+            workOutPixels = try {
+                val inferred = synchronized(inferenceLock) {
+                    runOnnxInpaintCrop(
+                        session = onnxSession,
+                        workPixels = workPixels,
+                        workMask = workMask,
+                        workW = workW,
+                        workH = workH
+                    )
+                }
+                usedBackend = InpaintBackend.ONNX_MIGAN
+                usedAccel = activeAccelerationLabel
+                inferred
+            } catch (t: Throwable) {
+                Log.w(TAG, "ONNX inference failed on crop (${workW}x${workH}); falling back to algorithmic inpainting", t)
+                null
+            }
+        }
 
-        // 4. Gradient-domain Poisson seamless shadow/lighting blend anchored to untouched boundary
-        runPoissonSeamlessBlend(baseLevel)
+        if (workOutPixels == null) {
+            workOutPixels = runAlgorithmicCropInpaint(
+                workPixels = workPixels,
+                workMask = workMask,
+                workW = workW,
+                workH = workH
+            )
+            usedBackend = InpaintBackend.ALGORITHMIC_FALLBACK
+            usedAccel = null
+        }
 
         // Map synthesized pixels cleanly back into the full-res square crop (high-res unscaled if 1:1)
         val synthesizedCropPixels = if (workW == sqW && workH == sqH) {
@@ -184,20 +451,11 @@ object LocalInpaintingEngine {
                 if (!workMask[i]) {
                     localOrig[i]
                 } else {
-                    val a = (localOrig[i] ushr 24) and 0xFF
-                    val ri = baseLevel.r[i].roundToInt().coerceIn(0, 255)
-                    val gi = baseLevel.g[i].roundToInt().coerceIn(0, 255)
-                    val bi = baseLevel.b[i].roundToInt().coerceIn(0, 255)
-                    (a shl 24) or (ri shl 16) or (gi shl 8) or bi
+                    val a = localOrig[i] and (0xFF shl 24)
+                    a or (workOutPixels[i] and 0x00FFFFFF)
                 }
             }
         } else {
-            val workOutPixels = IntArray(workLen) { i ->
-                val ri = baseLevel.r[i].roundToInt().coerceIn(0, 255)
-                val gi = baseLevel.g[i].roundToInt().coerceIn(0, 255)
-                val bi = baseLevel.b[i].roundToInt().coerceIn(0, 255)
-                (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
-            }
             var workOutBmp: Bitmap? = null
             var upscaledCropBmp: Bitmap? = null
             try {
@@ -251,8 +509,116 @@ object LocalInpaintingEngine {
             }
         }
 
-        return createBitmap(srcW, srcH).apply {
+        val outBitmap = createBitmap(srcW, srcH).apply {
             setPixels(finalPixels, 0, srcW, 0, 0, srcW, srcH)
+        }
+        return InpaintResult(
+            bitmap = outBitmap,
+            backend = usedBackend,
+            accelerationProvider = usedAccel
+        )
+    }
+
+    private fun runOnnxInpaintCrop(
+        session: OrtSession,
+        workPixels: IntArray,
+        workMask: BooleanArray,
+        workW: Int,
+        workH: Int
+    ): IntArray {
+        val env = ortEnv ?: OrtEnvironment.getEnvironment()
+        val (imageBuf, maskBuf) = packOnnxInputTensors(workPixels, workMask, workW, workH)
+        val imageShape = longArrayOf(1L, 3L, workH.toLong(), workW.toLong())
+        val maskShape = longArrayOf(1L, 1L, workH.toLong(), workW.toLong())
+
+        var imageTensor: OnnxTensor? = null
+        var maskTensor: OnnxTensor? = null
+        try {
+            imageTensor = OnnxTensor.createTensor(env, imageBuf, imageShape, OnnxJavaType.UINT8)
+            maskTensor = OnnxTensor.createTensor(env, maskBuf, maskShape, OnnxJavaType.UINT8)
+
+            val inputNames = session.inputNames
+            val imageKey = if (ONNX_INPUT_IMAGE in inputNames) ONNX_INPUT_IMAGE else inputNames.first()
+            val maskKey = if (ONNX_INPUT_MASK in inputNames) ONNX_INPUT_MASK else inputNames.last()
+            val inputs = mapOf(
+                imageKey to imageTensor,
+                maskKey to maskTensor
+            )
+
+            session.run(inputs).use { results ->
+                val opt = results.get(ONNX_OUTPUT_RESULT)
+                val outValue = if (opt.isPresent) opt.get() else results[0]
+                val outTensor = outValue as? OnnxTensor
+                    ?: throw IllegalStateException("Expected OnnxTensor output for '$ONNX_OUTPUT_RESULT'.")
+                val outShape = outTensor.info.shape
+                if (outShape.size == 4 && outShape[1] == 3L && outShape[2] == workH.toLong() && outShape[3] == workW.toLong()) {
+                    return unpackOnnxResultTensor(outTensor.byteBuffer, workW, workH)
+                }
+                if (outShape.size == 4 && outShape[1] == 3L && outShape[2] > 0L && outShape[3] > 0L) {
+                    val outH = outShape[2].toInt()
+                    val outW = outShape[3].toInt()
+                    val rawOutPixels = unpackOnnxResultTensor(outTensor.byteBuffer, outW, outH)
+                    val outBmp = createBitmap(outW, outH).apply {
+                        setPixels(rawOutPixels, 0, outW, 0, 0, outW, outH)
+                    }
+                    val scaledBmp = outBmp.scale(workW, workH)
+                    try {
+                        return IntArray(workW * workH).also {
+                            scaledBmp.getPixels(it, 0, workW, 0, 0, workW, workH)
+                        }
+                    } finally {
+                        if (scaledBmp !== outBmp && !scaledBmp.isRecycled) scaledBmp.recycle()
+                        if (!outBmp.isRecycled) outBmp.recycle()
+                    }
+                }
+                throw IllegalStateException("Unexpected ONNX output tensor shape: ${outShape.contentToString()}")
+            }
+        } finally {
+            runCatching { imageTensor?.close() }
+            runCatching { maskTensor?.close() }
+        }
+    }
+
+    private fun runAlgorithmicCropInpaint(
+        workPixels: IntArray,
+        workMask: BooleanArray,
+        workW: Int,
+        workH: Int
+    ): IntArray {
+        val workLen = workW * workH
+        val workR = FloatArray(workLen)
+        val workG = FloatArray(workLen)
+        val workB = FloatArray(workLen)
+        for (i in 0 until workLen) {
+            val px = workPixels[i]
+            workR[i] = ((px ushr 16) and 0xFF).toFloat()
+            workG[i] = ((px ushr 8) and 0xFF).toFloat()
+            workB[i] = (px and 0xFF).toFloat()
+        }
+
+        val baseLevel = PyramidLevel(
+            width = workW,
+            height = workH,
+            r = workR,
+            g = workG,
+            b = workB,
+            gx = FloatArray(workLen),
+            gy = FloatArray(workLen),
+            mask = workMask.copyOf()
+        )
+        recomputeGradients(baseLevel)
+
+        // Directional Edge-Aware Multi-Scale PatchMatch + Sharp Exemplar Synthesis
+        runEdgeAwarePatchMatch(baseLevel)
+
+        // Gradient-domain Poisson seamless shadow/lighting blend anchored to untouched boundary
+        runPoissonSeamlessBlend(baseLevel)
+
+        return IntArray(workLen) { i ->
+            val ri = baseLevel.r[i].roundToInt().coerceIn(0, 255)
+            val gi = baseLevel.g[i].roundToInt().coerceIn(0, 255)
+            val bi = baseLevel.b[i].roundToInt().coerceIn(0, 255)
+            (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
         }
     }
 

@@ -286,7 +286,7 @@ fun LutPanel(
                         enabled = hasSelectedLut,
                         onDoubleTapReset = {
                             onDraggingChanged(false)
-                            onIntensityChange(0.75f)
+                            onIntensityChange(1.0f)
                         }
                     )
                     .testTag("lut_intensity_label"),
@@ -352,7 +352,7 @@ fun LutPanel(
                 onValueChangeFinished = { onDraggingChanged(false) },
                 onReset = {
                     onDraggingChanged(false)
-                    onIntensityChange(0.75f)
+                    onIntensityChange(1.0f)
                 }
             )
         }

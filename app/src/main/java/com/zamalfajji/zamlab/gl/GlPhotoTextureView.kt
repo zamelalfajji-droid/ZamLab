@@ -45,6 +45,7 @@ class GlRenderState(
         if (other == null) return false
         return imageBitmap === other.imageBitmap &&
             params == other.params &&
+            lut === other.lut &&
             lut?.id == other.lut?.id &&
             isOriginal == other.isOriginal &&
             splitRatio == other.splitRatio &&
@@ -171,6 +172,7 @@ class GlPhotoRenderController(
     private var lastUploadedImageW = 0
     private var lastUploadedImageH = 0
     private var lastLutId: String? = null
+    private var lastLutRef: CubeLut? = null
     private var lastToneCurve: ToneCurveData? = null
     private var currentPackedLut: GlGradingShaders.PackedLutTexture? = null
     private var lastRenderedState: GlRenderState? = null
@@ -494,17 +496,23 @@ class GlPhotoRenderController(
                 lastUploadedImage = img
             }
 
-            // 2. 3D/1D .cube LUT texture — uploaded only when selected LUT changes
+            // 2. 3D/1D .cube LUT texture — uploaded when selected LUT changes; reset cleanly on clear
             val effectiveLut = if (state.lut?.sourceFormat == LutSourceFormat.XMP) null else state.lut
-            if (effectiveLut?.id != lastLutId) {
+            if (effectiveLut !== lastLutRef || effectiveLut?.id != lastLutId) {
                 val prevPacked = currentPackedLut
-                val nextPacked = effectiveLut?.let {
-                    val packed = GlGradingShaders.packLutToTiledBitmap(it)
+                val nextPacked = if (effectiveLut != null) {
+                    val packed = GlGradingShaders.packLutToTiledBitmap(effectiveLut)
                     GlGradingShaders.uploadTexture(lutTexId, packed.bitmap)
                     packed
+                } else {
+                    val clearLut = createBitmap(1, 1)
+                    GlGradingShaders.uploadTexture(lutTexId, clearLut)
+                    clearLut.recycle()
+                    null
                 }
                 currentPackedLut = nextPacked
                 lastLutId = effectiveLut?.id
+                lastLutRef = effectiveLut
                 prevPacked?.bitmap?.let { oldBmp ->
                     if (oldBmp !== nextPacked?.bitmap && !oldBmp.isRecycled) {
                         oldBmp.recycle()
@@ -676,6 +684,7 @@ class GlPhotoRenderController(
             lastUploadedImageW = 0
             lastUploadedImageH = 0
             lastLutId = null
+            lastLutRef = null
             lastToneCurve = null
             lastRenderedState = null
 

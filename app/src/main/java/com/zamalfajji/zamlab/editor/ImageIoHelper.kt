@@ -4,16 +4,11 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageDecoder
-import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.RadialGradient
 import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.Shader
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Build
@@ -602,185 +597,177 @@ object ImageIoHelper {
         val w = width.coerceAtLeast(64)
         val h = height.coerceAtLeast(64)
         val bmp = createBitmap(w, h)
-        val canvas = Canvas(bmp)
+        val pixels = IntArray(w * h)
         val wf = w.toFloat()
         val hf = h.toFloat()
 
-        // 1. Calibrated Studio Backdrop: warm cinema amber key light falling off into deep slate shadows
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, wf, hf,
-                intArrayOf(
-                    Color.rgb(24, 34, 52),
-                    Color.rgb(42, 46, 56),
-                    Color.rgb(66, 54, 46),
-                    Color.rgb(28, 30, 38)
-                ),
-                floatArrayOf(0f, 0.38f, 0.72f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, 0f, wf, hf, bgPaint)
+        // 1. Calibrated Studio Backdrop with warm key-light glow and cool fill-light corner
+        val keyCx = wf * 0.28f
+        val keyCy = hf * 0.24f
+        val invKeyR = 1f / (wf * 0.62f).coerceAtLeast(1f)
+        val fillCx = wf * 0.84f
+        val fillCy = hf * 0.78f
+        val invFillR = 1f / (wf * 0.55f).coerceAtLeast(1f)
 
-        // Soft studio key-light dome highlight (great for testing Exposure, Highlights, Shadows & Vignette)
-        val keyLightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = RadialGradient(
-                wf * 0.28f, hf * 0.24f, wf * 0.62f,
-                intArrayOf(
-                    Color.argb(145, 255, 224, 184),
-                    Color.argb(65, 210, 178, 146),
-                    Color.argb(0, 20, 24, 34)
-                ),
-                floatArrayOf(0f, 0.45f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, 0f, wf, hf, keyLightPaint)
+        val chromaStopsR = floatArrayOf(218f, 232f, 220f, 62f, 44f, 74f, 174f, 218f)
+        val chromaStopsG = floatArrayOf(62f, 158f, 212f, 178f, 168f, 102f, 76f, 62f)
+        val chromaStopsB = floatArrayOf(62f, 42f, 54f, 92f, 198f, 216f, 206f, 62f)
 
-        // Subtle cool studio fill light on opposite corner (great for Temp/Tint & Color Grading wheels)
-        val fillLightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = RadialGradient(
-                wf * 0.84f, hf * 0.78f, wf * 0.55f,
-                intArrayOf(
-                    Color.argb(115, 76, 152, 224),
-                    Color.argb(38, 52, 104, 168),
-                    Color.argb(0, 18, 22, 30)
-                ),
-                floatArrayOf(0f, 0.5f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, 0f, wf, hf, fillLightPaint)
-
-        // 2. Matte Darkroom Calibration Card Frame
         val cardLeft = wf * 0.10f
         val cardRight = wf * 0.90f
         val cardTop = hf * 0.11f
         val cardBottom = hf * 0.73f
-        val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
-        val cornerR = wf * 0.018f
-        val frameBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(22, 24, 29)
-            style = Paint.Style.FILL
-        }
-        val frameBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(74, 80, 92)
-            style = Paint.Style.STROKE
-            strokeWidth = (wf * 0.0022f).coerceAtLeast(1.5f)
-        }
-        canvas.drawRoundRect(cardRect, cornerR, cornerR, frameBgPaint)
-        canvas.drawRoundRect(cardRect, cornerR, cornerR, frameBorderPaint)
-
-        // 3. 24-Patch ColorChecker-Inspired Studio Reference Swatches (4 rows x 6 cols)
-        val swatches = intArrayOf(
-            // Row 1: Skin tones, sky, foliage, lavender, cyan-mint
-            Color.rgb(115, 82, 68),   Color.rgb(194, 150, 130), Color.rgb(98, 122, 157),
-            Color.rgb(87, 108, 67),   Color.rgb(133, 128, 177), Color.rgb(103, 189, 170),
-            // Row 2: Warm orange, cobalt, crimson, purple, leaf green, cinema amber
-            Color.rgb(214, 126, 44),  Color.rgb(80, 91, 166),   Color.rgb(193, 90, 99),
-            Color.rgb(94, 60, 108),   Color.rgb(157, 188, 64),  Color.rgb(224, 163, 46),
-            // Row 3: Deep primaries & secondaries
-            Color.rgb(56, 61, 150),   Color.rgb(70, 148, 73),   Color.rgb(175, 54, 60),
-            Color.rgb(231, 199, 31),  Color.rgb(187, 86, 149),  Color.rgb(8, 133, 161),
-            // Row 4: 6-step calibrated neutral grayscale ramp (White -> Obsidian)
-            Color.rgb(242, 242, 242), Color.rgb(200, 200, 200), Color.rgb(160, 160, 160),
-            Color.rgb(122, 122, 122), Color.rgb(74, 74, 74),    Color.rgb(26, 26, 26)
-        )
         val innerPadX = wf * 0.032f
         val innerPadY = hf * 0.036f
         val gap = wf * 0.015f
         val cols = 6
         val rows = 4
+        val gridLeft = cardLeft + innerPadX
+        val gridTop = cardTop + innerPadY
         val gridW = (cardRight - cardLeft) - innerPadX * 2f
         val gridH = (cardBottom - cardTop) - innerPadY * 2f
         val cellW = (gridW - gap * (cols - 1)) / cols
         val cellH = (gridH - gap * (rows - 1)) / rows
-        val swatchRadius = wf * 0.008f
-        val swatchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val stepX = cellW + gap
+        val stepY = cellH + gap
 
-        for (r in 0 until rows) {
-            for (c in 0 until cols) {
-                val left = cardLeft + innerPadX + c * (cellW + gap)
-                val top = cardTop + innerPadY + r * (cellH + gap)
-                swatchPaint.color = swatches[r * cols + c]
-                canvas.drawRoundRect(
-                    RectF(left, top, left + cellW, top + cellH),
-                    swatchRadius,
-                    swatchRadius,
-                    swatchPaint
-                )
+        val swatches = intArrayOf(
+            Color.rgb(115, 82, 68),   Color.rgb(194, 150, 130), Color.rgb(98, 122, 157),
+            Color.rgb(87, 108, 67),   Color.rgb(133, 128, 177), Color.rgb(103, 189, 170),
+            Color.rgb(214, 126, 44),  Color.rgb(80, 91, 166),   Color.rgb(193, 90, 99),
+            Color.rgb(94, 60, 108),   Color.rgb(157, 188, 64),  Color.rgb(224, 163, 46),
+            Color.rgb(56, 61, 150),   Color.rgb(70, 148, 73),   Color.rgb(175, 54, 60),
+            Color.rgb(231, 199, 31),  Color.rgb(187, 86, 149),  Color.rgb(8, 133, 161),
+            Color.rgb(242, 242, 242), Color.rgb(200, 200, 200), Color.rgb(160, 160, 160),
+            Color.rgb(122, 122, 122), Color.rgb(74, 74, 74),    Color.rgb(26, 26, 26)
+        )
+
+        val lumaTop = hf * 0.77f
+        val lumaBottom = hf * 0.835f
+        val chromaTop = hf * 0.855f
+        val chromaBottom = hf * 0.905f
+        val barWidth = (cardRight - cardLeft).coerceAtLeast(1f)
+        val borderThick = (wf * 0.0022f).coerceAtLeast(1.5f)
+        val headerY0 = hf * 0.042f
+        val headerY1 = hf * 0.082f
+        val barEnd = cardLeft + wf * 0.20f
+        val stripePeriod = (wf / 160f).coerceAtLeast(3f)
+        val targetCx = cardRight - wf * 0.045f
+        val targetCy = hf * 0.062f
+        val targetMaxR = hf * 0.028f
+
+        for (y in 0 until h) {
+            val yf = y.toFloat()
+            val ny = yf / hf
+            val rowOff = y * w
+            val inCardY = yf in cardTop..cardBottom
+            val inLumaBarY = yf in lumaTop..lumaBottom
+            val inChromaBarY = yf in chromaTop..chromaBottom
+            val inHeaderY = yf in headerY0..headerY1
+
+            var swatchRow = -1
+            if (inCardY && yf >= gridTop) {
+                val relY = yf - gridTop
+                val rIdx = (relY / stepY).toInt()
+                if (rIdx in 0 until rows && (relY - rIdx * stepY) <= cellH) {
+                    swatchRow = rIdx
+                }
+            }
+
+            for (x in 0 until w) {
+                val xf = x.toFloat()
+                val nx = xf / wf
+
+                // Base studio gradient
+                val diag = (nx * 0.55f + ny * 0.45f).coerceIn(0f, 1f)
+                var r = 24f + diag * 40f
+                var g = 34f + diag * 16f
+                var b = 52f - diag * 12f
+
+                // Warm amber key light radial glow
+                val dxK = xf - keyCx
+                val dyK = yf - keyCy
+                val dk = (kotlin.math.sqrt(dxK * dxK + dyK * dyK) * invKeyR).coerceIn(0f, 1f)
+                val wKey = (1f - dk) * (1f - dk) * 0.58f
+                r += (255f - r) * wKey
+                g += (220f - g) * wKey
+                b += (178f - b) * wKey
+
+                // Cool fill light radial glow
+                val dxF = xf - fillCx
+                val dyF = yf - fillCy
+                val df = (kotlin.math.sqrt(dxF * dxF + dyF * dyF) * invFillR).coerceIn(0f, 1f)
+                val wFill = (1f - df) * (1f - df) * 0.44f
+                r += (76f - r) * wFill
+                g += (152f - g) * wFill
+                b += (224f - b) * wFill
+
+                // Darkroom calibration card + 24 ColorChecker swatches
+                if (inCardY && xf in cardLeft..cardRight) {
+                    val onBorder = (xf - cardLeft) < borderThick ||
+                        (cardRight - xf) < borderThick ||
+                        (yf - cardTop) < borderThick ||
+                        (cardBottom - yf) < borderThick
+                    if (onBorder) {
+                        r = 74f; g = 80f; b = 92f
+                    } else {
+                        r = 22f; g = 24f; b = 29f
+                        if (swatchRow >= 0 && xf >= gridLeft) {
+                            val relX = xf - gridLeft
+                            val cIdx = (relX / stepX).toInt()
+                            if (cIdx in 0 until cols && (relX - cIdx * stepX) <= cellW) {
+                                val argb = swatches[swatchRow * cols + cIdx]
+                                r = Color.red(argb).toFloat()
+                                g = Color.green(argb).toFloat()
+                                b = Color.blue(argb).toFloat()
+                            }
+                        }
+                    }
+                } else if (inLumaBarY && xf in cardLeft..cardRight) {
+                    val t = ((xf - cardLeft) / barWidth).coerceIn(0f, 1f)
+                    val v = 12f + t * 236f
+                    r = v; g = v; b = v + 2f
+                } else if (inChromaBarY && xf in cardLeft..cardRight) {
+                    val t = ((xf - cardLeft) / barWidth).coerceIn(0f, 1f) * 7f
+                    val idx0 = t.toInt().coerceIn(0, 6)
+                    val f = t - idx0
+                    r = chromaStopsR[idx0] + (chromaStopsR[idx0 + 1] - chromaStopsR[idx0]) * f
+                    g = chromaStopsG[idx0] + (chromaStopsG[idx0 + 1] - chromaStopsG[idx0]) * f
+                    b = chromaStopsB[idx0] + (chromaStopsB[idx0 + 1] - chromaStopsB[idx0]) * f
+                }
+
+                // Optical resolution bars + concentric aperture target
+                if (inHeaderY && xf in cardLeft..barEnd) {
+                    val phase = ((xf - cardLeft) % stripePeriod) / stripePeriod
+                    if (phase < 0.48f) {
+                        r += (224f - r) * 0.72f
+                        g += (228f - g) * 0.72f
+                        b += (236f - b) * 0.72f
+                    }
+                }
+                val dxT = xf - targetCx
+                val dyT = yf - targetCy
+                val distT = kotlin.math.sqrt(dxT * dxT + dyT * dyT)
+                if (distT <= targetMaxR * 1.25f) {
+                    val onRing = (1..4).any { ring ->
+                        kotlin.math.abs(distT - targetMaxR * (ring / 4f)) < 1.2f
+                    }
+                    val onCross = kotlin.math.abs(dxT) < 1.0f || kotlin.math.abs(dyT) < 1.0f
+                    if (onRing || onCross) {
+                        r += (224f - r) * 0.72f
+                        g += (228f - g) * 0.72f
+                        b += (236f - b) * 0.72f
+                    }
+                }
+
+                val ri = r.roundToInt().coerceIn(0, 255)
+                val gi = g.roundToInt().coerceIn(0, 255)
+                val bi = b.roundToInt().coerceIn(0, 255)
+                pixels[rowOff + x] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
             }
         }
 
-        // 4. Lower Continuous Luminance Ramp (Shadows -> Highlights) + Full-Spectrum Chroma Ribbon
-        val barLeft = cardLeft
-        val barRight = cardRight
-        val lumaTop = hf * 0.77f
-        val lumaBottom = hf * 0.835f
-        val lumaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                barLeft, lumaTop, barRight, lumaTop,
-                intArrayOf(
-                    Color.rgb(12, 12, 14),
-                    Color.rgb(64, 64, 66),
-                    Color.rgb(128, 128, 130),
-                    Color.rgb(196, 196, 198),
-                    Color.rgb(248, 248, 250)
-                ),
-                null,
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRoundRect(RectF(barLeft, lumaTop, barRight, lumaBottom), swatchRadius, swatchRadius, lumaPaint)
-
-        val chromaTop = hf * 0.855f
-        val chromaBottom = hf * 0.905f
-        val chromaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                barLeft, chromaTop, barRight, chromaTop,
-                intArrayOf(
-                    Color.rgb(218, 62, 62),
-                    Color.rgb(232, 158, 42),
-                    Color.rgb(220, 212, 54),
-                    Color.rgb(62, 178, 92),
-                    Color.rgb(44, 168, 198),
-                    Color.rgb(74, 102, 216),
-                    Color.rgb(174, 76, 206),
-                    Color.rgb(218, 62, 62)
-                ),
-                null,
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRoundRect(RectF(barLeft, chromaTop, barRight, chromaBottom), swatchRadius, swatchRadius, chromaPaint)
-
-        // 5. Fine Optical Micro-Contrast & Sharpness Resolution Bars in Top Header Band
-        val resPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            color = Color.argb(185, 224, 228, 236)
-        }
-        val lineY0 = hf * 0.042f
-        val lineY1 = hf * 0.082f
-        val stepPx = (wf / 320f).coerceAtLeast(2f)
-        resPaint.strokeWidth = (stepPx * 0.5f).coerceAtLeast(1f)
-        var xPos = cardLeft
-        val resEnd = cardLeft + wf * 0.20f
-        while (xPos < resEnd) {
-            canvas.drawLine(xPos, lineY0, xPos, lineY1, resPaint)
-            xPos += stepPx * 2f
-        }
-
-        // Concentric precision aperture target on top-right for Clarity & Sharpening evaluation
-        val cx = cardRight - wf * 0.045f
-        val cy = hf * 0.062f
-        val maxR = hf * 0.028f
-        resPaint.strokeWidth = (wf * 0.0014f).coerceAtLeast(1f)
-        for (ring in 1..4) {
-            canvas.drawCircle(cx, cy, maxR * (ring / 4f), resPaint)
-        }
-        canvas.drawLine(cx - maxR * 1.25f, cy, cx + maxR * 1.25f, cy, resPaint)
-        canvas.drawLine(cx, cy - maxR * 1.25f, cx, cy + maxR * 1.25f, resPaint)
-
+        bmp.setPixels(pixels, 0, w, 0, 0, w, h)
         return bmp
     }
 

@@ -55,6 +55,13 @@
 -dontwarn kotlinx.serialization.**
 
 # ==============================================================================
+# ONNX Runtime Android (ai.onnxruntime.** + XNNPACK/NNAPI native JNI)
+# ==============================================================================
+-keep class ai.onnxruntime.** { *; }
+-keepclassmembers class ai.onnxruntime.** { *; }
+-dontwarn ai.onnxruntime.**
+
+# ==============================================================================
 # MediaPipe (defensive keep rules if native/vision tasks are linked)
 # ==============================================================================
 -keep class com.google.mediapipe.** { *; }

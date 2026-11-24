@@ -337,14 +337,14 @@ class EditorHistoryRobolectricTest {
 
         val xmpPreset = vm.uiState.value.lutFolders.first { it.name == xmpFolder }.items.first()
         val xmpSettings = requireNotNull(xmpPreset.lut?.xmpSettings)
-        val expectedDefault = GradingParams.fromXmpSettings(xmpSettings, 0.75f)
+        val expectedDefault = GradingParams.fromXmpSettings(xmpSettings, 1.0f)
 
         vm.selectLut(xmpPreset.id)
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(xmpPreset.id, vm.uiState.value.selectedLutId)
         assertNotNull(vm.uiState.value.activeLut)
-        assertEquals(0.75f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+        assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
         assertEquals(expectedDefault.exposure, vm.uiState.value.gradingParams.exposure, 0.001f)
         assertEquals(expectedDefault.contrast, vm.uiState.value.gradingParams.contrast, 0.001f)
         assertEquals(expectedDefault.clarity, vm.uiState.value.gradingParams.clarity, 0.001f)
@@ -370,6 +370,7 @@ class EditorHistoryRobolectricTest {
         vm.selectLut(null)
         assertNull(vm.uiState.value.selectedLutId)
         assertTrue(vm.uiState.value.gradingParams.isDefault)
+        assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
 
         vm.undo()
         assertEquals(xmpPreset.id, vm.uiState.value.selectedLutId)
@@ -1942,7 +1943,7 @@ class EditorHistoryRobolectricTest {
     }
 
     @Test
-    fun ninetiesVibesXmpAndBuiltInCubeLut_renderBalancedTonesAndDefaultTo75Percent() = runTest(testDispatcher) {
+    fun ninetiesVibesXmpAndBuiltInCubeLut_renderBalancedTonesAndDefaultTo100Percent() = runTest(testDispatcher) {
         val app = ApplicationProvider.getApplicationContext<Application>()
 
         val vibesFolder = "presets/90s Vibes - Desktop Presets"
@@ -1958,7 +1959,7 @@ class EditorHistoryRobolectricTest {
             )
         }
         val settings = requireNotNull(vibesLut.xmpSettings)
-        val params75 = GradingParams.fromXmpSettings(settings, 0.75f)
+        val params100 = GradingParams.fromXmpSettings(settings, 1.0f)
 
         val src = Bitmap.createBitmap(16, 8, Bitmap.Config.ARGB_8888).apply {
             for (y in 0 until 8) {
@@ -1966,7 +1967,7 @@ class EditorHistoryRobolectricTest {
                 for (x in 8 until 16) setPixel(x, y, Color.rgb(55, 55, 55))
             }
         }
-        val graded = ColorGradingEngine.processFullResolution(src, params75, null)
+        val graded = ColorGradingEngine.processFullResolution(src, params100, null)
         val midPx = graded.getPixel(4, 4)
         val shadowPx = graded.getPixel(12, 4)
         val midLuma = 0.2126f * Color.red(midPx) + 0.7152f * Color.green(midPx) + 0.0722f * Color.blue(midPx)
@@ -1987,7 +1988,7 @@ class EditorHistoryRobolectricTest {
         vm.selectLut(cubeItem.id)
         testDispatcher.scheduler.advanceUntilIdle()
 
-        assertEquals(0.75f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+        assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
         val cubeGraded = ColorGradingEngine.processFullResolution(src, vm.uiState.value.gradingParams, vm.uiState.value.activeLut)
         val cubeMidPx = cubeGraded.getPixel(4, 4)
         val cubeMidLuma = 0.2126f * Color.red(cubeMidPx) + 0.7152f * Color.green(cubeMidPx) + 0.0722f * Color.blue(cubeMidPx)
@@ -2099,6 +2100,306 @@ class EditorHistoryRobolectricTest {
         } finally {
             syntheticFile.delete()
         }
+    }
+
+    @Test
+    fun `selecting or importing a LUT replaces previous LUT cleanly, resets strength to 100 percent, toggles off cleanly, and uses single undo steps`() = runTest(testDispatcher) {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = EditorViewModel(app)
+        awaitInitialLoad(vm)
+
+        val cubeFolder = vm.uiState.value.lutFolders.first { folder ->
+            folder.descriptors.count { it.sourceFormat == LutSourceFormat.CUBE } >= 2
+        }.name
+        vm.toggleLutFolder(cubeFolder)
+        awaitFolderLoaded(vm, cubeFolder)
+        val cubeItems = vm.uiState.value.lutFolders.first { it.name == cubeFolder }.items
+            .filter { it.sourceFormat == LutSourceFormat.CUBE }
+        val lutA = cubeItems[0]
+        val lutB = cubeItems[1]
+
+        // Apply base tonal adjustments first
+        vm.setSliderDragging(true)
+        vm.updateGradingParams { it.copy(exposure = 0.40f, contrast = 18f) }
+        vm.setSliderDragging(false)
+        val baseTonalParams = vm.uiState.value.gradingParams
+
+        // Step 1: Select LUT A -> defaults to 100% strength & preserves tonal adjustments
+        vm.selectLut(lutA.id)
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(lutA.id, vm.uiState.value.selectedLutId)
+        assertEquals(lutA.id, vm.uiState.value.activeLut?.id)
+        assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+        assertEquals(0.40f, vm.uiState.value.gradingParams.exposure, 0.001f)
+        assertEquals(18f, vm.uiState.value.gradingParams.contrast, 0.001f)
+
+        // Lower LUT A intensity to 40%
+        vm.setSliderDragging(true)
+        vm.updateLutIntensity(0.40f)
+        vm.setSliderDragging(false)
+        assertEquals(0.40f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+
+        // Step 2: Select LUT B -> replaces LUT A completely & resets strength to 100%
+        vm.selectLut(lutB.id)
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(lutB.id, vm.uiState.value.selectedLutId)
+        assertEquals(lutB.id, vm.uiState.value.activeLut?.id)
+        assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+        assertEquals(0.40f, vm.uiState.value.gradingParams.exposure, 0.001f)
+        assertEquals(18f, vm.uiState.value.gradingParams.contrast, 0.001f)
+
+        val src = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(120, 140, 160))
+        }
+        val expectedLutBOnly = ColorGradingEngine.processFullResolution(
+            src,
+            baseTonalParams.copy(lutIntensity = 1.0f),
+            lutB.lut
+        )
+        val actualLutB = ColorGradingEngine.processFullResolution(
+            src,
+            vm.uiState.value.gradingParams,
+            vm.uiState.value.activeLut
+        )
+        assertEquals(expectedLutBOnly.getPixel(4, 4), actualLutB.getPixel(4, 4))
+
+        // Step 3: Lower intensity to 30%, then import a brand-new .cube file -> replaces LUT B & resets to 100%
+        vm.setSliderDragging(true)
+        vm.updateLutIntensity(0.30f)
+        vm.setSliderDragging(false)
+
+        val customCubeFile = java.io.File(app.cacheDir, "zamlab_replace_test.cube")
+        val customCubeText = """
+            TITLE "ZamLab Test Invert"
+            LUT_3D_SIZE 2
+            1.0 1.0 1.0
+            0.0 1.0 1.0
+            1.0 0.0 1.0
+            0.0 0.0 1.0
+            1.0 1.0 0.0
+            0.0 1.0 0.0
+            1.0 0.0 0.0
+            0.0 0.0 0.0
+        """.trimIndent()
+        customCubeFile.writeText(customCubeText)
+        try {
+            vm.importCubeLutFromUri(Uri.fromFile(customCubeFile))
+            val importDeadline = System.currentTimeMillis() + 5_000L
+            while (System.currentTimeMillis() < importDeadline &&
+                vm.uiState.value.activeLut?.title != "ZamLab Test Invert"
+            ) {
+                testDispatcher.scheduler.advanceUntilIdle()
+                Thread.sleep(20)
+            }
+            val importedId = vm.uiState.value.selectedLutId
+            assertNotNull(importedId)
+            assertEquals("ZamLab Test Invert", vm.uiState.value.activeLut?.title)
+            assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+            assertEquals(0.40f, vm.uiState.value.gradingParams.exposure, 0.001f)
+
+            // Step 4: Tapping the currently active LUT again clears it cleanly with zero residual shift
+            vm.selectLut(importedId)
+            testDispatcher.scheduler.advanceUntilIdle()
+            assertNull(vm.uiState.value.selectedLutId)
+            assertNull(vm.uiState.value.activeLut)
+            assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+            assertEquals(0.40f, vm.uiState.value.gradingParams.exposure, 0.001f)
+
+            val expectedBaseOnly = ColorGradingEngine.processFullResolution(src, baseTonalParams, null)
+            val actualCleared = ColorGradingEngine.processFullResolution(
+                src,
+                vm.uiState.value.gradingParams,
+                vm.uiState.value.activeLut
+            )
+            assertEquals(expectedBaseOnly.getPixel(4, 4), actualCleared.getPixel(4, 4))
+
+            // Single undo/redo step verification for toggle-off -> imported -> LUT B
+            vm.undo()
+            assertEquals(importedId, vm.uiState.value.selectedLutId)
+            assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+
+            vm.redo()
+            assertNull(vm.uiState.value.selectedLutId)
+            assertNull(vm.uiState.value.activeLut)
+
+            vm.undo() // back to imported
+            vm.undo() // undo import -> back to LUT B at 30%
+            assertEquals(lutB.id, vm.uiState.value.selectedLutId)
+            assertEquals(0.30f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+
+            vm.undo() // undo intensity -> LUT B at 100%
+            vm.undo() // undo LUT B switch -> back to LUT A at 40%
+            assertEquals(lutA.id, vm.uiState.value.selectedLutId)
+            assertEquals(0.40f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+
+            // Selecting "None" (null) from LUT A clears cleanly as well
+            vm.selectLut(null)
+            assertNull(vm.uiState.value.selectedLutId)
+            assertNull(vm.uiState.value.activeLut)
+            assertEquals(1.0f, vm.uiState.value.gradingParams.lutIntensity, 0.001f)
+
+            // Clean up custom LUT from disk
+            importedId?.let {
+                vm.deleteCustomLut(it)
+                testDispatcher.scheduler.advanceUntilIdle()
+            }
+            expectedLutBOnly.recycle()
+            actualLutB.recycle()
+            expectedBaseOnly.recycle()
+            actualCleared.recycle()
+            src.recycle()
+        } finally {
+            customCubeFile.delete()
+        }
+    }
+
+    @Test
+    fun `packOnnxInputTensors and unpackOnnxResultTensor preserve uint8 NCHW RGB layout and 255-keep 0-remove mask contract`() {
+        val width = 2
+        val height = 2
+        val pixels = intArrayOf(
+            Color.rgb(10, 20, 30),    // (0, 0) keep
+            Color.rgb(200, 150, 100), // (1, 0) remove
+            Color.rgb(40, 80, 120),   // (0, 1) keep
+            Color.rgb(255, 0, 128)    // (1, 1) remove
+        )
+        val removeMask = booleanArrayOf(false, true, false, true)
+
+        val (imageBuf, maskBuf) = LocalInpaintingEngine.packOnnxInputTensors(
+            pixels = pixels,
+            removeMask = removeMask,
+            width = width,
+            height = height
+        )
+
+        val hw = width * height
+        assertEquals(3 * hw, imageBuf.remaining())
+        assertEquals(hw, maskBuf.remaining())
+
+        // Verify NCHW RGB planes: R plane [0..3], G plane [4..7], B plane [8..11]
+        val expectedR = intArrayOf(10, 200, 40, 255)
+        val expectedG = intArrayOf(20, 150, 80, 0)
+        val expectedB = intArrayOf(30, 100, 120, 128)
+        for (i in 0 until hw) {
+            assertEquals(expectedR[i], imageBuf.get(i).toInt() and 0xFF)
+            assertEquals(expectedG[i], imageBuf.get(hw + i).toInt() and 0xFF)
+            assertEquals(expectedB[i], imageBuf.get(2 * hw + i).toInt() and 0xFF)
+        }
+
+        // Verify uint8 mask contract: 255 = keep, 0 = remove/fill
+        assertEquals(255, maskBuf.get(0).toInt() and 0xFF)
+        assertEquals(0, maskBuf.get(1).toInt() and 0xFF)
+        assertEquals(255, maskBuf.get(2).toInt() and 0xFF)
+        assertEquals(0, maskBuf.get(3).toInt() and 0xFF)
+
+        // Verify round-trip unpacking from [1, 3, H, W] result tensor
+        val unpacked = LocalInpaintingEngine.unpackOnnxResultTensor(imageBuf, width, height)
+        for (i in 0 until hw) {
+            assertEquals(pixels[i], unpacked[i])
+        }
+    }
+
+    @Test
+    fun `LocalInpaintingEngine falls back automatically when migan_pipeline_v2 onnx is absent and preserves unmasked pixels`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        LocalInpaintingEngine.resetOnnxStateForTests()
+
+        assertFalse(LocalInpaintingEngine.isModelAssetPresent(app))
+        assertFalse(LocalInpaintingEngine.isModelLoaded())
+
+        val width = 48
+        val height = 48
+        val src = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    setPixel(x, y, Color.rgb(110, 145, 180))
+                }
+            }
+            // Plant bright blemish in the center
+            for (y in 21..27) {
+                for (x in 21..27) {
+                    setPixel(x, y, Color.rgb(250, 30, 30))
+                }
+            }
+        }
+
+        val stroke = HealStroke(
+            mode = HealMode.SPOT_HEAL,
+            points = listOf(0.5f to 0.5f),
+            radiusNorm = 0.08f,
+            feather = 0.35f,
+            opacity = 1.0f
+        )
+
+        val result = LocalInpaintingEngine.inpaintWithResult(src, listOf(stroke), app)
+        assertEquals(LocalInpaintingEngine.InpaintBackend.ALGORITHMIC_FALLBACK, result.backend)
+        assertFalse(LocalInpaintingEngine.isModelLoaded())
+
+        // Corner pixels outside mask must remain bit-for-bit identical
+        assertEquals(src.getPixel(2, 2), result.bitmap.getPixel(2, 2))
+        assertEquals(src.getPixel(width - 3, height - 3), result.bitmap.getPixel(width - 3, height - 3))
+
+        // Center blemish should be healed closer to surrounding sky blue than bright red
+        val centerPx = result.bitmap.getPixel(24, 24)
+        assertTrue("Expected healed blue channel to approach surrounding sky", Color.blue(centerPx) > Color.red(centerPx))
+
+        // Verify OfflineHealEngine delegates SPOT_HEAL cleanly with Context
+        val viaEngine = OfflineHealEngine.applyStroke(src, stroke, app)
+        assertEquals(src.getPixel(2, 2), viaEngine.getPixel(2, 2))
+        val engineCenter = viaEngine.getPixel(24, 24)
+        assertTrue(Color.blue(engineCenter) > Color.red(engineCenter))
+
+        src.recycle()
+        result.bitmap.recycle()
+        viaEngine.recycle()
+    }
+
+    @Test
+    fun `sequential Spot Heal strokes run asynchronously in EditorViewModel and each stroke records one undo-redo step`() = runTest(testDispatcher) {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val vm = EditorViewModel(app)
+        awaitInitialLoad(vm)
+
+        vm.selectTab(StudioTab.HEAL)
+        vm.setHealMode(HealMode.SPOT_HEAL)
+
+        // First Spot Heal stroke
+        vm.startHealStroke(0.35f, 0.35f)
+        vm.appendHealStroke(0.40f, 0.38f)
+        vm.finishHealStroke()
+        val d1 = System.currentTimeMillis() + 8_000L
+        while (System.currentTimeMillis() < d1 &&
+            (vm.uiState.value.isHealProcessing || vm.uiState.value.healStrokes.size != 1)
+        ) {
+            testDispatcher.scheduler.advanceUntilIdle()
+            Thread.sleep(20)
+        }
+        assertFalse(vm.uiState.value.isHealProcessing)
+        assertEquals(1, vm.uiState.value.healStrokes.size)
+
+        // Second Spot Heal stroke
+        vm.startHealStroke(0.65f, 0.65f)
+        vm.finishHealStroke()
+        val d2 = System.currentTimeMillis() + 8_000L
+        while (System.currentTimeMillis() < d2 &&
+            (vm.uiState.value.isHealProcessing || vm.uiState.value.healStrokes.size != 2)
+        ) {
+            testDispatcher.scheduler.advanceUntilIdle()
+            Thread.sleep(20)
+        }
+        assertFalse(vm.uiState.value.isHealProcessing)
+        assertEquals(2, vm.uiState.value.healStrokes.size)
+
+        // Each Heal stroke is 1 step in top-bar global Undo / Redo
+        vm.undo()
+        assertEquals(1, vm.uiState.value.healStrokes.size)
+        vm.undo()
+        assertEquals(0, vm.uiState.value.healStrokes.size)
+
+        vm.redo()
+        assertEquals(1, vm.uiState.value.healStrokes.size)
+        vm.redo()
+        assertEquals(2, vm.uiState.value.healStrokes.size)
     }
 }
 
