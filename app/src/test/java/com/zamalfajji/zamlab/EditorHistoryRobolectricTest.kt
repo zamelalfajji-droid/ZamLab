@@ -659,7 +659,7 @@ class EditorHistoryRobolectricTest {
     }
 
     @Test
-    fun `app declares zero INTERNET permission and replaces Magic Eraser with offline Heal tab`() {
+    fun `app declares INTERNET and ACCESS_NETWORK_STATE for online sticker search and maintains expected StudioTab order`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         @Suppress("DEPRECATION")
         val pkgInfo = app.packageManager.getPackageInfo(
@@ -667,12 +667,34 @@ class EditorHistoryRobolectricTest {
             PackageManager.GET_PERMISSIONS
         )
         val requestedPermissions = pkgInfo.requestedPermissions?.toList().orEmpty()
-        assertFalse(
-            "Expected 100% offline manifest with no INTERNET permission, found $requestedPermissions",
+        assertTrue(
+            "Expected INTERNET permission for keyless online sticker search, found $requestedPermissions",
             android.Manifest.permission.INTERNET in requestedPermissions
         )
+        assertTrue(
+            "Expected ACCESS_NETWORK_STATE permission for offline checks, found $requestedPermissions",
+            android.Manifest.permission.ACCESS_NETWORK_STATE in requestedPermissions
+        )
+        val manifestFile = java.io.File("src/main/AndroidManifest.xml")
+            .takeIf { it.exists() }
+            ?: java.io.File("app/src/main/AndroidManifest.xml")
+        if (manifestFile.exists()) {
+            val manifestXml = manifestFile.readText()
+            val internetMatches = Regex("""<uses-permission[^>]*android\.permission\.INTERNET[^>]*/>""")
+                .findAll(manifestXml)
+                .map { it.value }
+                .toList()
+            val networkStateMatches = Regex("""<uses-permission[^>]*android\.permission\.ACCESS_NETWORK_STATE[^>]*/>""")
+                .findAll(manifestXml)
+                .map { it.value }
+                .toList()
+            assertEquals("Expected exactly one active INTERNET declaration in AndroidManifest.xml", 1, internetMatches.size)
+            assertEquals("Expected exactly one active ACCESS_NETWORK_STATE declaration in AndroidManifest.xml", 1, networkStateMatches.size)
+            assertFalse("INTERNET permission must not have tools:node=\"remove\"", internetMatches.single().contains("tools:node=\"remove\""))
+            assertFalse("ACCESS_NETWORK_STATE permission must not have tools:node=\"remove\"", networkStateMatches.single().contains("tools:node=\"remove\""))
+        }
         assertEquals(
-            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.UPSCALE, StudioTab.DENOISE, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
+            listOf(StudioTab.ADJUST, StudioTab.STUDIO, StudioTab.UPSCALE, StudioTab.DENOISE, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
             StudioTab.entries
         )
     }
@@ -1209,9 +1231,9 @@ class EditorHistoryRobolectricTest {
 
     @Test
     fun `Crop and Rotate tab placement, aspect presets, transforms, auto straighten, perspective constrain, and export work cleanly`() = runTest(testDispatcher) {
-        // 1. StudioTab order puts Adjust, All, Upscale, Denoise, LUTs, Crop & Rotate, Heal, and Masks
+        // 1. StudioTab order puts Adjust, Studio, Upscale, Denoise, LUTs, Crop & Rotate, Heal, and Masks
         assertEquals(
-            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.UPSCALE, StudioTab.DENOISE, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
+            listOf(StudioTab.ADJUST, StudioTab.STUDIO, StudioTab.UPSCALE, StudioTab.DENOISE, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
             StudioTab.entries
         )
         assertEquals(

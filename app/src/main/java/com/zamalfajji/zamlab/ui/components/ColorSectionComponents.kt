@@ -221,7 +221,8 @@ fun ColorSectionContent(
             DropdownMenu(
                 expanded = showWbDropdown,
                 onDismissRequest = { showWbDropdown = false },
-                modifier = Modifier.background(StudioSurfaceElevated)
+                containerColor = StudioGlassSurface,
+                modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(12.dp))
             ) {
                 WhiteBalancePreset.MENU_OPTIONS.forEach { preset ->
                     val isSelected = preset == params.whiteBalancePreset

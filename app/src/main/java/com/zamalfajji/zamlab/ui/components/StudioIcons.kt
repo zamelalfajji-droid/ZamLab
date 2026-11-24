@@ -292,7 +292,7 @@ object StudioIcons {
         }
     }
 
-    /** 4-square grid for All */
+    /** 4-square grid (legacy alias) */
     val TabAll: ImageVector by lazy {
         buildIcon("StudioTabAll") {
             strokePath {
@@ -300,6 +300,36 @@ object StudioIcons {
                 addRoundedBox(13.7f, 3.8f, 20.2f, 10.3f, 1.8f)
                 addRoundedBox(3.8f, 13.7f, 10.3f, 20.2f, 1.8f)
                 addRoundedBox(13.7f, 13.7f, 20.2f, 20.2f, 1.8f)
+            }
+        }
+    }
+
+    /** Peeled sticker badge + sparkle icon for STUDIO (Stickers & Creative Layers) */
+    val TabStudio: ImageVector by lazy {
+        buildIcon("StudioTabStudio") {
+            strokePath {
+                // Rounded sticker card with peeled bottom-right corner
+                moveTo(14.5f, 20.0f)
+                lineTo(6.2f, 20.0f)
+                arcTo(2.2f, 2.2f, 0f, false, true, 4.0f, 17.8f)
+                lineTo(4.0f, 6.2f)
+                arcTo(2.2f, 2.2f, 0f, false, true, 6.2f, 4.0f)
+                lineTo(17.8f, 4.0f)
+                arcTo(2.2f, 2.2f, 0f, false, true, 20.0f, 6.2f)
+                lineTo(20.0f, 14.5f)
+                close()
+                // Curled peel flap crease
+                moveTo(14.5f, 20.0f)
+                lineTo(14.5f, 15.8f)
+                arcTo(1.3f, 1.3f, 0f, false, true, 15.8f, 14.5f)
+                lineTo(20.0f, 14.5f)
+                // Inner 4-point creative sparkle
+                moveTo(10.6f, 7.6f)
+                quadTo(11.1f, 10.1f, 13.6f, 10.6f)
+                quadTo(11.1f, 11.1f, 10.6f, 13.6f)
+                quadTo(10.1f, 11.1f, 7.6f, 10.6f)
+                quadTo(10.1f, 10.1f, 10.6f, 7.6f)
+                close()
             }
         }
     }

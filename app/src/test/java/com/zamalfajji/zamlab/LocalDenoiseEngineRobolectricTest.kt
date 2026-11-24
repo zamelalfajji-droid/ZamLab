@@ -70,7 +70,7 @@ class LocalDenoiseEngineRobolectricTest {
         assertEquals(
             listOf(
                 StudioTab.ADJUST,
-                StudioTab.ALL,
+                StudioTab.STUDIO,
                 StudioTab.UPSCALE,
                 StudioTab.DENOISE,
                 StudioTab.LUTS,

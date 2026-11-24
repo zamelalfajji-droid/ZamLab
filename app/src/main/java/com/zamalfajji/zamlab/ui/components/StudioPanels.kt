@@ -72,6 +72,8 @@ import com.zamalfajji.zamlab.ui.theme.StudioBorder
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCoolWhite
 import com.zamalfajji.zamlab.ui.theme.StudioCyan
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGraphite
 import com.zamalfajji.zamlab.ui.theme.StudioHairline
 import com.zamalfajji.zamlab.ui.theme.StudioMutedSlate
@@ -743,7 +745,8 @@ private fun SavePresetDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = StudioSurfaceElevated,
+        containerColor = StudioFrostedGlass,
+        shape = RoundedCornerShape(18.dp),
         title = {
             Text(
                 text = "Save Current Look",
@@ -790,6 +793,8 @@ private fun SavePresetDialog(
                 Text("Cancel", color = StudioTextSecondary)
             }
         },
-        modifier = Modifier.testTag("save_preset_dialog")
+        modifier = Modifier
+            .border(1.dp, StudioFrostedBorder, RoundedCornerShape(18.dp))
+            .testTag("save_preset_dialog")
     )
 }

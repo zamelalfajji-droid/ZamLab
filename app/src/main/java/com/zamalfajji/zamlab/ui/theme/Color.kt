@@ -5,27 +5,29 @@ import androidx.compose.ui.graphics.Color
 // Pure OLED Black & Warm Amber-Gold Studio Darkroom Palette
 val StudioOledBlack = Color(0xFF000000)       // True OLED black canvas surface
 val StudioCharcoal = StudioOledBlack          // True OLED black root canvas
-val StudioGraphite = Color(0xFF121214)        // Elevated dark-charcoal floating pill & ruler containers
-val StudioTileSurface = Color(0xFF16161A)     // Elevated dark-charcoal cards & tool tiles
-val StudioTileBorder = Color(0xFF242428)      // Subtle 1dp hairline border
-val StudioHairline = Color(0xFF242428)        // Subtle 1dp hairline border
+val StudioGraphite = Color(0xFF121214)        // Base dark-charcoal tone
+val StudioFrostedGlass = Color(0xFF121214).copy(alpha = 0.72f)  // Eye-relaxing translucent dark glass HUD
+val StudioFrostedBorder = Color(0xFF2E323C)   // Subtle 1dp frosted glass hairline border
+val StudioTileSurface = Color(0xFF16161A).copy(alpha = 0.72f)   // Translucent dark-charcoal cards & tool tiles
+val StudioTileBorder = StudioFrostedBorder    // Subtle 1dp #2E323C hairline border
+val StudioHairline = StudioFrostedBorder      // Subtle 1dp #2E323C hairline border
 val StudioCinemaAmber = Color(0xFFF5A623)     // Warm amber-gold active highlight, dot & ruler needle
-val StudioAmberPillFill = Color(0xFF261D0E)   // Subtle amber-tinted active pill fill on OLED
-val StudioDockActivePill = Color(0xFF261D0E)  // Active capsule dock pill fill
+val StudioAmberPillFill = Color(0xFF261D0E).copy(alpha = 0.80f) // Translucent amber-tinted active pill fill
+val StudioDockActivePill = Color(0xFF261D0E).copy(alpha = 0.84f) // Active capsule dock pill fill
 val StudioCoolWhite = Color(0xFFFFFFFF)       // Crisp pure white typography
 val StudioMutedSlate = Color(0xFF8E9099)      // Neutral muted label ink
 
 val StudioBackground = StudioOledBlack
 val StudioSurface = StudioGraphite
-val StudioGlassSurface = Color(0xF2121214)    // Elevated #121214 dark-charcoal floating pills/bars
-val StudioGlassSurfaceDeep = Color(0xFA121214)
-val StudioGlassHairline = StudioHairline
-val StudioGlassHighlight = Color(0xFF1F1C16)  // Warm dark-charcoal active highlight
+val StudioGlassSurface = StudioFrostedGlass   // Translucent 72% dark glass floating pills, drawers & trays
+val StudioGlassSurfaceDeep = Color(0xFF121214).copy(alpha = 0.80f)
+val StudioGlassHairline = StudioFrostedBorder
+val StudioGlassHighlight = Color(0xFF2E323C)  // Subtle frosted glass highlight / drag handle
 
 val StudioSurfaceElevated = StudioTileSurface
-val StudioSurfaceHighest = Color(0xFF1E1E22)
-val StudioBorder = StudioHairline
-val StudioBorderSubtle = StudioTileBorder
+val StudioSurfaceHighest = Color(0xFF1E1E22).copy(alpha = 0.78f)
+val StudioBorder = StudioFrostedBorder
+val StudioBorderSubtle = StudioFrostedBorder
 
 val StudioActiveOffWhite = StudioCoolWhite
 val StudioLuxuryGold = StudioCinemaAmber

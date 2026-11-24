@@ -102,6 +102,8 @@ import com.zamalfajji.zamlab.ui.theme.StudioBorder
 import com.zamalfajji.zamlab.ui.theme.StudioBorderSubtle
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCoolWhite
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHairline
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHighlight
 import com.zamalfajji.zamlab.ui.theme.StudioGlassSurface
@@ -173,8 +175,10 @@ private val AdjustStripEntries: List<StripEntry> = listOf(
     StripEntry.Slider(FocusSliderTool.TINT),
     StripEntry.Slider(FocusSliderTool.VIBRANCE),
     StripEntry.Slider(FocusSliderTool.SATURATION),
-    StripEntry.Slider(FocusSliderTool.SHARPEN),
+    StripEntry.Curve,
+    StripEntry.HslColor,
     StripEntry.Divider,
+    StripEntry.Slider(FocusSliderTool.SHARPEN),
     StripEntry.Slider(FocusSliderTool.TEXTURE),
     StripEntry.Slider(FocusSliderTool.CLARITY),
     StripEntry.Slider(FocusSliderTool.DEHAZE),
@@ -185,8 +189,6 @@ private val AdjustStripEntries: List<StripEntry> = listOf(
     StripEntry.Slider(FocusSliderTool.CHROMATIC_ABERRATION),
     StripEntry.Slider(FocusSliderTool.ANAMORPHIC_STREAK),
     StripEntry.BlackAndWhite,
-    StripEntry.Curve,
-    StripEntry.HslColor,
     StripEntry.Profile
 )
 
@@ -415,8 +417,10 @@ fun AdjustPanel(
         ModalBottomSheet(
             onDismissRequest = { showCurveSheet = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = StudioSurface,
-            contentColor = StudioTextPrimary
+            containerColor = StudioFrostedGlass,
+            scrimColor = Color.Black.copy(alpha = 0.24f),
+            contentColor = StudioTextPrimary,
+            modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
         ) {
             Column(
                 modifier = Modifier
@@ -484,8 +488,10 @@ fun AdjustPanel(
         ModalBottomSheet(
             onDismissRequest = { showHslSheet = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = StudioSurface,
-            contentColor = StudioTextPrimary
+            containerColor = StudioFrostedGlass,
+            scrimColor = Color.Black.copy(alpha = 0.24f),
+            contentColor = StudioTextPrimary,
+            modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
         ) {
             Column(
                 modifier = Modifier

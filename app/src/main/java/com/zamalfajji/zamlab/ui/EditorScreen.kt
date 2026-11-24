@@ -8,6 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.text.style.TextAlign
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,7 +26,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -35,6 +40,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -61,6 +67,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
@@ -109,8 +116,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -120,6 +129,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -130,6 +140,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -143,6 +155,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zamalfajji.zamlab.R
@@ -159,19 +172,23 @@ import com.zamalfajji.zamlab.editor.ImageIoHelper
 import com.zamalfajji.zamlab.editor.PhotoFormatInfo
 import com.zamalfajji.zamlab.editor.StudioTab
 import com.zamalfajji.zamlab.ui.components.AdjustPanel
-import com.zamalfajji.zamlab.ui.components.AllParametersPanel
 import com.zamalfajji.zamlab.ui.components.CompositionGridSelectorPill
 import com.zamalfajji.zamlab.ui.components.CropPanel
 import com.zamalfajji.zamlab.ui.components.DenoisePanel
 import com.zamalfajji.zamlab.ui.components.ExportBottomSheet
 import com.zamalfajji.zamlab.ui.components.HealPanel
+import com.zamalfajji.zamlab.ui.components.LeftEdgeLayersHandle
 import com.zamalfajji.zamlab.ui.components.LutPanel
 import com.zamalfajji.zamlab.ui.components.MaskPanel
+import com.zamalfajji.zamlab.ui.components.OledLayerDrawer
+import com.zamalfajji.zamlab.ui.components.OledMaskBrushBar
 import com.zamalfajji.zamlab.ui.components.PhotoViewport
 import com.zamalfajji.zamlab.ui.components.ProfileBrowserSheet
 import com.zamalfajji.zamlab.ui.components.ProfileMenuSheet
+import com.zamalfajji.zamlab.ui.components.RightEdgeToolsHandle
 import com.zamalfajji.zamlab.ui.components.SpiralFlipPillButton
 import com.zamalfajji.zamlab.ui.components.StudioIcons
+import com.zamalfajji.zamlab.ui.components.StudioStickersPanel
 import com.zamalfajji.zamlab.ui.components.UpscalePanel
 import com.zamalfajji.zamlab.ui.theme.StudioActiveOffWhite
 import com.zamalfajji.zamlab.ui.theme.StudioAmberPillFill
@@ -180,6 +197,8 @@ import com.zamalfajji.zamlab.ui.theme.StudioCharcoal
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCoolWhite
 import com.zamalfajji.zamlab.ui.theme.StudioDockActivePill
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHairline
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHighlight
 import com.zamalfajji.zamlab.ui.theme.StudioGlassSurface
@@ -202,12 +221,14 @@ import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
 
 
+private enum class GalleryPickPurpose {
+    OPEN_BASE_PHOTO,
+    ADD_PHOTO_LAYER,
+    CREATE_STICKER_CUTOUT
+}
+
 @Composable
-
-
 fun EditorScreen(
-
-
     viewModel: EditorViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -222,6 +243,9 @@ fun EditorScreen(
     var pendingSafOptions by remember { mutableStateOf(ExportOptions()) }
     var cameraPermissionUiState by remember { mutableStateOf(CameraPermissionUiState.IDLE) }
     var hasRequestedCameraPermission by rememberSaveable { mutableStateOf(false) }
+    var galleryPermissionUiState by remember { mutableStateOf(CameraPermissionUiState.IDLE) }
+    var hasRequestedGalleryPermission by rememberSaveable { mutableStateOf(false) }
+    var galleryPickPurposeName by rememberSaveable { mutableStateOf(GalleryPickPurpose.OPEN_BASE_PHOTO.name) }
     var pendingCaptureUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCaptureFilePath by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -306,19 +330,82 @@ fun EditorScreen(
         }
     )
 
-    // Primary photo import: opens Android system Photo Picker directly (zero storage permissions)
+    // Primary photo import: opens Android system Photo Picker after runtime gallery permission check
+    val handlePickedGalleryUri: (Uri) -> Unit = { pickedUri ->
+        val purpose = GalleryPickPurpose.entries.firstOrNull { it.name == galleryPickPurposeName }
+            ?: GalleryPickPurpose.OPEN_BASE_PHOTO
+        galleryPickPurposeName = GalleryPickPurpose.OPEN_BASE_PHOTO.name
+        when (purpose) {
+            GalleryPickPurpose.OPEN_BASE_PHOTO -> viewModel.openPhotoFromUri(pickedUri)
+            GalleryPickPurpose.ADD_PHOTO_LAYER -> viewModel.addPhotoLayerFromUri(pickedUri)
+            GalleryPickPurpose.CREATE_STICKER_CUTOUT -> viewModel.createStickerFromPhotoUri(pickedUri)
+        }
+    }
+
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
         onResult = { uri ->
-            uri?.let { viewModel.openPhotoFromUri(it) }
+            if (uri != null) {
+                handlePickedGalleryUri(uri)
+            } else {
+                galleryPickPurposeName = GalleryPickPurpose.OPEN_BASE_PHOTO.name
+            }
         }
     )
 
-    // Zero-permission SAF fallback when Photo Picker is unavailable on older/custom ROMs
+    // Fallback gallery picker when Photo Picker is unavailable on older/custom ROMs
     val fallbackGalleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
-            uri?.let { viewModel.openPhotoFromUri(it) }
+            if (uri != null) {
+                handlePickedGalleryUri(uri)
+            } else {
+                galleryPickPurposeName = GalleryPickPurpose.OPEN_BASE_PHOTO.name
+            }
+        }
+    )
+
+    val launchGalleryPicker: () -> Unit = {
+        val launched = if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+            runCatching {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }.isSuccess
+        } else {
+            false
+        }
+        if (!launched) {
+            runCatching {
+                fallbackGalleryLauncher.launch(arrayOf("image/*"))
+            }.onFailure {
+                uiScope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = galleryPickerUnavailableMsg,
+                        duration = SnackbarDuration.Short
+                    )
+                }
+            }
+        }
+    }
+
+    // Explicit runtime media/storage permission launcher (READ_MEDIA_IMAGES on API 33+, READ_EXTERNAL_STORAGE on API <= 32)
+    val galleryPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            if (granted) {
+                galleryPermissionUiState = CameraPermissionUiState.IDLE
+                launchGalleryPicker()
+            } else {
+                val permission = CameraCaptureHelper.requiredGalleryPermission()
+                val activity = CameraCaptureHelper.findActivity(context)
+                val shouldShowRationale = activity != null &&
+                    ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)
+                galleryPermissionUiState = CameraCaptureHelper.resolveCameraPermissionDenial(
+                    shouldShowRationale = shouldShowRationale,
+                    hasRequestedBefore = hasRequestedGalleryPermission
+                )
+            }
         }
     )
 
@@ -335,6 +422,16 @@ fun EditorScreen(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             uri?.let { viewModel.importCubeLutFromUri(it) }
+        }
+    )
+
+    // Zero-permission SAF multi-document picker for importing PNG/WebP stickers or .zip sticker packs
+    val stickerPackPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+        onResult = { uris ->
+            if (uris.isNotEmpty()) {
+                viewModel.importStickerPackFromUris(uris)
+            }
         }
     )
 
@@ -435,28 +532,27 @@ fun EditorScreen(
         }
     }
 
-    val openPhotoAction: () -> Unit = {
-        val launched = if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
-            runCatching {
-                photoPickerLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            }.isSuccess
+    val requestGalleryWithPermission: (GalleryPickPurpose) -> Unit = { purpose ->
+        galleryPickPurposeName = purpose.name
+        val requiredPermission = CameraCaptureHelper.requiredGalleryPermission()
+        if (CameraCaptureHelper.hasGalleryPermission(context)) {
+            launchGalleryPicker()
         } else {
-            false
+            hasRequestedGalleryPermission = true
+            galleryPermissionLauncher.launch(requiredPermission)
         }
-        if (!launched) {
-            runCatching {
-                fallbackGalleryLauncher.launch(arrayOf("image/*"))
-            }.onFailure {
-                uiScope.launch {
-                    snackbarHostState.showSnackbar(
-                        message = galleryPickerUnavailableMsg,
-                        duration = SnackbarDuration.Short
-                    )
-                }
-            }
-        }
+    }
+
+    val openPhotoAction: () -> Unit = {
+        requestGalleryWithPermission(GalleryPickPurpose.OPEN_BASE_PHOTO)
+    }
+
+    val addPhotoLayerAction: () -> Unit = {
+        requestGalleryWithPermission(GalleryPickPurpose.ADD_PHOTO_LAYER)
+    }
+
+    val createStickerFromPhotoAction: () -> Unit = {
+        requestGalleryWithPermission(GalleryPickPurpose.CREATE_STICKER_CUTOUT)
     }
 
     val openRawFileAction = {
@@ -465,6 +561,18 @@ fun EditorScreen(
 
     val importLutAction = {
         lutPickerLauncher.launch(arrayOf("*/*"))
+    }
+
+    val importStickerPackAction: () -> Unit = {
+        runCatching {
+            stickerPackPickerLauncher.launch(com.zamalfajji.zamlab.editor.StickerLibrary.PACK_PICKER_MIME_TYPES)
+        }.onFailure {
+            Toast.makeText(
+                context,
+                context.getString(R.string.gallery_picker_unavailable_error),
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
     val canReset = !uiState.gradingParams.isDefault ||
@@ -486,6 +594,27 @@ fun EditorScreen(
         uiState.activeTab != StudioTab.DENOISE &&
         uiState.activeEyedropperMode == com.zamalfajji.zamlab.editor.EyedropperMode.NONE
 
+    var isBottomToolDockVisible by rememberSaveable { mutableStateOf(true) }
+    var isGridSelectorOpen by remember { mutableStateOf(false) }
+    var showPhotoInfoHud by remember { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
+
+    BackHandler(enabled = uiState.isLayerDrawerExpanded) {
+        viewModel.setLayerDrawerExpanded(false)
+    }
+
+    BackHandler(enabled = uiState.isToolDrawerExpanded) {
+        viewModel.setToolDrawerExpanded(false)
+    }
+
+    BackHandler(enabled = uiState.isLayerMaskBrushMode) {
+        viewModel.exitLayerMaskBrushMode()
+    }
+
+    BackHandler(enabled = uiState.isDrawingMode) {
+        viewModel.finishDrawingMode()
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -503,286 +632,626 @@ fun EditorScreen(
             }
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val isWideLayout = maxWidth >= 720.dp
             val activeTexture = uiState.activePreviewTexture
+            val rootHeight = maxHeight
 
-            if (isWideLayout) {
-                Row(
+            val activeTabTitle = when (uiState.activeTab) {
+                StudioTab.ADJUST -> stringResource(R.string.tab_adjust)
+                StudioTab.STUDIO -> stringResource(R.string.tab_studio)
+                StudioTab.UPSCALE -> stringResource(R.string.tab_upscale)
+                StudioTab.DENOISE -> stringResource(R.string.tab_denoise)
+                StudioTab.LUTS -> stringResource(R.string.tab_luts)
+                StudioTab.CROP -> stringResource(R.string.tab_crop)
+                StudioTab.HEAL -> stringResource(R.string.tab_heal)
+                StudioTab.MASK -> stringResource(R.string.tab_mask)
+            }
+            val activeTabIcon = when (uiState.activeTab) {
+                StudioTab.ADJUST -> StudioIcons.TabAdjust
+                StudioTab.STUDIO -> StudioIcons.TabStudio
+                StudioTab.UPSCALE -> StudioIcons.TabUpscale
+                StudioTab.DENOISE -> StudioIcons.TabDenoise
+                StudioTab.LUTS -> StudioIcons.TabLuts
+                StudioTab.CROP -> StudioIcons.TabCrop
+                StudioTab.HEAL -> StudioIcons.TabHeal
+                StudioTab.MASK -> StudioIcons.TabMasks
+            }
+            val activeGridMode = if (uiState.activeTab == StudioTab.CROP) {
+                uiState.effectiveCropGridMode
+            } else {
+                uiState.compositionGridMode
+            }
+            val hasMasksOrMaskTab = uiState.activeTab == StudioTab.MASK || uiState.gradingParams.masks.isNotEmpty()
+            val isMaskOverlayHighlighted = uiState.showMaskOverlay && hasMasksOrMaskTab
+
+            val activeDockMaxHeight = when (uiState.activeTab) {
+                StudioTab.STUDIO -> minOf(296.dp, (rootHeight * 0.36f).coerceAtLeast(204.dp))
+                StudioTab.UPSCALE -> minOf(256.dp, (rootHeight * 0.34f).coerceAtLeast(218.dp))
+                StudioTab.DENOISE, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK ->
+                    minOf(232.dp, (rootHeight * 0.33f).coerceAtLeast(184.dp))
+                StudioTab.LUTS -> minOf(216.dp, (rootHeight * 0.31f).coerceAtLeast(172.dp))
+                StudioTab.ADJUST -> minOf(196.dp, (rootHeight * 0.28f).coerceAtLeast(156.dp))
+            }
+
+            // Strict 4-Zone Vertical Column Hierarchy (Zero Overlap Between Photo, Tools/Brush Bar, and 8-Tab Dock)
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                // ZONE 1: Top Translucent Frosted-Glass Header (statusBarsPadding + displayCutoutPadding)
+                TopFloatingGlassHeader(
+                    photoFormatInfo = uiState.photoFormatInfo,
+                    canExport = uiState.fullWidth > 0,
+                    isExporting = uiState.exportStatus is ExportStatus.Exporting,
+                    canUndo = uiState.canUndo,
+                    canRedo = uiState.canRedo,
+                    isComparingOriginal = uiState.isComparingOriginal,
+                    isSplitCompareEnabled = uiState.isSplitCompareEnabled,
+                    showHistogram = uiState.showHistogram,
+                    onCapturePhoto = capturePhotoAction,
+                    onOpenPhoto = openPhotoAction,
+                    onOpenRawFile = openRawFileAction,
+                    onUndo = viewModel::undo,
+                    onRedo = viewModel::redo,
+                    onCompareChanged = viewModel::setComparingOriginal,
+                    onToggleSplitCompare = viewModel::toggleSplitCompare,
+                    onToggleHistogram = viewModel::toggleHistogram,
+                    onQuickShare = viewModel::exportAndShareNow,
+                    onOpenExport = { showExportSheet = true },
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
                         .statusBarsPadding()
                         .displayCutoutPadding()
-                        .navigationBarsPadding()
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                )
+
+                // ZONE 2: Main Unobstructed PhotoViewport (Modifier.weight(1f))
+                // Contains ONLY the photo canvas and the slim left-edge "LAYERS ▸" and right-edge "TOOLS ◂" slide-out handles/drawers
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp)
                 ) {
-                    ImmersiveCanvasStage(
+                    val stageWidth = maxWidth
+                    val stageHeight = maxHeight
+                    val leftDrawerWidth = minOf((stageWidth - 56.dp).coerceAtLeast(244.dp), 336.dp)
+                    val rightDrawerWidth = minOf((stageWidth - 56.dp).coerceAtLeast(248.dp), 336.dp)
+                    val drawerMaxHeight = (stageHeight - 16.dp).coerceAtLeast(160.dp)
+
+                    PhotoCanvasStage(
                         uiState = uiState,
                         activeTexture = activeTexture,
-                        canReset = canReset,
-                        canShowTouchAdjust = canShowTouchAdjust,
-                        isTouchAdjustPillVisible = isTouchAdjustPillVisible,
-                        applyTopStatusBarPadding = false,
                         viewModel = viewModel,
                         onZoomChanged = { isViewportZoomed = it },
-                        onCapturePhoto = capturePhotoAction,
-                        onOpenPhoto = openPhotoAction,
-                        onOpenRawFile = openRawFileAction,
-                        onQuickShare = viewModel::exportAndShareNow,
-                        onOpenExport = { showExportSheet = true },
-                        modifier = Modifier
-                            .weight(1.48f)
-                            .fillMaxHeight()
+                        modifier = Modifier.fillMaxSize()
                     )
 
-                    Column(
+                    // Left-Edge Slim Handle Tab ("LAYERS ▸") when Left Layer Drawer is closed
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !uiState.isLayerDrawerExpanded && !isTouchAdjustPillVisible,
+                        enter = fadeIn(tween(150)) + slideInHorizontally(tween(180)) { -it },
+                        exit = fadeOut(tween(120)) + slideOutHorizontally(tween(140)) { -it },
                         modifier = Modifier
-                            .width(360.dp)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(StudioGlassSurface)
-                            .border(1.dp, StudioGlassHairline, RoundedCornerShape(16.dp))
-                            .padding(top = 8.dp, bottom = 10.dp),
-                        verticalArrangement = Arrangement.SpaceBetween
+                            .align(Alignment.CenterStart)
+                            .zIndex(6f)
+                            .displayCutoutPadding()
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                        ) {
-                            ActiveToolPanel(
-                                uiState = uiState,
-                                viewModel = viewModel,
-                                onImportLut = importLutAction,
-                                onOpenProfileMenu = { showProfileMenu = true }
-                            )
-                        }
-
-                        FloatingCapsuleNavDock(
-                            uiState = uiState,
-                            onSelectTab = viewModel::selectTab,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        LeftEdgeLayersHandle(
+                            layerCount = uiState.layers.size,
+                            isExpanded = false,
+                            isSmartCutProcessing = uiState.isSmartCutProcessing,
+                            isLayerMaskBrushMode = uiState.isLayerMaskBrushMode,
+                            onClick = { viewModel.setLayerDrawerExpanded(true) }
                         )
                     }
-                }
 
-                StudioDarkroomSnackbarHost(
-                    hostState = snackbarHostState,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
-                        .padding(bottom = 84.dp)
-                )
-            } else {
-                var allPanelFraction by remember { mutableFloatStateOf(0.48f) }
-                var isDraggingAllHandle by remember { mutableStateOf(false) }
-                val animatedAllFraction by animateFloatAsState(
-                    targetValue = allPanelFraction,
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioNoBouncy,
-                        stiffness = Spring.StiffnessMedium
-                    ),
-                    label = "all_panel_split_fraction"
-                )
-                val activeAllFraction = if (isDraggingAllHandle) allPanelFraction else animatedAllFraction
-                val haptic = LocalHapticFeedback.current
-                val density = LocalDensity.current
+                    // Right-Edge Slim Handle Tab ("TOOLS ◂") when Right Inspector/Tools Drawer is closed
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !uiState.isToolDrawerExpanded && !isTouchAdjustPillVisible,
+                        enter = fadeIn(tween(150)) + slideInHorizontally(tween(180)) { it },
+                        exit = fadeOut(tween(120)) + slideOutHorizontally(tween(140)) { it },
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .zIndex(6f)
+                            .displayCutoutPadding()
+                    ) {
+                        RightEdgeToolsHandle(
+                            activeTabLabel = activeTabTitle,
+                            isExpanded = false,
+                            hasActiveEdits = canReset,
+                            onClick = { viewModel.setToolDrawerExpanded(true) }
+                        )
+                    }
 
-                Scaffold(
-                    containerColor = StudioCharcoal,
-                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                    snackbarHost = {
-                        // Positioned directly above the 68dp floating capsule dock
-                        StudioDarkroomSnackbarHost(hostState = snackbarHostState)
-                    },
-                    bottomBar = {
-                        // Pinned 68dp Floating Frosted-Glass Capsule Navigation Dock
+                    // Tap-outside canvas dismiss scrim for Left-Edge Slide-Out Layer Drawer
+                    if (uiState.isLayerDrawerExpanded) {
+                        val dismissLayerCd = stringResource(R.string.cd_dismiss_layer_drawer)
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .background(StudioCharcoal)
-                                .navigationBarsPadding()
-                                .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            FloatingCapsuleNavDock(
-                                uiState = uiState,
-                                onSelectTab = viewModel::selectTab,
+                                .fillMaxSize()
+                                .zIndex(9f)
+                                .background(Color.Black.copy(alpha = 0.14f))
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { viewModel.setLayerDrawerExpanded(false) }
+                                )
+                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .zIndex(9.5f)
+                                .fillMaxHeight()
+                                .width((stageWidth - leftDrawerWidth - 48.dp).coerceAtLeast(48.dp))
+                                .semantics { contentDescription = dismissLayerCd }
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { viewModel.setLayerDrawerExpanded(false) }
+                                )
+                                .testTag("layer_drawer_outside_scrim")
+                        )
+                    }
+
+                    // Left-Edge Slide-Out Translucent Frosted-Glass Layer Drawer
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = uiState.isLayerDrawerExpanded,
+                        enter = fadeIn(animationSpec = tween(160)) + slideInHorizontally(
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium
+                            ),
+                            initialOffsetX = { -it }
+                        ),
+                        exit = fadeOut(animationSpec = tween(140)) + slideOutHorizontally(
+                            animationSpec = tween(160),
+                            targetOffsetX = { -it }
+                        ),
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .zIndex(10f)
+                            .padding(vertical = 8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OledLayerDrawer(
+                                layers = uiState.layers,
+                                activeLayerId = uiState.activeLayerId,
+                                isExpanded = true,
+                                isSmartCutProcessing = uiState.isSmartCutProcessing,
+                                smartCutStatusLabel = uiState.smartCutStatusLabel,
+                                smartCutRemoveSubjectFromBg = uiState.smartCutRemoveSubjectFromBg,
+                                isLayerFxExpanded = uiState.isLayerFxExpanded,
+                                isLayerMaskBrushMode = uiState.isLayerMaskBrushMode,
+                                onToggleExpanded = { viewModel.setLayerDrawerExpanded(false) },
+                                onSelectLayer = viewModel::selectLayer,
+                                onAddPhotoLayer = addPhotoLayerAction,
+                                onRunSmartCut = viewModel::runSmartCutOnActiveLayer,
+                                onToggleSmartCutCleanBg = viewModel::toggleSmartCutRemoveSubjectFromBg,
+                                onToggleLayerMaskBrush = viewModel::toggleLayerMaskBrushMode,
+                                onToggleLayerFx = viewModel::toggleLayerFxPanel,
+                                onSelectBlendMode = viewModel::updateActiveLayerBlendMode,
+                                onBokehBlurChange = viewModel::updateActiveLayerBokehBlur,
+                                onResetBokehBlur = viewModel::resetActiveLayerBokehBlur,
+                                onEdgeFeatherChange = viewModel::updateActiveLayerEdgeFeather,
+                                onResetEdgeFeather = viewModel::resetActiveLayerEdgeFeather,
+                                onToggleLayerVisibility = viewModel::toggleLayerVisibility,
+                                onMoveLayerUp = viewModel::moveLayerUp,
+                                onMoveLayerDown = viewModel::moveLayerDown,
+                                onDeleteLayer = viewModel::deleteLayer,
+                                onLayerOpacityChange = viewModel::updateLayerOpacity,
+                                onLayerOpacityDraggingChanged = viewModel::setSliderDragging,
+                                onResetActiveLayerTransform = viewModel::resetActiveLayerTransform,
+                                shape = RoundedCornerShape(topEnd = 18.dp, bottomEnd = 18.dp),
                                 modifier = Modifier
-                                    .widthIn(max = 500.dp)
-                                    .fillMaxWidth()
+                                    .width(leftDrawerWidth)
+                                    .heightIn(max = drawerMaxHeight)
+                            )
+
+                            LeftEdgeLayersHandle(
+                                layerCount = uiState.layers.size,
+                                isExpanded = true,
+                                isSmartCutProcessing = uiState.isSmartCutProcessing,
+                                isLayerMaskBrushMode = uiState.isLayerMaskBrushMode,
+                                onClick = { viewModel.setLayerDrawerExpanded(false) }
                             )
                         }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                ) { innerPadding ->
-                    // Dynamic Split Workspace above the pinned 68dp bottom dock
-                    BoxWithConstraints(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                    ) {
-                        val workspaceHeight = maxHeight
-                        val workspaceHeightPx = with(density) { workspaceHeight.toPx() }.coerceAtLeast(1f)
-                        val isAllTab = uiState.activeTab == StudioTab.ALL
+                    }
 
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            // 1. Dynamic Photo Viewport Canvas (weight(1f) shrinks smoothly when tool panel opens)
-                            ImmersiveCanvasStage(
-                                uiState = uiState,
-                                activeTexture = activeTexture,
-                                canReset = canReset,
-                                canShowTouchAdjust = canShowTouchAdjust,
-                                isTouchAdjustPillVisible = isTouchAdjustPillVisible,
-                                applyTopStatusBarPadding = true,
-                                viewModel = viewModel,
-                                onZoomChanged = { isViewportZoomed = it },
-                                onCapturePhoto = capturePhotoAction,
-                                onOpenPhoto = openPhotoAction,
-                                onOpenRawFile = openRawFileAction,
-                                onQuickShare = viewModel::exportAndShareNow,
-                                onOpenExport = { showExportSheet = true },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth()
-                                    .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 4.dp)
+                    // Tap-outside canvas dismiss scrim for Right-Edge Slide-Out Inspector Drawer
+                    if (uiState.isToolDrawerExpanded) {
+                        val dismissToolCd = stringResource(R.string.cd_dismiss_tool_drawer)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .zIndex(9f)
+                                .background(Color.Black.copy(alpha = 0.12f))
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { viewModel.setToolDrawerExpanded(false) }
+                                )
+                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .zIndex(9.5f)
+                                .fillMaxHeight()
+                                .width((stageWidth - rightDrawerWidth - 48.dp).coerceAtLeast(48.dp))
+                                .semantics { contentDescription = dismissToolCd }
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { viewModel.setToolDrawerExpanded(false) }
+                                )
+                                .testTag("tool_drawer_outside_scrim")
+                        )
+                    }
+
+                    // Right-Edge Slide-Out Translucent Frosted-Glass Inspector & Quick-Controls Drawer
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = uiState.isToolDrawerExpanded,
+                        enter = fadeIn(animationSpec = tween(160)) + slideInHorizontally(
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium
+                            ),
+                            initialOffsetX = { it }
+                        ),
+                        exit = fadeOut(animationSpec = tween(140)) + slideOutHorizontally(
+                            animationSpec = tween(160),
+                            targetOffsetX = { it }
+                        ),
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .zIndex(10f)
+                            .padding(vertical = 8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RightEdgeToolsHandle(
+                                activeTabLabel = activeTabTitle,
+                                isExpanded = true,
+                                hasActiveEdits = canReset,
+                                onClick = { viewModel.setToolDrawerExpanded(false) }
                             )
 
-                            // 2. Active Tool Panel (bounded so it never overlaps or hides the pinned bottom dock)
-                            val maxAllPanelHeight = (workspaceHeight * 0.50f).coerceAtLeast(156.dp)
-                            val cappedToolMax = minOf(240.dp, (workspaceHeight * 0.48f).coerceAtLeast(140.dp))
-                            val cappedToolMin = minOf(140.dp, cappedToolMax)
-
-                            Box(
+                            val rightDrawerShape = RoundedCornerShape(topStart = 18.dp, bottomStart = 18.dp)
+                            Surface(
+                                shape = rightDrawerShape,
+                                color = StudioFrostedGlass,
+                                shadowElevation = 0.dp,
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .animateContentSize(
-                                        animationSpec = if (isDraggingAllHandle) {
-                                            snap()
-                                        } else {
-                                            spring(
-                                                dampingRatio = Spring.DampingRatioNoBouncy,
-                                                stiffness = Spring.StiffnessMediumLow
-                                            )
-                                        }
-                                    )
+                                    .width(rightDrawerWidth)
+                                    .heightIn(max = drawerMaxHeight)
+                                    .border(1.dp, StudioFrostedBorder, rightDrawerShape)
+                                    .testTag("right_tool_drawer")
                             ) {
-                                if (isAllTab) {
-                                    val minAllHeight = minOf(180.dp, maxAllPanelHeight)
-                                    val panelHeight = (workspaceHeight * activeAllFraction)
-                                        .coerceIn(minAllHeight, maxAllPanelHeight)
-                                    val sheetShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
-                                    val dragHandleCd = stringResource(R.string.cd_drag_resize_panel)
-
-                                    Column(
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .verticalScroll(rememberScrollState())
+                                        .padding(top = 6.dp, bottom = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    // Header: Active Tab Badge + Inspector Title + Histogram Toggle + Close
+                                    Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(panelHeight)
-                                            .padding(horizontal = 8.dp)
-                                            .clip(sheetShape)
-                                            .background(StudioGlassSurface)
-                                            .border(1.dp, StudioGlassHairline, sheetShape)
-                                            .testTag("all_adaptive_sheet")
+                                            .padding(start = 12.dp, end = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        // Frosted-glass drag handle bar (48dp touch target: drag to resize, tap to cycle height)
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(48.dp)
-                                                .semantics { contentDescription = dragHandleCd }
-                                                .clickable {
-                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                    allPanelFraction = when {
-                                                        allPanelFraction < 0.38f -> 0.42f
-                                                        allPanelFraction < 0.46f -> 0.48f
-                                                        else -> 0.32f
-                                                    }
-                                                }
-                                                .pointerInput(workspaceHeightPx) {
-                                                    detectVerticalDragGestures(
-                                                        onDragStart = { isDraggingAllHandle = true },
-                                                        onVerticalDrag = { change, dragAmount ->
-                                                            change.consume()
-                                                            val deltaFraction = -dragAmount / workspaceHeightPx
-                                                            allPanelFraction = (allPanelFraction + deltaFraction)
-                                                                .coerceIn(0.28f, 0.50f)
-                                                        },
-                                                        onDragEnd = {
-                                                            isDraggingAllHandle = false
-                                                            if (kotlin.math.abs(allPanelFraction - 0.48f) < 0.03f) {
-                                                                allPanelFraction = 0.48f
-                                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                            }
-                                                        },
-                                                        onDragCancel = { isDraggingAllHandle = false }
-                                                    )
-                                                }
-                                                .testTag("all_panel_drag_handle"),
-                                            contentAlignment = Alignment.Center
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = activeTabIcon,
+                                                contentDescription = null,
+                                                tint = StudioCinemaAmber,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Text(
+                                                text = "${stringResource(R.string.inspector_drawer_title).uppercase(Locale.ROOT)} · ${activeTabTitle.uppercase(Locale.ROOT)}",
+                                                style = MaterialTheme.typography.labelMedium.copy(
+                                                    fontWeight = FontWeight.Bold,
+                                                    letterSpacing = 0.7.sp
+                                                ),
+                                                color = StudioCoolWhite,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                                         ) {
                                             Box(
                                                 modifier = Modifier
-                                                    .width(if (isDraggingAllHandle) 48.dp else 38.dp)
-                                                    .height(4.dp)
+                                                    .size(48.dp)
                                                     .clip(CircleShape)
-                                                    .background(
-                                                        if (isDraggingAllHandle) {
-                                                            StudioLuxuryGold
-                                                        } else {
-                                                            Color.White.copy(alpha = 0.24f)
-                                                        }
-                                                    )
+                                                    .background(if (uiState.showHistogram) StudioAmberPillFill else Color.Transparent)
+                                                    .clickable(onClick = viewModel::toggleHistogram)
+                                                    .testTag("tool_drawer_histogram_toggle"),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = StudioIcons.HistogramBars,
+                                                    contentDescription = stringResource(R.string.cd_toggle_histogram),
+                                                    tint = if (uiState.showHistogram) StudioCinemaAmber else StudioMutedSlate,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+
+                                            IconButton(
+                                                onClick = { viewModel.setToolDrawerExpanded(false) },
+                                                modifier = Modifier
+                                                    .size(48.dp)
+                                                    .testTag("right_tool_drawer_close")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = stringResource(R.string.cd_close_tool_drawer),
+                                                    tint = StudioTextSecondary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(1.dp)
+                                            .background(StudioFrostedBorder.copy(alpha = 0.7f))
+                                    )
+
+                                    // Show / Hide Bottom Tool Panel Toggle Pill
+                                    val toggleDockCd = stringResource(R.string.cd_toggle_tool_dock)
+                                    Surface(
+                                        onClick = { isBottomToolDockVisible = !isBottomToolDockVisible },
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isBottomToolDockVisible) StudioAmberPillFill else StudioTileSurface,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp)
+                                            .defaultMinSize(minHeight = 48.dp)
+                                            .border(
+                                                1.dp,
+                                                if (isBottomToolDockVisible) StudioCinemaAmber.copy(alpha = 0.65f) else StudioFrostedBorder,
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .semantics { contentDescription = toggleDockCd }
+                                            .testTag("toggle_bottom_tool_dock_button")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = if (isBottomToolDockVisible) {
+                                                    stringResource(R.string.action_hide_tool_dock)
+                                                } else {
+                                                    stringResource(R.string.action_show_tool_dock)
+                                                },
+                                                style = MaterialTheme.typography.labelMedium.copy(
+                                                    fontWeight = FontWeight.SemiBold
+                                                ),
+                                                color = if (isBottomToolDockVisible) StudioCinemaAmber else StudioCoolWhite
+                                            )
+                                            Icon(
+                                                imageVector = activeTabIcon,
+                                                contentDescription = null,
+                                                tint = if (isBottomToolDockVisible) StudioCinemaAmber else StudioMutedSlate,
+                                                modifier = Modifier.size(16.dp)
                                             )
                                         }
+                                    }
 
+                                    // Translucent Studio Utility Strip (Touch Adjust, Histogram, Info, Mask Overlay, Grid, Copy/Paste/Reset)
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CornerUtilityPill(
+                                            canShowTouchAdjust = canShowTouchAdjust,
+                                            isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
+                                            canShowHistogram = !uiState.isSplitCompareEnabled && uiState.histogram != null,
+                                            isHistogramVisible = uiState.showHistogram,
+                                            isPhotoInfoVisible = showPhotoInfoHud,
+                                            isMaskOverlayActive = isMaskOverlayHighlighted,
+                                            canToggleMaskOverlay = hasMasksOrMaskTab,
+                                            isCompositionGridActive = activeGridMode != CompositionGridMode.OFF,
+                                            isGridSelectorOpen = isGridSelectorOpen,
+                                            canPasteEdits = uiState.canPasteEdits,
+                                            canReset = canReset,
+                                            onToggleTouchAdjust = viewModel::toggleTouchAdjust,
+                                            onToggleHistogram = viewModel::toggleHistogram,
+                                            onTogglePhotoInfo = {
+                                                showPhotoInfoHud = !showPhotoInfoHud
+                                                if (showPhotoInfoHud) isGridSelectorOpen = false
+                                            },
+                                            onToggleMaskOverlay = viewModel::toggleShowMaskOverlay,
+                                            onToggleGridSelector = {
+                                                isGridSelectorOpen = !isGridSelectorOpen
+                                                if (isGridSelectorOpen) showPhotoInfoHud = false
+                                            },
+                                            onLongPressGridClear = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                viewModel.clearCompositionGrid()
+                                                isGridSelectorOpen = false
+                                            },
+                                            onCopyEdits = viewModel::copyEdits,
+                                            onPasteEdits = viewModel::pasteEdits,
+                                            onResetAll = viewModel::resetAllAdjustments
+                                        )
+                                    }
+
+                                    if (activeGridMode == CompositionGridMode.GOLDEN_SPIRAL && !isGridSelectorOpen) {
                                         Box(
                                             modifier = Modifier
-                                                .weight(1f)
                                                 .fillMaxWidth()
+                                                .padding(horizontal = 12.dp),
+                                            contentAlignment = Alignment.Center
                                         ) {
-                                            ActiveToolPanel(
-                                                uiState = uiState,
-                                                viewModel = viewModel,
-                                                onImportLut = importLutAction,
-                                                onOpenProfileMenu = { showProfileMenu = true }
+                                            SpiralFlipPillButton(
+                                                orientation = uiState.spiralOrientation,
+                                                onFlip = viewModel::flipSpiralOrientation,
+                                                testTag = "floating_spiral_flip_button"
                                             )
                                         }
                                     }
-                                } else {
-                                    // Responsive tool panel sizing so photo preview scales down cleanly
-                                    // while keeping the LUT strength slider & horizontal thumbnail strip
-                                    // permanently visible above the bottom navigation bar on all screen heights.
-                                    val isLutsTab = uiState.activeTab == StudioTab.LUTS
-                                    val panelMax = if (isLutsTab) {
-                                        minOf(228.dp, (workspaceHeight * 0.48f).coerceAtLeast(190.dp))
-                                    } else {
-                                        cappedToolMax
-                                    }
-                                    val panelMin = if (isLutsTab) {
-                                        minOf(190.dp, panelMax)
-                                    } else {
-                                        cappedToolMin
-                                    }
-                                    val toolPanelModifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(min = panelMin, max = panelMax)
 
-                                    Box(modifier = toolPanelModifier) {
-                                        ActiveToolPanel(
-                                            uiState = uiState,
-                                            viewModel = viewModel,
-                                            onImportLut = importLutAction,
-                                            onOpenProfileMenu = { showProfileMenu = true }
-                                        )
+                                    AnimatedVisibility(visible = isGridSelectorOpen) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 10.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            CompositionGridSelectorPill(
+                                                selectedMode = activeGridMode,
+                                                spiralOrientation = uiState.spiralOrientation,
+                                                onSelectMode = { mode ->
+                                                    viewModel.setCompositionGridMode(mode)
+                                                    if (mode == CompositionGridMode.OFF) {
+                                                        isGridSelectorOpen = false
+                                                    }
+                                                },
+                                                onFlipSpiral = viewModel::flipSpiralOrientation
+                                            )
+                                        }
+                                    }
+
+                                    AnimatedVisibility(visible = showPhotoInfoHud && !isGridSelectorOpen) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 10.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            PhotoInfoHudPill(
+                                                fullWidth = uiState.fullWidth,
+                                                fullHeight = uiState.fullHeight,
+                                                photoFormatInfo = uiState.photoFormatInfo,
+                                                appliedUpscaleFactor = uiState.appliedUpscaleFactor,
+                                                maskCount = uiState.gradingParams.masks.size,
+                                                activeLutTitle = uiState.activeLut?.title
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+
+                // ZONE 3: Dedicated Active Tool & Mask/Draw Brush Dock Zone
+                // Strictly BELOW PhotoViewport and strictly ABOVE the 8-tab navigation dock (zero overlap!)
+                val showMaskBrushDock = uiState.isLayerMaskBrushMode && !uiState.isComparingOriginal
+                val showActiveToolZone = showMaskBrushDock || isBottomToolDockVisible
+
+                if (showActiveToolZone) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .zIndex(15f)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .animateContentSize(
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMediumLow
+                                )
+                            )
+                            .testTag("active_tool_dock_zone"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (showMaskBrushDock) {
+                            // Unblocked High-zIndex Mask Brush Bar directly above the 8-tab bar
+                            OledMaskBrushBar(
+                                brushMode = uiState.layerMaskBrushMode,
+                                brushSizeDp = uiState.layerMaskBrushSizeDp,
+                                brushSoftness = uiState.layerMaskBrushSoftness,
+                                activeLayerName = uiState.activeLayer?.name,
+                                onSelectMode = viewModel::setLayerMaskBrushMode,
+                                onBrushSizeChange = viewModel::updateLayerMaskBrushSizeDp,
+                                onBrushSoftnessChange = viewModel::updateLayerMaskBrushSoftness,
+                                onDone = viewModel::exitLayerMaskBrushMode,
+                                modifier = Modifier.zIndex(20f)
+                            )
+                        } else {
+                            val panelShape = RoundedCornerShape(18.dp)
+                            val panelBorderColor = if (uiState.isDrawingMode) {
+                                StudioCinemaAmber.copy(alpha = 0.72f)
+                            } else {
+                                StudioFrostedBorder
+                            }
+                            Surface(
+                                shape = panelShape,
+                                color = StudioFrostedGlass,
+                                shadowElevation = 0.dp,
+                                modifier = Modifier
+                                    .widthIn(max = 720.dp)
+                                    .fillMaxWidth()
+                                    .heightIn(max = activeDockMaxHeight)
+                                    .border(1.dp, panelBorderColor, panelShape)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 6.dp)
+                                ) {
+                                    ActiveToolPanel(
+                                        uiState = uiState,
+                                        viewModel = viewModel,
+                                        onImportLut = importLutAction,
+                                        onOpenProfileMenu = { showProfileMenu = true },
+                                        onCreateStickerFromPhoto = createStickerFromPhotoAction,
+                                        onImportStickerPack = importStickerPackAction
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ZONE 4: Bottom 8-Tab Horizontally Scrollable Capsule Navigation Dock (navigationBarsPadding)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .zIndex(8f)
+                        .navigationBarsPadding()
+                        .displayCutoutPadding()
+                        .padding(start = 10.dp, end = 10.dp, top = 2.dp, bottom = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    FloatingCapsuleNavDock(
+                        uiState = uiState,
+                        onSelectTab = { tab ->
+                            isBottomToolDockVisible = true
+                            viewModel.selectTab(tab)
+                        },
+                        modifier = Modifier
+                            .widthIn(max = 560.dp)
+                            .fillMaxWidth()
+                    )
+                }
             }
+
+            // Non-blocking Translucent Snackbar Host anchored cleanly above the bottom capsule dock
+            StudioDarkroomSnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .zIndex(30f)
+                    .navigationBarsPadding()
+                    .padding(bottom = 72.dp)
+            )
         }
     }
 
@@ -847,8 +1316,14 @@ fun EditorScreen(
     }
 
     if (cameraPermissionUiState != CameraPermissionUiState.IDLE) {
-        CameraPermissionDialog(
+        StudioPermissionDialog(
             permissionState = cameraPermissionUiState,
+            icon = StudioIcons.CameraCapture,
+            titleText = stringResource(R.string.camera_permission_title),
+            rationaleText = stringResource(R.string.camera_permission_rationale),
+            permanentlyDeniedText = stringResource(R.string.camera_permission_permanently_denied),
+            retryButtonText = stringResource(R.string.action_allow_camera),
+            testTagPrefix = "camera_permission",
             onRetryRequest = {
                 cameraPermissionUiState = CameraPermissionUiState.IDLE
                 hasRequestedCameraPermission = true
@@ -865,11 +1340,43 @@ fun EditorScreen(
             }
         )
     }
+
+    if (galleryPermissionUiState != CameraPermissionUiState.IDLE) {
+        StudioPermissionDialog(
+            permissionState = galleryPermissionUiState,
+            icon = StudioIcons.OpenPhoto,
+            titleText = stringResource(R.string.gallery_permission_title),
+            rationaleText = stringResource(R.string.gallery_permission_rationale),
+            permanentlyDeniedText = stringResource(R.string.gallery_permission_permanently_denied),
+            retryButtonText = stringResource(R.string.action_allow_gallery),
+            testTagPrefix = "gallery_permission",
+            onRetryRequest = {
+                galleryPermissionUiState = CameraPermissionUiState.IDLE
+                hasRequestedGalleryPermission = true
+                galleryPermissionLauncher.launch(CameraCaptureHelper.requiredGalleryPermission())
+            },
+            onOpenAppSettings = {
+                galleryPermissionUiState = CameraPermissionUiState.IDLE
+                runCatching {
+                    context.startActivity(CameraCaptureHelper.buildAppSettingsIntent(context))
+                }
+            },
+            onDismiss = {
+                galleryPermissionUiState = CameraPermissionUiState.IDLE
+            }
+        )
+    }
 }
 
 @Composable
-private fun CameraPermissionDialog(
+private fun StudioPermissionDialog(
     permissionState: CameraPermissionUiState,
+    icon: ImageVector,
+    titleText: String,
+    rationaleText: String,
+    permanentlyDeniedText: String,
+    retryButtonText: String,
+    testTagPrefix: String,
     onRetryRequest: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onDismiss: () -> Unit
@@ -877,16 +1384,16 @@ private fun CameraPermissionDialog(
     val isPermanentlyDenied = permissionState == CameraPermissionUiState.PERMANENTLY_DENIED
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = StudioGraphite,
+        containerColor = StudioFrostedGlass,
         titleContentColor = StudioTextPrimary,
         textContentColor = StudioTextSecondary,
         shape = RoundedCornerShape(18.dp),
         modifier = Modifier
-            .border(1.dp, StudioHairline, RoundedCornerShape(18.dp))
-            .testTag("camera_permission_dialog"),
+            .border(1.dp, StudioFrostedBorder, RoundedCornerShape(18.dp))
+            .testTag("${testTagPrefix}_dialog"),
         icon = {
             Icon(
-                imageVector = StudioIcons.CameraCapture,
+                imageVector = icon,
                 contentDescription = null,
                 tint = StudioCinemaAmber,
                 modifier = Modifier.size(28.dp)
@@ -894,7 +1401,7 @@ private fun CameraPermissionDialog(
         },
         title = {
             Text(
-                text = stringResource(R.string.camera_permission_title),
+                text = titleText,
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontWeight = FontWeight.SemiBold,
                     color = StudioTextPrimary
@@ -903,13 +1410,7 @@ private fun CameraPermissionDialog(
         },
         text = {
             Text(
-                text = stringResource(
-                    if (isPermanentlyDenied) {
-                        R.string.camera_permission_permanently_denied
-                    } else {
-                        R.string.camera_permission_rationale
-                    }
-                ),
+                text = if (isPermanentlyDenied) permanentlyDeniedText else rationaleText,
                 style = MaterialTheme.typography.bodyMedium.copy(
                     color = StudioTextSecondary,
                     lineHeight = 20.sp
@@ -928,20 +1429,18 @@ private fun CameraPermissionDialog(
                     .defaultMinSize(minHeight = 48.dp)
                     .testTag(
                         if (isPermanentlyDenied) {
-                            "camera_permission_settings_button"
+                            "${testTagPrefix}_settings_button"
                         } else {
-                            "camera_permission_retry_button"
+                            "${testTagPrefix}_retry_button"
                         }
                     )
             ) {
                 Text(
-                    text = stringResource(
-                        if (isPermanentlyDenied) {
-                            R.string.action_open_settings
-                        } else {
-                            R.string.action_allow_camera
-                        }
-                    ),
+                    text = if (isPermanentlyDenied) {
+                        stringResource(R.string.action_open_settings)
+                    } else {
+                        retryButtonText
+                    },
                     fontWeight = FontWeight.SemiBold
                 )
             }
@@ -951,7 +1450,7 @@ private fun CameraPermissionDialog(
                 onClick = onDismiss,
                 modifier = Modifier
                     .defaultMinSize(minHeight = 48.dp)
-                    .testTag("camera_permission_dismiss_button")
+                    .testTag("${testTagPrefix}_dismiss_button")
             ) {
                 Text(
                     text = stringResource(R.string.action_not_now),
@@ -963,28 +1462,14 @@ private fun CameraPermissionDialog(
 }
 
 @Composable
-private fun ImmersiveCanvasStage(
+private fun PhotoCanvasStage(
     uiState: EditorUiState,
     activeTexture: android.graphics.Bitmap?,
-    canReset: Boolean,
-    canShowTouchAdjust: Boolean,
-    isTouchAdjustPillVisible: Boolean,
-    applyTopStatusBarPadding: Boolean,
     viewModel: EditorViewModel,
     onZoomChanged: (Boolean) -> Unit,
-    onCapturePhoto: () -> Unit,
-    onOpenPhoto: () -> Unit,
-    onOpenRawFile: () -> Unit,
-    onQuickShare: () -> Unit,
-    onOpenExport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val frameShape = RoundedCornerShape(16.dp)
-    val topSystemInset = if (applyTopStatusBarPadding) {
-        WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding()
-    } else {
-        0.dp
-    }
     Box(
         modifier = modifier
             .clip(frameShape)
@@ -995,8 +1480,8 @@ private fun ImmersiveCanvasStage(
             previewBitmap = activeTexture,
             fullWidth = uiState.fullWidth,
             fullHeight = uiState.fullHeight,
-            gradingParams = uiState.gradingParams,
-            activeLut = uiState.activeLut,
+            gradingParams = uiState.backgroundGradingParams,
+            activeLut = uiState.backgroundLut,
             activeTab = uiState.activeTab,
             isComparingOriginal = uiState.isComparingOriginal,
             isSplitCompareEnabled = uiState.isSplitCompareEnabled,
@@ -1061,155 +1546,32 @@ private fun ImmersiveCanvasStage(
             onResetTouchAdjustBand = viewModel::resetTouchAdjustBand,
             onDismissTouchAdjustPill = viewModel::dismissTouchAdjustPill,
             onTouchAdjustSliderDraggingChanged = viewModel::setSliderDragging,
-            topOverlayInset = 64.dp + topSystemInset,
-            bottomOverlayInset = 62.dp,
+            layers = uiState.layers,
+            activeLayerId = uiState.activeLayerId,
+            onBeginLayerTransform = viewModel::beginLayerTransformGesture,
+            onTransformActiveLayer = viewModel::transformActiveLayer,
+            isLayerMaskBrushMode = uiState.isLayerMaskBrushMode,
+            layerMaskBrushMode = uiState.layerMaskBrushMode,
+            layerMaskBrushSizeDp = uiState.layerMaskBrushSizeDp,
+            layerMaskBrushSoftness = uiState.layerMaskBrushSoftness,
+            onBeginLayerMaskBrushStroke = viewModel::beginLayerMaskBrushStroke,
+            onAppendLayerMaskBrushStroke = viewModel::appendLayerMaskBrushStroke,
+            onFinishLayerMaskBrushStroke = viewModel::finishLayerMaskBrushStroke,
+            onSetLayerMaskBrushMode = viewModel::setLayerMaskBrushMode,
+            onLayerMaskBrushSizeChange = viewModel::updateLayerMaskBrushSizeDp,
+            onLayerMaskBrushSoftnessChange = viewModel::updateLayerMaskBrushSoftness,
+            onExitLayerMaskBrushMode = viewModel::exitLayerMaskBrushMode,
+            isDrawingMode = uiState.isDrawingMode,
+            drawBrushSizeDp = uiState.drawBrushSizeDp,
+            drawColorArgb = uiState.drawColorArgb,
+            onBeginDrawStroke = viewModel::beginDrawStroke,
+            onAppendDrawStroke = viewModel::appendDrawStroke,
+            onFinishDrawStroke = viewModel::finishDrawStroke,
+            topOverlayInset = 10.dp,
+            bottomOverlayInset = 10.dp,
+            showEmbeddedMaskBrushBar = false,
             modifier = Modifier.fillMaxSize()
         )
-
-        // Top Floating Frosted-Glass Header: Emblem + Gallery / RAW Import | Undo / Redo / Before-After | Quick Share + Export
-        TopFloatingGlassHeader(
-            photoFormatInfo = uiState.photoFormatInfo,
-            canExport = uiState.fullWidth > 0,
-            isExporting = uiState.exportStatus is ExportStatus.Exporting,
-            canUndo = uiState.canUndo,
-            canRedo = uiState.canRedo,
-            isComparingOriginal = uiState.isComparingOriginal,
-            isSplitCompareEnabled = uiState.isSplitCompareEnabled,
-            onCapturePhoto = onCapturePhoto,
-            onOpenPhoto = onOpenPhoto,
-            onOpenRawFile = onOpenRawFile,
-            onUndo = viewModel::undo,
-            onRedo = viewModel::redo,
-            onCompareChanged = viewModel::setComparingOriginal,
-            onToggleSplitCompare = viewModel::toggleSplitCompare,
-            onQuickShare = onQuickShare,
-            onOpenExport = onOpenExport,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .then(
-                    if (applyTopStatusBarPadding) {
-                        Modifier
-                            .statusBarsPadding()
-                            .displayCutoutPadding()
-                    } else {
-                        Modifier
-                    }
-                )
-                .padding(horizontal = 8.dp, vertical = 8.dp)
-        )
-
-        // Unified OLED Floating Utility Pill centered at bottom of photo viewport:
-        // Touch Adjust, Histogram, Info HUD, Mask Overlay, Grid Toggle + Copy/Paste/Reset
-        var isGridSelectorOpen by remember { mutableStateOf(false) }
-        var showPhotoInfoHud by remember { mutableStateOf(false) }
-        val haptic = LocalHapticFeedback.current
-        LaunchedEffect(isTouchAdjustPillVisible) {
-            if (isTouchAdjustPillVisible) {
-                isGridSelectorOpen = false
-                showPhotoInfoHud = false
-            }
-        }
-        val activeGridMode = if (uiState.activeTab == StudioTab.CROP) {
-            uiState.effectiveCropGridMode
-        } else {
-            uiState.compositionGridMode
-        }
-        val hasMasksOrMaskTab = uiState.activeTab == StudioTab.MASK || uiState.gradingParams.masks.isNotEmpty()
-        val isMaskOverlayHighlighted = uiState.showMaskOverlay && hasMasksOrMaskTab
-
-        AnimatedVisibility(
-            visible = !isTouchAdjustPillVisible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                AnimatedVisibility(
-                    visible = isGridSelectorOpen,
-                    enter = fadeIn() + slideInVertically { it / 2 },
-                    exit = fadeOut() + slideOutVertically { it / 2 }
-                ) {
-                    CompositionGridSelectorPill(
-                        selectedMode = activeGridMode,
-                        spiralOrientation = uiState.spiralOrientation,
-                        onSelectMode = { mode ->
-                            viewModel.setCompositionGridMode(mode)
-                            if (mode == CompositionGridMode.OFF) {
-                                isGridSelectorOpen = false
-                            }
-                        },
-                        onFlipSpiral = viewModel::flipSpiralOrientation
-                    )
-                }
-
-                AnimatedVisibility(
-                    visible = showPhotoInfoHud && !isGridSelectorOpen,
-                    enter = fadeIn() + slideInVertically { it / 2 },
-                    exit = fadeOut() + slideOutVertically { it / 2 }
-                ) {
-                    PhotoInfoHudPill(
-                        fullWidth = uiState.fullWidth,
-                        fullHeight = uiState.fullHeight,
-                        photoFormatInfo = uiState.photoFormatInfo,
-                        appliedUpscaleFactor = uiState.appliedUpscaleFactor,
-                        maskCount = uiState.gradingParams.masks.size,
-                        activeLutTitle = uiState.activeLut?.title
-                    )
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (activeGridMode == CompositionGridMode.GOLDEN_SPIRAL && !isGridSelectorOpen) {
-                        SpiralFlipPillButton(
-                            orientation = uiState.spiralOrientation,
-                            onFlip = viewModel::flipSpiralOrientation,
-                            testTag = "floating_spiral_flip_button"
-                        )
-                    }
-
-                    CornerUtilityPill(
-                        canShowTouchAdjust = canShowTouchAdjust,
-                        isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
-                        canShowHistogram = !uiState.isSplitCompareEnabled && uiState.histogram != null,
-                        isHistogramVisible = uiState.showHistogram,
-                        isPhotoInfoVisible = showPhotoInfoHud,
-                        isMaskOverlayActive = isMaskOverlayHighlighted,
-                        canToggleMaskOverlay = hasMasksOrMaskTab,
-                        isCompositionGridActive = activeGridMode != CompositionGridMode.OFF,
-                        isGridSelectorOpen = isGridSelectorOpen,
-                        canPasteEdits = uiState.canPasteEdits,
-                        canReset = canReset,
-                        onToggleTouchAdjust = viewModel::toggleTouchAdjust,
-                        onToggleHistogram = viewModel::toggleHistogram,
-                        onTogglePhotoInfo = {
-                            showPhotoInfoHud = !showPhotoInfoHud
-                            if (showPhotoInfoHud) isGridSelectorOpen = false
-                        },
-                        onToggleMaskOverlay = viewModel::toggleShowMaskOverlay,
-                        onToggleGridSelector = {
-                            isGridSelectorOpen = !isGridSelectorOpen
-                            if (isGridSelectorOpen) showPhotoInfoHud = false
-                        },
-                        onLongPressGridClear = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.clearCompositionGrid()
-                            isGridSelectorOpen = false
-                        },
-                        onCopyEdits = viewModel::copyEdits,
-                        onPasteEdits = viewModel::pasteEdits,
-                        onResetAll = viewModel::resetAllAdjustments
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -1222,6 +1584,7 @@ private fun TopFloatingGlassHeader(
     canRedo: Boolean,
     isComparingOriginal: Boolean,
     isSplitCompareEnabled: Boolean,
+    showHistogram: Boolean,
     onCapturePhoto: () -> Unit,
     onOpenPhoto: () -> Unit,
     onOpenRawFile: () -> Unit,
@@ -1229,6 +1592,7 @@ private fun TopFloatingGlassHeader(
     onRedo: () -> Unit,
     onCompareChanged: (Boolean) -> Unit,
     onToggleSplitCompare: () -> Unit,
+    onToggleHistogram: () -> Unit,
     onQuickShare: () -> Unit,
     onOpenExport: () -> Unit,
     modifier: Modifier = Modifier
@@ -1261,12 +1625,12 @@ private fun TopFloatingGlassHeader(
                     Arrangement.SpaceBetween
                 }
             ) {
-                // Left Elevated Graphite Pill: Z-Effect Emblem + Camera Capture + Gallery Picker + RAW / File Import
+                // Left Translucent Frosted-Glass Pill: Z-Effect Emblem + Camera Capture + Gallery Picker + RAW / File Import
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = StudioGraphite,
-                    shadowElevation = 6.dp,
-                    modifier = Modifier.border(1.dp, StudioHairline, RoundedCornerShape(50))
+                    color = StudioFrostedGlass,
+                    shadowElevation = 0.dp,
+                    modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(50))
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1357,12 +1721,12 @@ private fun TopFloatingGlassHeader(
                     }
                 }
 
-        // Center Elevated Graphite Pill: Undo | Redo | Hold-to-Compare Before/After
+        // Center Translucent Frosted-Glass Pill: Undo | Redo | Hold-to-Compare Before/After | Histogram
         Surface(
             shape = RoundedCornerShape(50),
-            color = StudioGraphite,
-            shadowElevation = 6.dp,
-            modifier = Modifier.border(1.dp, StudioHairline, RoundedCornerShape(50))
+            color = StudioFrostedGlass,
+            shadowElevation = 0.dp,
+            modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(50))
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
@@ -1458,6 +1822,41 @@ private fun TopFloatingGlassHeader(
                         )
                     }
                 }
+
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(16.dp)
+                        .background(StudioHairline)
+                )
+
+                // Compact Top-Bar Histogram Toggle so Histogram never crowds small screens
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(if (showHistogram) StudioAmberPillFill else Color.Transparent)
+                        .clickable(onClick = onToggleHistogram)
+                        .testTag("top_histogram_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = StudioIcons.HistogramBars,
+                        contentDescription = stringResource(R.string.cd_toggle_histogram_topbar),
+                        tint = if (showHistogram) StudioCinemaAmber else StudioMutedSlate,
+                        modifier = Modifier.size(21.dp)
+                    )
+                    if (showHistogram) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 5.dp)
+                                .size(3.5.dp)
+                                .clip(CircleShape)
+                                .background(StudioCinemaAmber)
+                        )
+                    }
+                }
             }
         }
 
@@ -1468,9 +1867,9 @@ private fun TopFloatingGlassHeader(
         ) {
             Surface(
                 shape = CircleShape,
-                color = StudioGraphite,
-                shadowElevation = 6.dp,
-                modifier = Modifier.border(1.dp, StudioHairline, CircleShape)
+                color = StudioFrostedGlass,
+                shadowElevation = 0.dp,
+                modifier = Modifier.border(1.dp, StudioFrostedBorder, CircleShape)
             ) {
                 IconButton(
                     onClick = onQuickShare,
@@ -1593,62 +1992,37 @@ private fun PhotoInfoHudPill(
     modifier: Modifier = Modifier
 ) {
     val dimsText = if (fullWidth > 0 && fullHeight > 0) "${fullWidth}×${fullHeight}" else "—"
+    val hudShape = RoundedCornerShape(16.dp)
     Surface(
-        shape = RoundedCornerShape(50),
-        color = StudioGlassSurface,
-        shadowElevation = 8.dp,
+        shape = hudShape,
+        color = StudioFrostedGlass,
+        shadowElevation = 0.dp,
         modifier = modifier
-            .border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+            .widthIn(max = 420.dp)
+            .border(1.dp, StudioFrostedBorder, hudShape)
             .testTag("photo_info_hud_pill")
     ) {
-        Row(
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            val formatLabel = photoFormatInfo.badgeLabel?.takeIf { it.isNotBlank() } ?: "PHOTO"
-            Text(
-                text = formatLabel,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp
-                ),
-                color = StudioCinemaAmber,
-                maxLines = 1,
-                softWrap = false
-            )
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(11.dp)
-                    .background(StudioGlassHairline)
-            )
-            Text(
-                text = dimsText,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                    fontFeatureSettings = "tnum"
-                ),
-                color = StudioCoolWhite,
-                maxLines = 1,
-                softWrap = false
-            )
-            if (appliedUpscaleFactor > 1) {
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val formatLabel = photoFormatInfo.badgeLabel?.takeIf { it.isNotBlank() } ?: "PHOTO"
                 Text(
-                    text = "${appliedUpscaleFactor}× AI",
+                    text = formatLabel,
                     style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp
                     ),
                     color = StudioCinemaAmber,
                     maxLines = 1,
                     softWrap = false
                 )
-            }
-            if (maskCount > 0) {
                 Box(
                     modifier = Modifier
                         .width(1.dp)
@@ -1656,28 +2030,77 @@ private fun PhotoInfoHudPill(
                         .background(StudioGlassHairline)
                 )
                 Text(
-                    text = stringResource(R.string.info_hud_masks_count, maskCount),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StudioMutedSlate,
+                    text = dimsText,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = StudioCoolWhite,
                     maxLines = 1,
                     softWrap = false
                 )
+                if (appliedUpscaleFactor > 1) {
+                    Text(
+                        text = "${appliedUpscaleFactor}× AI",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = StudioCinemaAmber,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                if (maskCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(11.dp)
+                            .background(StudioGlassHairline)
+                    )
+                    Text(
+                        text = stringResource(R.string.info_hud_masks_count, maskCount),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StudioMutedSlate,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                if (!activeLutTitle.isNullOrBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(11.dp)
+                            .background(StudioGlassHairline)
+                    )
+                    Text(
+                        text = activeLutTitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StudioMutedSlate,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
-            if (!activeLutTitle.isNullOrBlank()) {
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .height(11.dp)
-                        .background(StudioGlassHairline)
-                )
-                Text(
-                    text = activeLutTitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StudioMutedSlate,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(0.75.dp)
+                    .background(StudioGlassHairline)
+            )
+
+            Text(
+                text = stringResource(R.string.info_hud_sticker_credits),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 9.5.sp,
+                    lineHeight = 12.sp
+                ),
+                color = StudioMutedSlate,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.testTag("photo_info_hud_credits")
+            )
         }
     }
 }
@@ -1713,10 +2136,10 @@ private fun CornerUtilityPill(
 ) {
     Surface(
         shape = RoundedCornerShape(50),
-        color = StudioGlassSurface,
-        shadowElevation = 8.dp,
+        color = StudioFrostedGlass,
+        shadowElevation = 0.dp,
         modifier = modifier
-            .border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+            .border(1.dp, StudioFrostedBorder, RoundedCornerShape(50))
             .testTag("floating_utility_pill")
     ) {
         Row(
@@ -1881,7 +2304,9 @@ private fun ActiveToolPanel(
     uiState: EditorUiState,
     viewModel: EditorViewModel,
     onImportLut: () -> Unit,
-    onOpenProfileMenu: () -> Unit
+    onOpenProfileMenu: () -> Unit,
+    onCreateStickerFromPhoto: () -> Unit,
+    onImportStickerPack: () -> Unit
 ) {
     when (uiState.activeTab) {
         StudioTab.ADJUST -> AdjustPanel(
@@ -1901,23 +2326,62 @@ private fun ActiveToolPanel(
             onResetAnamorphicStreak = viewModel::resetAnamorphicStreak
         )
 
-        StudioTab.ALL -> AllParametersPanel(
-            params = uiState.gradingParams,
-            histogram = uiState.histogram,
-            activeEyedropperMode = uiState.activeEyedropperMode,
-            savedRecipeCount = uiState.userPresets.size,
-            onParamsChange = viewModel::updateGradingParams,
-            onDraggingChanged = viewModel::setSliderDragging,
-            onOpenProfileMenu = onOpenProfileMenu,
-            onSelectWhiteBalancePreset = viewModel::selectWhiteBalancePreset,
-            onToggleEyedropper = viewModel::toggleEyedropperMode,
-            onAutoTone = viewModel::applyAutoTone,
-            onToggleBlackAndWhite = viewModel::toggleBlackAndWhite,
-            onSaveRecipe = viewModel::saveCurrentLookAsPreset,
-            onUpdateChromaticAberration = viewModel::updateChromaticAberration,
-            onResetChromaticAberration = viewModel::resetChromaticAberration,
-            onUpdateAnamorphicStreak = viewModel::updateAnamorphicStreak,
-            onResetAnamorphicStreak = viewModel::resetAnamorphicStreak
+        StudioTab.STUDIO -> StudioStickersPanel(
+            studioSubMode = uiState.studioSubMode,
+            onSelectStudioSubMode = viewModel::selectStudioSubMode,
+            drawBrushType = uiState.drawBrushType,
+            drawColorArgb = uiState.drawColorArgb,
+            drawCustomHue = uiState.drawCustomHue,
+            drawBrushSizeDp = uiState.drawBrushSizeDp,
+            drawOpacity = uiState.drawOpacity,
+            canUndoDrawStroke = uiState.canUndoDrawStroke,
+            canRedoDrawStroke = uiState.canRedoDrawStroke,
+            onSelectDrawBrushType = viewModel::selectDrawBrushType,
+            onSelectDrawColorSwatch = viewModel::selectDrawColorSwatch,
+            onDrawCustomHueChange = viewModel::updateDrawCustomHue,
+            onDrawBrushSizeChange = viewModel::updateDrawBrushSizeDp,
+            onDrawOpacityChange = viewModel::updateDrawOpacity,
+            onUndoDrawStroke = viewModel::undoDrawStroke,
+            onRedoDrawStroke = viewModel::redoDrawStroke,
+            onFinishDrawing = viewModel::finishDrawingMode,
+            textStampInput = uiState.textStampInput,
+            textStampFontStyle = uiState.textStampFontStyle,
+            textStampColorArgb = uiState.textStampColorArgb,
+            textStampBackdropStyle = uiState.textStampBackdropStyle,
+            onTextStampInputChange = viewModel::updateTextStampInput,
+            onSelectTextStampFontStyle = viewModel::selectTextStampFontStyle,
+            onSelectTextStampColor = viewModel::selectTextStampColor,
+            onSelectTextStampBackdropStyle = viewModel::selectTextStampBackdropStyle,
+            onAddTextLayer = { viewModel.addStyledTextLayer() },
+            savedCutouts = uiState.savedCutouts,
+            isCreatingCutoutSticker = uiState.isCreatingCutoutSticker,
+            cutoutStickerStatusLabel = uiState.cutoutStickerStatusLabel,
+            stickerSearchQuery = uiState.stickerSearchQuery,
+            stickerSearchSourceFilter = uiState.stickerSearchSourceFilter,
+            stickerSearchResults = uiState.stickerSearchResults,
+            isSearchingOnlineStickers = uiState.isSearchingOnlineStickers,
+            stickerSearchError = uiState.stickerSearchError,
+            downloadingOnlineStickerId = uiState.downloadingOnlineStickerId,
+            savedOnlineStickerIds = uiState.savedOnlineStickerIds,
+            aiStickerPrompt = uiState.aiStickerPrompt,
+            aiStickerStyle = uiState.aiStickerStyle,
+            isGeneratingAiSticker = uiState.isGeneratingAiSticker,
+            aiStickerError = uiState.aiStickerError,
+            onAiStickerPromptChange = viewModel::updateAiStickerPrompt,
+            onSelectAiStickerStyle = viewModel::selectAiStickerStyle,
+            onGenerateAiSticker = { viewModel.generateAiSticker() },
+            onSearchQueryChange = viewModel::updateStickerSearchQuery,
+            onSubmitSearch = viewModel::submitStickerSearchNow,
+            onClearSearch = viewModel::clearStickerSearch,
+            onSelectSearchSource = viewModel::setStickerSearchSourceFilter,
+            onSelectOnlineTag = viewModel::triggerInstantOnlineTagSearch,
+            onAddOnlineSticker = viewModel::addOnlineStickerLayer,
+            onSaveOnlineStickerToCutouts = viewModel::saveOnlineStickerToMyCutouts,
+            onAddBuiltInSticker = viewModel::addBuiltInStickerLayer,
+            onAddSavedCutout = viewModel::addSavedCutoutStickerLayer,
+            onDeleteSavedCutout = viewModel::deleteSavedCutoutSticker,
+            onCreateStickerFromPhoto = onCreateStickerFromPhoto,
+            onImportStickerPack = onImportStickerPack
         )
 
         StudioTab.UPSCALE -> UpscalePanel(
@@ -2047,8 +2511,10 @@ private fun ActiveToolPanel(
 }
 
 /**
- * Compact 8-tab floating frosted-glass capsule bottom navigation:
- * Adjust | All | Upscale | Denoise | LUTs | Crop | Heal | Masks.
+ * Sleek horizontally scrollable 8-tab OLED capsule bottom navigation dock:
+ * ADJUST | STUDIO | UPSCALE | DENOISE | LUTS | CROP | HEAL | MASKS.
+ * Features subtle left/right edge fade indicators and automatically scrolls
+ * the selected tab cleanly into view.
  */
 @Composable
 private fun FloatingCapsuleNavDock(
@@ -2059,6 +2525,7 @@ private fun FloatingCapsuleNavDock(
     val capsuleShape = RoundedCornerShape(34.dp)
     val gp = uiState.gradingParams
     val hasAdjustEdits = gp.hasLightEdits || gp.hasColorEdits || gp.hasEffectsEdits || gp.hasDetailEdits || gp.hasProfileEdits
+    val hasStudioEdits = uiState.hasMultipleLayers
     val hasUpscaleEdits = uiState.hasUpscaleEdits
     val hasDenoiseEdits = gp.hasDenoiseEdits
     val hasLutEdits = uiState.selectedLutId != null || uiState.selectedUserPresetId != null
@@ -2066,40 +2533,68 @@ private fun FloatingCapsuleNavDock(
     val hasHealEdits = uiState.hasHealEdits
     val hasMaskEdits = gp.hasMaskEdits
 
+    val scrollState = rememberScrollState()
+    val tabBoundsPx = remember { mutableStateMapOf<StudioTab, Pair<Float, Float>>() }
+    var containerWidthPx by remember { mutableFloatStateOf(0f) }
+
+    val showStartFade by remember { derivedStateOf { scrollState.canScrollBackward } }
+    val showEndFade by remember { derivedStateOf { scrollState.canScrollForward } }
+    val startFadeAlpha by animateFloatAsState(
+        targetValue = if (showStartFade) 1f else 0f,
+        animationSpec = tween(durationMillis = 160),
+        label = "dock_start_fade_alpha"
+    )
+    val endFadeAlpha by animateFloatAsState(
+        targetValue = if (showEndFade) 1f else 0f,
+        animationSpec = tween(durationMillis = 160),
+        label = "dock_end_fade_alpha"
+    )
+
+    // Automatically scroll the selected tab smoothly into view whenever activeTab changes
+    LaunchedEffect(uiState.activeTab, containerWidthPx, tabBoundsPx.size) {
+        val bounds = tabBoundsPx[uiState.activeTab] ?: return@LaunchedEffect
+        if (containerWidthPx <= 0f || scrollState.maxValue <= 0) return@LaunchedEffect
+        val tabCenter = bounds.first + (bounds.second * 0.5f)
+        val targetScroll = (tabCenter - containerWidthPx * 0.5f)
+            .toInt()
+            .coerceIn(0, scrollState.maxValue)
+        if (kotlin.math.abs(scrollState.value - targetScroll) > 4) {
+            scrollState.animateScrollTo(targetScroll)
+        }
+    }
+
     Surface(
         shape = capsuleShape,
-        color = StudioGraphite,
-        shadowElevation = 10.dp,
+        color = StudioFrostedGlass,
+        shadowElevation = 0.dp,
         modifier = modifier
-            .height(68.dp)
-            .border(1.dp, StudioHairline, capsuleShape)
+            .height(58.dp)
+            .border(1.dp, StudioFrostedBorder, capsuleShape)
             .testTag("floating_capsule_nav")
     ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val useHorizontalScroll = maxWidth < 520.dp
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(capsuleShape)
+                .onGloballyPositioned { coords ->
+                    containerWidthPx = coords.size.width.toFloat()
+                }
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .then(
-                        if (useHorizontalScroll) {
-                            Modifier.horizontalScroll(rememberScrollState())
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .padding(horizontal = 6.dp, vertical = 5.dp),
+                    .horizontalScroll(scrollState)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val itemModifier = if (useHorizontalScroll) {
-                    Modifier
-                        .fillMaxHeight()
-                        .widthIn(min = 60.dp)
-                } else {
-                    Modifier
-                        .fillMaxHeight()
-                        .weight(1f)
-                }
+                fun tabModifier(tab: StudioTab): Modifier = Modifier
+                    .fillMaxHeight()
+                    .widthIn(min = 58.dp)
+                    .onGloballyPositioned { coords ->
+                        tabBoundsPx[tab] = coords.positionInParent().x to coords.size.width.toFloat()
+                    }
+
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_adjust),
                     selectedIcon = StudioIcons.TabAdjust,
@@ -2108,17 +2603,17 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasAdjustEdits,
                     testTag = "tab_adjust",
                     onClick = { onSelectTab(StudioTab.ADJUST) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.ADJUST)
                 )
                 CapsuleNavTabItem(
-                    label = stringResource(R.string.tab_all),
-                    selectedIcon = StudioIcons.TabAll,
-                    unselectedIcon = StudioIcons.TabAll,
-                    selected = uiState.activeTab == StudioTab.ALL,
-                    hasEdits = hasAdjustEdits,
-                    testTag = "tab_all",
-                    onClick = { onSelectTab(StudioTab.ALL) },
-                    modifier = itemModifier
+                    label = stringResource(R.string.tab_studio),
+                    selectedIcon = StudioIcons.TabStudio,
+                    unselectedIcon = StudioIcons.TabStudio,
+                    selected = uiState.activeTab == StudioTab.STUDIO,
+                    hasEdits = hasStudioEdits,
+                    testTag = "tab_studio",
+                    onClick = { onSelectTab(StudioTab.STUDIO) },
+                    modifier = tabModifier(StudioTab.STUDIO)
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_upscale),
@@ -2128,7 +2623,7 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasUpscaleEdits,
                     testTag = "tab_upscale",
                     onClick = { onSelectTab(StudioTab.UPSCALE) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.UPSCALE)
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_denoise),
@@ -2138,7 +2633,7 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasDenoiseEdits,
                     testTag = "tab_denoise",
                     onClick = { onSelectTab(StudioTab.DENOISE) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.DENOISE)
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_luts),
@@ -2148,7 +2643,7 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasLutEdits,
                     testTag = "tab_luts",
                     onClick = { onSelectTab(StudioTab.LUTS) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.LUTS)
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_crop),
@@ -2158,7 +2653,7 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasCropEdits,
                     testTag = "tab_crop",
                     onClick = { onSelectTab(StudioTab.CROP) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.CROP)
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_heal),
@@ -2168,7 +2663,7 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasHealEdits,
                     testTag = "tab_heal",
                     onClick = { onSelectTab(StudioTab.HEAL) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.HEAL)
                 )
                 CapsuleNavTabItem(
                     label = stringResource(R.string.tab_mask),
@@ -2178,7 +2673,47 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasMaskEdits,
                     testTag = "tab_mask",
                     onClick = { onSelectTab(StudioTab.MASK) },
-                    modifier = itemModifier
+                    modifier = tabModifier(StudioTab.MASK)
+                )
+            }
+
+            // Subtle frosted-glass left edge fade indicator when more tabs exist to the left
+            if (startFadeAlpha > 0.01f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .width(24.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    StudioGraphite.copy(alpha = 0.78f * startFadeAlpha),
+                                    StudioGraphite.copy(alpha = 0.36f * startFadeAlpha),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                        .testTag("dock_scroll_fade_start")
+                )
+            }
+
+            // Subtle frosted-glass right edge fade indicator when more tabs exist to the right
+            if (endFadeAlpha > 0.01f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(24.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    StudioGraphite.copy(alpha = 0.36f * endFadeAlpha),
+                                    StudioGraphite.copy(alpha = 0.78f * endFadeAlpha)
+                                )
+                            )
+                        )
+                        .testTag("dock_scroll_fade_end")
                 )
             }
         }
@@ -2212,36 +2747,36 @@ private fun CapsuleNavTabItem(
         label = "capsule_tab_tint"
     )
 
-    val pillShape = RoundedCornerShape(26.dp)
+    val pillShape = RoundedCornerShape(24.dp)
     Box(
         modifier = modifier
-            .heightIn(min = 56.dp)
+            .heightIn(min = 48.dp)
             .minimumInteractiveComponentSize()
             .clip(pillShape)
             .background(bgColor)
-            .border(1.2.dp, borderColor, pillShape)
+            .border(1.dp, borderColor, pillShape)
             .clickable(onClick = onClick)
-            .padding(vertical = 5.dp, horizontal = 8.dp)
+            .padding(vertical = 3.dp, horizontal = 4.dp)
             .testTag(testTag),
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(3.dp)
+            verticalArrangement = Arrangement.spacedBy(1.dp)
         ) {
             Icon(
                 imageVector = if (selected) selectedIcon else unselectedIcon,
                 contentDescription = label,
                 tint = contentColor,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(19.dp)
             )
             Text(
                 text = label.uppercase(Locale.ROOT),
                 style = MaterialTheme.typography.labelSmall.copy(
-                    fontSize = 10.sp,
-                    lineHeight = 12.sp,
+                    fontSize = 9.5.sp,
+                    lineHeight = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.4.sp
+                    letterSpacing = 0.35.sp
                 ),
                 color = contentColor,
                 maxLines = 1,
@@ -2249,11 +2784,22 @@ private fun CapsuleNavTabItem(
                 overflow = TextOverflow.Clip
             )
         }
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 2.dp)
+                    .width(18.dp)
+                    .height(2.5.dp)
+                    .clip(CircleShape)
+                    .background(StudioCinemaAmber)
+            )
+        }
         if (hasEdits) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 6.dp, end = 7.dp)
+                    .padding(top = 6.dp, end = 6.dp)
                     .size(4.5.dp)
                     .clip(CircleShape)
                     .background(StudioCinemaAmber)
@@ -2281,10 +2827,10 @@ private fun StudioDarkroomSnackbarHost(
             modifier = Modifier
                 .padding(horizontal = 12.dp, vertical = 6.dp)
                 .widthIn(max = 460.dp)
-                .border(1.dp, StudioTileBorder, snackbarShape)
+                .border(1.dp, StudioFrostedBorder, snackbarShape)
                 .testTag("export_snackbar"),
             shape = snackbarShape,
-            containerColor = StudioTileSurface,
+            containerColor = StudioFrostedGlass,
             contentColor = StudioCoolWhite,
             actionContentColor = StudioCinemaAmber,
             action = data.visuals.actionLabel?.let { actionLabel ->

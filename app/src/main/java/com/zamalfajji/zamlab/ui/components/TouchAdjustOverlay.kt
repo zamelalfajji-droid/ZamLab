@@ -53,6 +53,8 @@ import com.zamalfajji.zamlab.ui.theme.StudioAmber
 import com.zamalfajji.zamlab.ui.theme.StudioBackground
 import com.zamalfajji.zamlab.ui.theme.StudioBorder
 import com.zamalfajji.zamlab.ui.theme.StudioLuxuryGold
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioObsidian
 import com.zamalfajji.zamlab.ui.theme.StudioSurfaceElevated
 import com.zamalfajji.zamlab.ui.theme.StudioTextPrimary
@@ -118,10 +120,10 @@ internal fun TouchAdjustSwipeHud(
     ) {
         Surface(
             shape = RoundedCornerShape(24.dp),
-            color = StudioSurfaceElevated.copy(alpha = 0.95f),
-            shadowElevation = 8.dp,
+            color = StudioFrostedGlass,
+            shadowElevation = 0.dp,
             modifier = Modifier
-                .border(1.2.dp, StudioAmber, RoundedCornerShape(24.dp))
+                .border(1.dp, StudioAmber.copy(alpha = 0.72f), RoundedCornerShape(24.dp))
                 .testTag("touch_adjust_hud")
         ) {
             Row(
@@ -164,10 +166,10 @@ internal fun TouchAdjustHintPill(
     ) {
         Surface(
             shape = RoundedCornerShape(20.dp),
-            color = StudioSurfaceElevated.copy(alpha = 0.92f),
-            shadowElevation = 4.dp,
+            color = StudioFrostedGlass,
+            shadowElevation = 0.dp,
             modifier = Modifier
-                .border(1.dp, StudioAmber.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
+                .border(1.dp, StudioFrostedBorder, RoundedCornerShape(20.dp))
                 .testTag("touch_adjust_hint_pill")
         ) {
             Text(
@@ -211,13 +213,13 @@ internal fun TouchAdjustHslPillBar(
 
         Surface(
             shape = RoundedCornerShape(18.dp),
-            color = StudioSurfaceElevated.copy(alpha = 0.95f),
-            shadowElevation = 10.dp,
+            color = StudioFrostedGlass,
+            shadowElevation = 0.dp,
             modifier = Modifier
                 .padding(horizontal = 12.dp, vertical = 10.dp)
                 .widthIn(max = 460.dp)
                 .fillMaxWidth()
-                .border(1.dp, bandColor.copy(alpha = 0.65f), RoundedCornerShape(18.dp))
+                .border(1.dp, StudioFrostedBorder, RoundedCornerShape(18.dp))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,

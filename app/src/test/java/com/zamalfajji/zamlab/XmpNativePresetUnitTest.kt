@@ -17,7 +17,7 @@ class XmpNativePresetUnitTest {
     fun studioTabEnumHasExpectedTabOrderWithUpscaleAndDenoise() {
         val names = StudioTab.entries.map { it.name }
         assertEquals(
-            listOf("ADJUST", "ALL", "UPSCALE", "DENOISE", "LUTS", "CROP", "HEAL", "MASK"),
+            listOf("ADJUST", "STUDIO", "UPSCALE", "DENOISE", "LUTS", "CROP", "HEAL", "MASK"),
             names
         )
         assertFalse(names.contains("AI"))

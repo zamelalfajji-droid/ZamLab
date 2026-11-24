@@ -6,6 +6,8 @@ import com.zamalfajji.zamlab.ui.components.SliderStepMath
 import com.zamalfajji.zamlab.ui.theme.StudioBackground
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCoolWhite
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGraphite
 import com.zamalfajji.zamlab.ui.theme.StudioHairline
 import com.zamalfajji.zamlab.ui.theme.StudioOledBlack
@@ -18,11 +20,13 @@ import org.junit.Test
 class OledRulerDialUnitTest {
 
     @Test
-    fun `OLED studio palette matches exact pure black, dark-charcoal, hairline, white, and amber-gold specs`() {
+    fun `OLED studio palette matches exact pure black, translucent frosted glass, hairline, white, and amber-gold specs`() {
         assertEquals(Color(0xFF000000), StudioOledBlack)
         assertEquals(Color(0xFF000000), StudioBackground)
         assertEquals(Color(0xFF121214), StudioGraphite)
-        assertEquals(Color(0xFF242428), StudioHairline)
+        assertEquals(Color(0xFF121214).copy(alpha = 0.72f), StudioFrostedGlass)
+        assertEquals(Color(0xFF2E323C), StudioFrostedBorder)
+        assertEquals(Color(0xFF2E323C), StudioHairline)
         assertEquals(Color(0xFFFFFFFF), StudioCoolWhite)
         assertEquals(Color(0xFFF5A623), StudioCinemaAmber)
     }

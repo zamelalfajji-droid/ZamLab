@@ -66,8 +66,10 @@ class CameraCaptureRobolectricTest {
     }
 
     @Test
-    fun `manifest declares camera permission, optional camera feature, FileProvider, and zero broad storage permissions`() {
+    fun `manifest declares Z-Effect label, camera and gallery permissions, and matching FileProvider authority`() {
         val context = ApplicationProvider.getApplicationContext<Application>()
+        assertEquals("Z-Effect", context.getString(R.string.app_name))
+
         val pm = context.packageManager
         val pkgInfo = pm.getPackageInfo(
             context.packageName,
@@ -81,16 +83,17 @@ class CameraCaptureRobolectricTest {
             "AndroidManifest must declare android.permission.CAMERA",
             requestedPermissions.contains(Manifest.permission.CAMERA)
         )
-        assertFalse(
-            "Google Play Policy: must NOT declare READ_EXTERNAL_STORAGE",
-            requestedPermissions.contains(Manifest.permission.READ_EXTERNAL_STORAGE)
-        )
-        assertFalse(
-            "Google Play Policy: must NOT declare READ_MEDIA_IMAGES",
-            requestedPermissions.contains("android.permission.READ_MEDIA_IMAGES")
+        assertTrue(
+            "AndroidManifest must declare android.permission.READ_MEDIA_IMAGES for API 33+",
+            requestedPermissions.contains(Manifest.permission.READ_MEDIA_IMAGES)
         )
 
-        val expectedAuthority = CameraCaptureHelper.fileProviderAuthority(context)
+        val expectedAuthority = "${BuildConfig.APPLICATION_ID}.fileprovider"
+        assertEquals(
+            "CameraCaptureHelper authority must match BuildConfig.APPLICATION_ID.fileprovider",
+            expectedAuthority,
+            CameraCaptureHelper.fileProviderAuthority(context)
+        )
         val fileProvider = pkgInfo.providers?.firstOrNull {
             it.name == "androidx.core.content.FileProvider"
         }
@@ -98,6 +101,44 @@ class CameraCaptureRobolectricTest {
         assertEquals(expectedAuthority, fileProvider?.authority)
         assertFalse("FileProvider must not be exported", fileProvider?.exported ?: true)
         assertTrue("FileProvider must grant URI permissions", fileProvider?.grantUriPermissions ?: false)
+
+        // Verify API-level runtime gallery permission resolution
+        assertEquals(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            CameraCaptureHelper.requiredGalleryPermission(sdkInt = 33)
+        )
+        assertEquals(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            CameraCaptureHelper.requiredGalleryPermission(sdkInt = 36)
+        )
+        assertEquals(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            CameraCaptureHelper.requiredGalleryPermission(sdkInt = 32)
+        )
+        assertEquals(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            CameraCaptureHelper.requiredGalleryPermission(sdkInt = 24)
+        )
+    }
+
+    @Test
+    @Config(sdk = [32])
+    fun `manifest declares READ_EXTERNAL_STORAGE on Android 12 API 32 and below`() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        @Suppress("DEPRECATION")
+        val pkgInfo = context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.GET_PERMISSIONS
+        )
+        val requestedPermissions = pkgInfo.requestedPermissions?.toSet().orEmpty()
+        assertTrue(
+            "AndroidManifest must declare android.permission.READ_EXTERNAL_STORAGE on API 32",
+            requestedPermissions.contains(Manifest.permission.READ_EXTERNAL_STORAGE)
+        )
+        assertEquals(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            CameraCaptureHelper.requiredGalleryPermission()
+        )
     }
 
     @Test

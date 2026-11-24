@@ -754,6 +754,33 @@ object LocalInpaintingEngine {
             keepFullCore = true
         )
         val effectiveOpacity = strokes.maxOfOrNull { it.opacity.coerceIn(0.10f, 1.0f) } ?: 1.0f
+        return inpaintWithAlphaMask(
+            sourceBitmap = sourceBitmap,
+            alphaMask = fallbackMask,
+            context = context,
+            effectiveOpacity = effectiveOpacity
+        )
+    }
+
+    /**
+     * Runs Z-Effect's offline MI-GAN ONNX / Edge-Aware PatchMatch + Poisson inpainting engine
+     * directly from a full-resolution `0..255` alpha removal mask (used by Spot Heal and AI Smart Cut).
+     */
+    fun inpaintWithAlphaMask(
+        sourceBitmap: Bitmap,
+        alphaMask: IntArray,
+        context: Context? = null,
+        effectiveOpacity: Float = 1.0f
+    ): InpaintResult {
+        if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) {
+            throw IllegalStateException("Source image unavailable for healing.")
+        }
+        val srcW = sourceBitmap.width
+        val srcH = sourceBitmap.height
+        require(alphaMask.size >= srcW * srcH) {
+            "Alpha mask length (${alphaMask.size}) must cover ${srcW}x${srcH}."
+        }
+        val fallbackMask = alphaMask
 
         // 1. Lazily initialize ONNX Runtime session on first Heal stroke (if asset exists)
         val bundle = ensureOnnxSessionBundle(context)

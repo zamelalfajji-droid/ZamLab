@@ -65,6 +65,8 @@ import com.zamalfajji.zamlab.R
 import com.zamalfajji.zamlab.ui.theme.StudioAmberPillFill
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCoolWhite
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGraphite
 import com.zamalfajji.zamlab.ui.theme.StudioHairline
 import com.zamalfajji.zamlab.ui.theme.StudioMutedSlate
@@ -507,7 +509,7 @@ internal fun RulerPrecisionSlider(
 
     val isPillHighlighted = isModified || isActivelyDragging
     val pillBgColor by animateColorAsState(
-        targetValue = if (isPillHighlighted) StudioAmberPillFill else StudioGraphite,
+        targetValue = if (isPillHighlighted) StudioAmberPillFill else StudioFrostedGlass,
         animationSpec = tween(durationMillis = 140),
         label = "ruler_pill_bg"
     )
@@ -515,13 +517,13 @@ internal fun RulerPrecisionSlider(
         targetValue = when {
             isActivelyDragging -> StudioCinemaAmber
             isModified -> StudioCinemaAmber.copy(alpha = 0.78f)
-            else -> StudioHairline
+            else -> StudioFrostedBorder
         },
         animationSpec = tween(durationMillis = 140),
         label = "ruler_pill_border"
     )
     val trayBorderColor by animateColorAsState(
-        targetValue = if (isActivelyDragging) StudioCinemaAmber.copy(alpha = 0.72f) else StudioHairline,
+        targetValue = if (isActivelyDragging) StudioCinemaAmber.copy(alpha = 0.72f) else StudioFrostedBorder,
         animationSpec = tween(durationMillis = 140),
         label = "ruler_tray_border"
     )
@@ -635,13 +637,13 @@ internal fun RulerPrecisionSlider(
             }
         }
 
-        // Wide Elevated Dark-Charcoal (#121214) scrolling tick-mark ruler with glowing Amber-Gold needle
+        // Wide Translucent Frosted-Glass scrolling tick-mark ruler with glowing Amber-Gold needle
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(StudioGraphite)
+                .background(StudioFrostedGlass)
                 .border(1.dp, trayBorderColor, RoundedCornerShape(14.dp))
                 .semantics {
                     progressBarRangeInfo = ProgressBarRangeInfo(
@@ -897,11 +899,11 @@ internal fun RulerPrecisionSlider(
                     )
                 }
 
-                // OLED charcoal edge vignette fade
+                // Translucent frosted-glass edge vignette fade
                 val fadeW = 28.dp.toPx()
                 drawRect(
                     brush = Brush.horizontalGradient(
-                        colors = listOf(StudioGraphite, Color.Transparent),
+                        colors = listOf(StudioFrostedGlass, Color.Transparent),
                         startX = 0f,
                         endX = fadeW
                     ),
@@ -910,7 +912,7 @@ internal fun RulerPrecisionSlider(
                 )
                 drawRect(
                     brush = Brush.horizontalGradient(
-                        colors = listOf(Color.Transparent, StudioGraphite),
+                        colors = listOf(Color.Transparent, StudioFrostedGlass),
                         startX = w - fadeW,
                         endX = w
                     ),
@@ -1029,7 +1031,7 @@ internal fun StudioPrecisionTrack(
             .fillMaxWidth()
             .height(trackHeightDp)
             .clip(trayShape)
-            .background(StudioGraphite.copy(alpha = if (enabled) 1f else 0.55f))
+            .background(StudioGraphite.copy(alpha = if (enabled) 0.68f else 0.42f))
             .border(1.dp, trayBorderColor, trayShape)
             .semantics {
                 progressBarRangeInfo = ProgressBarRangeInfo(

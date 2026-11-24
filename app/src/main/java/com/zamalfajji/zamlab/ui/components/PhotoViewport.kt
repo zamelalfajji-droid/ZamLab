@@ -18,6 +18,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -67,8 +68,10 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
@@ -89,8 +92,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import com.zamalfajji.zamlab.R
 import com.zamalfajji.zamlab.editor.ColorGradingEngine
 import com.zamalfajji.zamlab.editor.CompositionGridMode
@@ -106,6 +111,10 @@ import com.zamalfajji.zamlab.editor.HealStroke
 import com.zamalfajji.zamlab.editor.HistogramData
 import com.zamalfajji.zamlab.editor.HslBand
 import com.zamalfajji.zamlab.editor.HslBandAdjustment
+import com.zamalfajji.zamlab.editor.ImageLayer
+import com.zamalfajji.zamlab.editor.LayerBlendMode
+import com.zamalfajji.zamlab.editor.LayerMaskBrushMode
+import com.zamalfajji.zamlab.editor.LayerTransformMath
 import com.zamalfajji.zamlab.editor.LocalMask
 import com.zamalfajji.zamlab.editor.MaskEngine
 import com.zamalfajji.zamlab.editor.MaskSubMask
@@ -117,10 +126,13 @@ import com.zamalfajji.zamlab.lut.CubeLut
 import com.zamalfajji.zamlab.ui.theme.StudioAmber
 import com.zamalfajji.zamlab.ui.theme.StudioBackground
 import com.zamalfajji.zamlab.ui.theme.StudioBorder
+import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCyan
 import com.zamalfajji.zamlab.ui.theme.StudioEraserCrimson
 import com.zamalfajji.zamlab.ui.theme.StudioEraserCrimsonSoft
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHairline
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGlassSurface
 import com.zamalfajji.zamlab.ui.theme.StudioGraphite
 import com.zamalfajji.zamlab.ui.theme.StudioHairline
@@ -211,13 +223,37 @@ fun PhotoViewport(
     onResetTouchAdjustBand: () -> Unit = {},
     onDismissTouchAdjustPill: () -> Unit = {},
     onTouchAdjustSliderDraggingChanged: (Boolean) -> Unit = {},
+    layers: List<ImageLayer> = emptyList(),
+    activeLayerId: String? = null,
+    onBeginLayerTransform: () -> Unit = {},
+    onTransformActiveLayer: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
+    isLayerMaskBrushMode: Boolean = false,
+    layerMaskBrushMode: LayerMaskBrushMode = LayerMaskBrushMode.ERASE,
+    layerMaskBrushSizeDp: Float = 44f,
+    layerMaskBrushSoftness: Float = 0.50f,
+    onBeginLayerMaskBrushStroke: (Float, Float, Float, Float, Float) -> Unit = { _, _, _, _, _ -> },
+    onAppendLayerMaskBrushStroke: (Float, Float, Float, Float, Float) -> Unit = { _, _, _, _, _ -> },
+    onFinishLayerMaskBrushStroke: () -> Unit = {},
+    onSetLayerMaskBrushMode: (LayerMaskBrushMode) -> Unit = {},
+    onLayerMaskBrushSizeChange: (Float) -> Unit = {},
+    onLayerMaskBrushSoftnessChange: (Float) -> Unit = {},
+    onExitLayerMaskBrushMode: () -> Unit = {},
+    isDrawingMode: Boolean = false,
+    drawBrushSizeDp: Float = com.zamalfajji.zamlab.editor.DrawingEngine.DEFAULT_BRUSH_SIZE_DP,
+    drawColorArgb: Int = com.zamalfajji.zamlab.editor.CuratedOledDrawSwatches[2],
+    onBeginDrawStroke: (Float, Float, Float, Float, Float) -> Unit = { _, _, _, _, _ -> },
+    onAppendDrawStroke: (Float, Float, Float, Float, Float) -> Unit = { _, _, _, _, _ -> },
+    onFinishDrawStroke: () -> Unit = {},
     topOverlayInset: Dp = 12.dp,
     bottomOverlayInset: Dp = 12.dp,
+    showEmbeddedMaskBrushBar: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     var brushCursorNormalized by remember { mutableStateOf<Offset?>(null) }
+    var layerMaskReticleNormalized by remember { mutableStateOf<Offset?>(null) }
+    var drawReticleNormalized by remember { mutableStateOf<Offset?>(null) }
     var zoomAnimJob by remember { mutableStateOf<Job?>(null) }
     var pendingSingleTapJob by remember { mutableStateOf<Job?>(null) }
     var lastTapUpTimeMs by remember { mutableLongStateOf(0L) }
@@ -268,6 +304,7 @@ fun PhotoViewport(
     val canvasDescription = stringResource(R.string.cd_photo_canvas)
     val gestureScope = rememberCoroutineScope()
     val currentCompareCallback by rememberUpdatedState(onCompareChanged)
+    val currentToggleHistogram by rememberUpdatedState(onToggleHistogram)
     val currentSplitRatio by rememberUpdatedState(splitCompareRatio)
     val currentOnSplitRatioChange by rememberUpdatedState(onSplitRatioChange)
     val currentEyedropperPick by rememberUpdatedState(onEyedropperPick)
@@ -284,6 +321,16 @@ fun PhotoViewport(
     val currentOnTouchAdjustSwipeStart by rememberUpdatedState(onTouchAdjustSwipeStart)
     val currentOnTouchAdjustSwipeUpdate by rememberUpdatedState(onTouchAdjustSwipeUpdate)
     val currentOnTouchAdjustSwipeEnd by rememberUpdatedState(onTouchAdjustSwipeEnd)
+    val currentOnBeginLayerTransform by rememberUpdatedState(onBeginLayerTransform)
+    val currentOnTransformActiveLayer by rememberUpdatedState(onTransformActiveLayer)
+    val currentLayerMaskBrushSizeDp by rememberUpdatedState(layerMaskBrushSizeDp)
+    val currentOnBeginLayerMaskBrushStroke by rememberUpdatedState(onBeginLayerMaskBrushStroke)
+    val currentOnAppendLayerMaskBrushStroke by rememberUpdatedState(onAppendLayerMaskBrushStroke)
+    val currentOnFinishLayerMaskBrushStroke by rememberUpdatedState(onFinishLayerMaskBrushStroke)
+    val currentDrawBrushSizeDp by rememberUpdatedState(drawBrushSizeDp)
+    val currentOnBeginDrawStroke by rememberUpdatedState(onBeginDrawStroke)
+    val currentOnAppendDrawStroke by rememberUpdatedState(onAppendDrawStroke)
+    val currentOnFinishDrawStroke by rememberUpdatedState(onFinishDrawStroke)
 
     BoxWithConstraints(
         modifier = modifier
@@ -345,9 +392,180 @@ fun PhotoViewport(
         val isMaskMode = activeTab == StudioTab.MASK
         val isEyedropperActive = activeEyedropperMode != EyedropperMode.NONE && !isHealMode && !isCropMode
         val effectiveSplitRatio = if (isSplitCompareEnabled && !isComparingOriginal && !isCropMode) splitCompareRatio else -1f
+        val activeLayer = layers.firstOrNull { it.id == activeLayerId } ?: layers.firstOrNull()
+        val isOverlayTransformMode = activeLayer != null &&
+            !activeLayer.isBackground &&
+            activeLayer.isVisible &&
+            !isLayerMaskBrushMode &&
+            !isDrawingMode &&
+            !isCropMode &&
+            !isHealMode &&
+            !isMaskMode &&
+            !isEyedropperActive &&
+            !isTouchAdjustEnabled &&
+            !isComparingOriginal
 
         val gestureModifier = if (isCropMode) {
             Modifier
+        } else if (isDrawingMode && activeLayer != null && activeLayer.isVisible && !isComparingOriginal) {
+            // Freehand Drawing Mode:
+            // Temporarily lock canvas pan/zoom and overlay transforms so 1-finger strokes
+            // paint smoothly directly onto the active transparent Drawing layer.
+            Modifier.pointerInput(activeLayerId, isDrawingMode) {
+                awaitEachGesture {
+                    val firstDown = awaitFirstDown(requireUnconsumed = false)
+                    firstDown.consume()
+
+                    fun toCanvasNorm(pos: Offset): Offset {
+                        val cx = latestViewportW / 2f
+                        val cy = latestViewportH / 2f
+                        val unscaledX = ((pos.x - panOffset.x) - cx) / zoomScale + cx
+                        val unscaledY = ((pos.y - panOffset.y) - cy) / zoomScale + cy
+                        val nx = ((unscaledX - latestImgLeft) / latestFittedW.coerceAtLeast(1f))
+                            .coerceIn(-0.5f, 1.5f)
+                        val ny = ((unscaledY - latestImgTop) / latestFittedH.coerceAtLeast(1f))
+                            .coerceIn(-0.5f, 1.5f)
+                        return Offset(nx, ny)
+                    }
+
+                    val brushRadiusCanvasPx = (with(density) { currentDrawBrushSizeDp.dp.toPx() } * 0.5f) /
+                        zoomScale.coerceAtLeast(0.5f)
+                    val startNorm = toCanvasNorm(firstDown.position)
+                    drawReticleNormalized = startNorm
+                    currentOnBeginDrawStroke(
+                        startNorm.x,
+                        startNorm.y,
+                        latestFittedW,
+                        latestFittedH,
+                        brushRadiusCanvasPx
+                    )
+
+                    try {
+                        do {
+                            val event = awaitPointerEvent()
+                            val primary = event.changes.firstOrNull { it.pressed }
+                            if (primary != null) {
+                                val nextNorm = toCanvasNorm(primary.position)
+                                drawReticleNormalized = nextNorm
+                                currentOnAppendDrawStroke(
+                                    nextNorm.x,
+                                    nextNorm.y,
+                                    latestFittedW,
+                                    latestFittedH,
+                                    brushRadiusCanvasPx
+                                )
+                            }
+                            event.changes.forEach { it.consume() }
+                        } while (event.changes.any { it.pressed })
+                    } finally {
+                        drawReticleNormalized = null
+                        currentOnFinishDrawStroke()
+                    }
+                }
+            }
+        } else if (isLayerMaskBrushMode && activeLayer != null && activeLayer.isVisible && !isComparingOriginal) {
+            // Manual Erase / Restore Mask Brush Mode:
+            // Lock canvas drag/pinch-to-zoom transforms so 1-finger strokes paint directly
+            // onto the active layer's alpha mask in exact canvas-to-layer coordinates.
+            Modifier.pointerInput(activeLayerId, isLayerMaskBrushMode) {
+                awaitEachGesture {
+                    val firstDown = awaitFirstDown(requireUnconsumed = false)
+                    firstDown.consume()
+
+                    fun toCanvasNorm(pos: Offset): Offset {
+                        val cx = latestViewportW / 2f
+                        val cy = latestViewportH / 2f
+                        val unscaledX = ((pos.x - panOffset.x) - cx) / zoomScale + cx
+                        val unscaledY = ((pos.y - panOffset.y) - cy) / zoomScale + cy
+                        val nx = ((unscaledX - latestImgLeft) / latestFittedW.coerceAtLeast(1f))
+                            .coerceIn(-0.5f, 1.5f)
+                        val ny = ((unscaledY - latestImgTop) / latestFittedH.coerceAtLeast(1f))
+                            .coerceIn(-0.5f, 1.5f)
+                        return Offset(nx, ny)
+                    }
+
+                    val brushRadiusCanvasPx = (with(density) { currentLayerMaskBrushSizeDp.dp.toPx() } * 0.5f) /
+                        zoomScale.coerceAtLeast(0.5f)
+                    val startNorm = toCanvasNorm(firstDown.position)
+                    layerMaskReticleNormalized = startNorm
+                    currentOnBeginLayerMaskBrushStroke(
+                        startNorm.x,
+                        startNorm.y,
+                        latestFittedW,
+                        latestFittedH,
+                        brushRadiusCanvasPx
+                    )
+
+                    try {
+                        do {
+                            val event = awaitPointerEvent()
+                            val primary = event.changes.firstOrNull { it.pressed }
+                            if (primary != null) {
+                                val nextNorm = toCanvasNorm(primary.position)
+                                layerMaskReticleNormalized = nextNorm
+                                currentOnAppendLayerMaskBrushStroke(
+                                    nextNorm.x,
+                                    nextNorm.y,
+                                    latestFittedW,
+                                    latestFittedH,
+                                    brushRadiusCanvasPx
+                                )
+                            }
+                            event.changes.forEach { it.consume() }
+                        } while (event.changes.any { it.pressed })
+                    } finally {
+                        layerMaskReticleNormalized = null
+                        currentOnFinishLayerMaskBrushStroke()
+                    }
+                }
+            }
+        } else if (isOverlayTransformMode) {
+            // Direct canvas gestures on the active overlay collage layer:
+            // 1-finger drag-to-move + 2-finger pinch-to-zoom, rotate, and simultaneous pan
+            Modifier.pointerInput(activeLayerId) {
+                val touchSlop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    val firstDown = awaitFirstDown(requireUnconsumed = false)
+                    val downPosition = firstDown.position
+                    var transformStarted = false
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+
+                        val panChange = event.calculatePan()
+                        val zoomChange = if (pressed.size >= 2) event.calculateZoom() else 1f
+                        val rotationChange = if (pressed.size >= 2) event.calculateRotation() else 0f
+
+                        if (!transformStarted) {
+                            val movedEnough = (pressed.first().position - downPosition).getDistance() > touchSlop * 0.4f ||
+                                pressed.size >= 2 ||
+                                abs(zoomChange - 1f) > 0.01f ||
+                                abs(rotationChange) > 0.5f
+                            if (movedEnough) {
+                                transformStarted = true
+                                currentOnBeginLayerTransform()
+                            }
+                        }
+
+                        if (transformStarted) {
+                            val denomW = (latestFittedW * zoomScale).coerceAtLeast(1f)
+                            val denomH = (latestFittedH * zoomScale).coerceAtLeast(1f)
+                            val deltaX = panChange.x / denomW
+                            val deltaY = panChange.y / denomH
+                            if (abs(deltaX) > 0.00001f ||
+                                abs(deltaY) > 0.00001f ||
+                                abs(zoomChange - 1f) > 0.0005f ||
+                                abs(rotationChange) > 0.02f
+                            ) {
+                                currentOnTransformActiveLayer(deltaX, deltaY, zoomChange, rotationChange)
+                            }
+                            event.changes.forEach { it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            }
         } else if (isHealMode) {
             // Supports 1-finger Heal brush painting + long-press Clone Source picking + simultaneous 2-finger pinch/pan
             Modifier.pointerInput(Unit) {
@@ -686,6 +904,11 @@ fun PhotoViewport(
                                             currentOnTouchAdjustTap(norm.x, norm.y)
                                         }
                                     }
+                                } else {
+                                    pendingSingleTapJob = gestureScope.launch {
+                                        delay(doubleTapTimeout)
+                                        currentToggleHistogram()
+                                    }
                                 }
                             }
                         } else {
@@ -815,6 +1038,20 @@ fun PhotoViewport(
                 }
             }
 
+            val bgLayer = layers.firstOrNull { it.isBackground }
+            val bgIndex = layers.indexOfFirst { it.isBackground }
+            val anyVisibleNonNormalBlend = layers.any {
+                it.isVisible && it.blendMode != LayerBlendMode.NORMAL
+            }
+            val bgNeedsCpuComposite = bgLayer != null && (
+                bgIndex > 0 ||
+                    !bgLayer.isVisible ||
+                    bgLayer.opacity < 0.999f ||
+                    bgLayer.hasLayerFx ||
+                    bgLayer.maskBitmap != null
+                )
+            val useGpuBasePath = !anyVisibleNonNormalBlend && !bgNeedsCpuComposite
+
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -822,18 +1059,36 @@ fun PhotoViewport(
                         width = with(density) { fittedW.toDp() },
                         height = with(density) { fittedH.toDp() }
                     )
+                    .clipToBounds()
             ) {
-                if (!glRenderFailed) {
-                    AndroidView(
-                        factory = { ctx ->
-                            TextureView(ctx).also { tv ->
-                                val controller = GlPhotoRenderController(
-                                    textureView = tv,
-                                    onRenderStatusChanged = { ready ->
-                                        glRenderFailed = !ready
-                                    }
-                                )
-                                controller.updateState(
+                if (useGpuBasePath) {
+                    if (!glRenderFailed) {
+                        AndroidView(
+                            factory = { ctx ->
+                                TextureView(ctx).also { tv ->
+                                    val controller = GlPhotoRenderController(
+                                        textureView = tv,
+                                        onRenderStatusChanged = { ready ->
+                                            glRenderFailed = !ready
+                                        }
+                                    )
+                                    controller.updateState(
+                                        imageBitmap = previewBitmap,
+                                        params = gradingParams,
+                                        lut = activeLut,
+                                        isOriginal = isComparingOriginal,
+                                        splitRatio = effectiveSplitRatio,
+                                        applyCrop = applyCropInShader,
+                                        showHighlightClipping = showHighlightClipping,
+                                        showShadowClipping = showShadowClipping,
+                                        activeMaskId = activeMask?.id,
+                                        showMaskOverlay = effectiveShowRubylith
+                                    )
+                                    glController = controller
+                                }
+                            },
+                            update = {
+                                glController?.updateState(
                                     imageBitmap = previewBitmap,
                                     params = gradingParams,
                                     lut = activeLut,
@@ -845,30 +1100,79 @@ fun PhotoViewport(
                                     activeMaskId = activeMask?.id,
                                     showMaskOverlay = effectiveShowRubylith
                                 )
-                                glController = controller
-                            }
-                        },
-                        update = {
-                            glController?.updateState(
-                                imageBitmap = previewBitmap,
-                                params = gradingParams,
-                                lut = activeLut,
-                                isOriginal = isComparingOriginal,
-                                splitRatio = effectiveSplitRatio,
-                                applyCrop = applyCropInShader,
-                                showHighlightClipping = showHighlightClipping,
-                                showShadowClipping = showShadowClipping,
-                                activeMaskId = activeMask?.id,
-                                showMaskOverlay = effectiveShowRubylith
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        val bmpToShow = cpuFallbackBitmap ?: previewBitmap
+                        if (!bmpToShow.isRecycled) {
+                            Image(
+                                bitmap = bmpToShow.asImageBitmap(),
+                                contentDescription = canvasDescription,
+                                contentScale = ContentScale.FillBounds,
+                                modifier = Modifier.fillMaxSize()
                             )
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                        }
+                    }
+
+                    // Composite all visible overlay layers on top of the GPU-graded base layer in z-order
+                    if (layers.size > 1 && !isComparingOriginal) {
+                        layers.drop(1).forEach { layer ->
+                            if (layer.isVisible && layer.opacity > 0.001f) {
+                                CanvasLayerVisual(
+                                    layer = layer,
+                                    canvasWidthPx = fittedW,
+                                    canvasHeightPx = fittedH,
+                                    isSelectedOverlay = layer.id == activeLayer?.id &&
+                                        !layer.isBackground &&
+                                        !isCropMode &&
+                                        !isLayerMaskBrushMode
+                                )
+                            }
+                        }
+                    }
                 } else {
-                    val bmpToShow = cpuFallbackBitmap ?: previewBitmap
-                    if (!bmpToShow.isRecycled) {
+                    // Full z-order Compose offscreen compositing mode when any layer uses a Blend Mode,
+                    // bokeh blur, edge feather, manual alpha mask, translucency, or reordered Background
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val cell = 12.dp.toPx()
+                        val cols = (size.width / cell).toInt() + 1
+                        val rows = (size.height / cell).toInt() + 1
+                        val dark = Color(0xFF0A0A0D)
+                        val light = Color(0xFF15151A)
+                        for (r in 0 until rows) {
+                            for (c in 0 until cols) {
+                                drawRect(
+                                    color = if ((r + c) % 2 == 0) dark else light,
+                                    topLeft = Offset(c * cell, r * cell),
+                                    size = Size(cell, cell)
+                                )
+                            }
+                        }
+                    }
+                    if (!isComparingOriginal) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                        ) {
+                            layers.forEach { layer ->
+                                if (layer.isVisible && layer.opacity > 0.001f) {
+                                    CanvasLayerVisual(
+                                        layer = layer,
+                                        canvasWidthPx = fittedW,
+                                        canvasHeightPx = fittedH,
+                                        isSelectedOverlay = layer.id == activeLayer?.id &&
+                                            !layer.isBackground &&
+                                            !isCropMode &&
+                                            !isLayerMaskBrushMode
+                                    )
+                                }
+                            }
+                        }
+                    } else if (!previewBitmap.isRecycled) {
                         Image(
-                            bitmap = bmpToShow.asImageBitmap(),
+                            bitmap = previewBitmap.asImageBitmap(),
                             contentDescription = canvasDescription,
                             contentScale = ContentScale.FillBounds,
                             modifier = Modifier.fillMaxSize()
@@ -1104,6 +1408,89 @@ fun PhotoViewport(
                         }
                     }
                 }
+
+                // Live circular brush reticle preview during Manual Layer Mask Brush strokes
+                val maskReticle = layerMaskReticleNormalized
+                if (isLayerMaskBrushMode && !isComparingOriginal && maskReticle != null && fittedW > 1f && fittedH > 1f) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val cx = maskReticle.x * size.width
+                        val cy = maskReticle.y * size.height
+                        val rPx = ((layerMaskBrushSizeDp.dp.toPx() * 0.5f) / zoomScale.coerceAtLeast(0.5f))
+                            .coerceAtLeast(3f)
+                        val soft = layerMaskBrushSoftness.coerceIn(0f, 1f)
+                        val featherStop = (1f - soft * 0.92f).coerceIn(0.08f, 0.98f)
+                        val tint = if (layerMaskBrushMode == LayerMaskBrushMode.ERASE) {
+                            StudioEraserCrimson
+                        } else {
+                            StudioCinemaAmber
+                        }
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colorStops = arrayOf(
+                                    0f to tint.copy(alpha = 0.20f),
+                                    featherStop to tint.copy(alpha = 0.14f),
+                                    1f to Color.Transparent
+                                ),
+                                center = Offset(cx, cy),
+                                radius = rPx
+                            ),
+                            radius = rPx,
+                            center = Offset(cx, cy)
+                        )
+                        drawCircle(
+                            color = Color.Black.copy(alpha = 0.55f),
+                            radius = rPx,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = 3.dp.toPx() / zoomScale.coerceAtLeast(0.5f))
+                        )
+                        drawCircle(
+                            color = Color.White.copy(alpha = 0.95f),
+                            radius = rPx,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = 1.6.dp.toPx() / zoomScale.coerceAtLeast(0.5f))
+                        )
+                        if (soft > 0.04f) {
+                            drawCircle(
+                                color = tint.copy(alpha = 0.9f),
+                                radius = rPx * featherStop,
+                                center = Offset(cx, cy),
+                                style = Stroke(
+                                    width = 1.2.dp.toPx() / zoomScale.coerceAtLeast(0.5f),
+                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f), 0f)
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // Live circular brush reticle preview during Freehand Drawing strokes
+                val activeDrawReticle = drawReticleNormalized
+                if (isDrawingMode && !isComparingOriginal && activeDrawReticle != null && fittedW > 1f && fittedH > 1f) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val cx = activeDrawReticle.x * size.width
+                        val cy = activeDrawReticle.y * size.height
+                        val rPx = ((drawBrushSizeDp.dp.toPx() * 0.5f) / zoomScale.coerceAtLeast(0.5f))
+                            .coerceAtLeast(3f)
+                        val strokeTint = Color(drawColorArgb)
+                        drawCircle(
+                            color = strokeTint.copy(alpha = 0.24f),
+                            radius = rPx,
+                            center = Offset(cx, cy)
+                        )
+                        drawCircle(
+                            color = Color.Black.copy(alpha = 0.55f),
+                            radius = rPx,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = 2.6.dp.toPx() / zoomScale.coerceAtLeast(0.5f))
+                        )
+                        drawCircle(
+                            color = Color.White.copy(alpha = 0.92f),
+                            radius = rPx,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = 1.4.dp.toPx() / zoomScale.coerceAtLeast(0.5f))
+                        )
+                    }
+                }
             }
         }
 
@@ -1174,9 +1561,10 @@ fun PhotoViewport(
             if (isHealProcessing) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = StudioSurfaceElevated.copy(alpha = 0.94f),
+                    color = StudioFrostedGlass,
+                    shadowElevation = 0.dp,
                     modifier = Modifier
-                        .border(1.dp, StudioCyan, RoundedCornerShape(20.dp))
+                        .border(1.dp, StudioFrostedBorder, RoundedCornerShape(20.dp))
                         .testTag("heal_canvas_progress")
                 ) {
                     Row(
@@ -1232,11 +1620,12 @@ fun PhotoViewport(
         if (isSplitCompareEnabled && !isComparingOriginal && !isCropMode) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
-                color = StudioSurface.copy(alpha = 0.82f),
+                color = StudioFrostedGlass,
+                shadowElevation = 0.dp,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(start = 12.dp, bottom = bottomOverlayInset)
-                    .border(1.dp, StudioBorder, RoundedCornerShape(16.dp))
+                    .border(1.dp, StudioFrostedBorder, RoundedCornerShape(16.dp))
             ) {
                 Text(
                     text = "BEFORE",
@@ -1272,10 +1661,10 @@ fun PhotoViewport(
         ) {
             Surface(
                 shape = RoundedCornerShape(22.dp),
-                color = StudioSurfaceElevated.copy(alpha = 0.95f),
-                shadowElevation = 6.dp,
+                color = StudioFrostedGlass,
+                shadowElevation = 0.dp,
                 modifier = Modifier
-                    .border(1.dp, StudioCyan, RoundedCornerShape(22.dp))
+                    .border(1.dp, StudioFrostedBorder, RoundedCornerShape(22.dp))
                     .testTag("eyedropper_banner")
             ) {
                 Row(
@@ -1348,6 +1737,7 @@ fun PhotoViewport(
         // Floating HSL Target Pill Bar anchored to bottom of image canvas
         TouchAdjustHslPillBar(
             visible = isTouchAdjustEnabled &&
+                !isLayerMaskBrushMode &&
                 touchAdjustSelectedBand != null &&
                 !isCropMode &&
                 !isHealMode &&
@@ -1359,8 +1749,34 @@ fun PhotoViewport(
             onResetBand = onResetTouchAdjustBand,
             onDismiss = onDismissTouchAdjustPill,
             onDraggingChanged = onTouchAdjustSliderDraggingChanged,
-            modifier = Modifier.align(Alignment.BottomCenter)
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .zIndex(15f)
+                .padding(bottom = bottomOverlayInset)
         )
+
+        // Floating OLED Manual Erase / Restore Mask Brush Control Bar (optional embedded mode;
+        // EditorScreen docks it in the dedicated high-zIndex bar above the 8-tab navigation dock)
+        AnimatedVisibility(
+            visible = showEmbeddedMaskBrushBar && isLayerMaskBrushMode && !isComparingOriginal,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .zIndex(20f)
+                .padding(start = 12.dp, end = 12.dp, bottom = bottomOverlayInset)
+        ) {
+            OledMaskBrushBar(
+                brushMode = layerMaskBrushMode,
+                brushSizeDp = layerMaskBrushSizeDp,
+                brushSoftness = layerMaskBrushSoftness,
+                activeLayerName = activeLayer?.name,
+                onSelectMode = onSetLayerMaskBrushMode,
+                onBrushSizeChange = onLayerMaskBrushSizeChange,
+                onBrushSoftnessChange = onLayerMaskBrushSoftnessChange,
+                onDone = onExitLayerMaskBrushMode
+            )
+        }
     }
 }
 
@@ -1468,11 +1884,11 @@ private fun HistogramHud(
 
     Surface(
         shape = hudShape,
-        color = StudioGraphite.copy(alpha = 0.92f),
-        shadowElevation = 6.dp,
+        color = StudioFrostedGlass,
+        shadowElevation = 0.dp,
         modifier = Modifier
             .width(156.dp)
-            .border(1.dp, StudioHairline, hudShape)
+            .border(1.dp, StudioFrostedBorder, hudShape)
             .clip(hudShape)
             .testTag("histogram_hud")
     ) {
@@ -2573,10 +2989,11 @@ private fun ZoomResetBadge(
         Surface(
             onClick = onResetZoom,
             shape = RoundedCornerShape(20.dp),
-            color = StudioSurfaceElevated.copy(alpha = 0.92f),
+            color = StudioFrostedGlass,
+            shadowElevation = 0.dp,
             modifier = Modifier
                 .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                .border(1.dp, StudioCyan.copy(alpha = 0.7f), RoundedCornerShape(20.dp))
+                .border(1.dp, StudioFrostedBorder, RoundedCornerShape(20.dp))
                 .testTag("zoom_reset_badge")
         ) {
             Row(
@@ -2599,5 +3016,126 @@ private fun ZoomResetBadge(
         }
     }
 }
+
+/**
+ * Renders a single [ImageLayer] inside the `fittedW x fittedH` photo canvas using the exact
+ * center-pivot scale, rotation, and normalized offset geometry of [LayerTransformMath.buildCanvasMatrix].
+ * When [isSelectedOverlay] is true, draws a crisp OLED amber-gold selection outline and corner brackets
+ * directly over the active overlay layer (viewport-only, never exported).
+ */
+@Composable
+private fun CanvasLayerVisual(
+    layer: ImageLayer,
+    canvasWidthPx: Float,
+    canvasHeightPx: Float,
+    isSelectedOverlay: Boolean
+) {
+    val displayBitmap = layer.renderedPreviewBitmap?.takeIf { !it.isRecycled }
+        ?: layer.bitmap.takeIf { !it.isRecycled }
+        ?: return
+    if (canvasWidthPx <= 1f || canvasHeightPx <= 1f) return
+
+    val density = LocalDensity.current
+    val (baseW, baseH) = LayerTransformMath.baseFitSize(
+        canvasW = canvasWidthPx,
+        canvasH = canvasHeightPx,
+        layerW = displayBitmap.width.toFloat(),
+        layerH = displayBitmap.height.toFloat()
+    )
+    val baseWidthDp = with(density) { baseW.toDp() }
+    val baseHeightDp = with(density) { baseH.toDp() }
+    val safeScale = layer.scale.coerceAtLeast(LayerTransformMath.MIN_SCALE)
+
+    val imageBitmap = remember(displayBitmap, layer.maskVersion) {
+        displayBitmap.asImageBitmap()
+    }
+    val composeBlendMode = layer.blendMode.toComposeBlendMode()
+    val alphaClamped = layer.opacity.coerceIn(0f, 1f)
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = baseWidthDp, height = baseHeightDp)
+                .graphicsLayer {
+                    translationX = layer.offsetX * canvasWidthPx
+                    translationY = layer.offsetY * canvasHeightPx
+                    scaleX = layer.scale
+                    scaleY = layer.scale
+                    rotationZ = layer.rotation
+                }
+                .testTag("canvas_layer_${layer.id}")
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val dstW = size.width.roundToInt().coerceAtLeast(1)
+                val dstH = size.height.roundToInt().coerceAtLeast(1)
+                drawImage(
+                    image = imageBitmap,
+                    dstSize = IntSize(dstW, dstH),
+                    alpha = alphaClamped,
+                    blendMode = composeBlendMode
+                )
+            }
+
+            if (isSelectedOverlay) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("active_overlay_frame_${layer.id}")
+                ) {
+                    val invScale = 1f / safeScale
+                    val borderStroke = (1.5.dp.toPx() * invScale).coerceAtLeast(0.75f)
+                    val shadowStroke = (3.dp.toPx() * invScale).coerceAtLeast(1.5f)
+                    val bracketStroke = (2.75.dp.toPx() * invScale).coerceAtLeast(1.25f)
+                    val bracketLen = (14.dp.toPx() * invScale)
+                        .coerceAtMost(min(size.width, size.height) * 0.25f)
+
+                    // Subtle dark shadow backing so the gold frame remains crisp over bright highlights
+                    drawRect(
+                        color = Color.Black.copy(alpha = 0.55f),
+                        topLeft = Offset.Zero,
+                        size = size,
+                        style = Stroke(width = shadowStroke)
+                    )
+                    // Primary OLED amber-gold selection outline
+                    drawRect(
+                        color = StudioCinemaAmber.copy(alpha = 0.92f),
+                        topLeft = Offset.Zero,
+                        size = size,
+                        style = Stroke(width = borderStroke)
+                    )
+
+                    // Crisp L-shaped corner handles
+                    val w = size.width
+                    val h = size.height
+                    val cornerColor = StudioCinemaAmber
+                    // Top-Left
+                    drawLine(cornerColor, Offset(0f, 0f), Offset(bracketLen, 0f), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    drawLine(cornerColor, Offset(0f, 0f), Offset(0f, bracketLen), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    // Top-Right
+                    drawLine(cornerColor, Offset(w, 0f), Offset(w - bracketLen, 0f), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    drawLine(cornerColor, Offset(w, 0f), Offset(w, bracketLen), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    // Bottom-Left
+                    drawLine(cornerColor, Offset(0f, h), Offset(bracketLen, h), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    drawLine(cornerColor, Offset(0f, h), Offset(0f, h - bracketLen), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    // Bottom-Right
+                    drawLine(cornerColor, Offset(w, h), Offset(w - bracketLen, h), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                    drawLine(cornerColor, Offset(w, h), Offset(w, h - bracketLen), strokeWidth = bracketStroke, cap = StrokeCap.Square)
+                }
+            }
+        }
+    }
+}
+
+private fun LayerBlendMode.toComposeBlendMode(): BlendMode = when (this) {
+    LayerBlendMode.NORMAL -> BlendMode.SrcOver
+    LayerBlendMode.MULTIPLY -> BlendMode.Multiply
+    LayerBlendMode.SCREEN -> BlendMode.Screen
+    LayerBlendMode.OVERLAY -> BlendMode.Overlay
+    LayerBlendMode.SOFT_LIGHT -> BlendMode.Softlight
+}
+
 
 

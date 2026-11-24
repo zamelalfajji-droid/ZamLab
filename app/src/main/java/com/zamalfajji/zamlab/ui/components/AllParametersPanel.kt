@@ -2100,10 +2100,11 @@ private fun SaveRecipeDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = StudioSurfaceElevated,
+        containerColor = StudioGlassSurface,
         titleContentColor = StudioTextPrimary,
         textContentColor = StudioTextSecondary,
         shape = RoundedCornerShape(20.dp),
+        modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(20.dp)),
         title = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,

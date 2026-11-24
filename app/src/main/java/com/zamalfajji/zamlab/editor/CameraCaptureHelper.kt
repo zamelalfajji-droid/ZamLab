@@ -1,12 +1,17 @@
 package com.zamalfajji.zamlab.editor
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.zamalfajji.zamlab.BuildConfig
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -23,7 +28,7 @@ data class CameraCaptureOutput(
 
 /**
  * Manages temporary high-resolution camera capture files, `FileProvider` URIs,
- * stale capture cleanup, and runtime camera permission denial state transitions.
+ * stale capture cleanup, and runtime camera & photo library permission helpers.
  */
 object CameraCaptureHelper {
     const val CAPTURE_DIR_NAME: String = "camera_captures"
@@ -34,8 +39,29 @@ object CameraCaptureHelper {
 
     private val captureSeq = AtomicInteger(0)
 
+    /**
+     * Returns the exact authority declared in `AndroidManifest.xml` (`${applicationId}.fileprovider`).
+     */
     fun fileProviderAuthority(context: Context): String =
-        "${context.packageName}$FILE_PROVIDER_AUTHORITY_SUFFIX"
+        "${BuildConfig.APPLICATION_ID.ifBlank { context.packageName }}$FILE_PROVIDER_AUTHORITY_SUFFIX"
+
+    /**
+     * Returns the runtime storage/media permission required before opening the gallery:
+     * `READ_MEDIA_IMAGES` on Android 13 (API 33+) and `READ_EXTERNAL_STORAGE` on API 32 and below.
+     */
+    fun requiredGalleryPermission(sdkInt: Int = Build.VERSION.SDK_INT): String {
+        return if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+    }
+
+    fun hasGalleryPermission(context: Context, sdkInt: Int = Build.VERSION.SDK_INT): Boolean {
+        val permission = requiredGalleryPermission(sdkInt)
+        return ContextCompat.checkSelfPermission(context, permission) ==
+            PackageManager.PERMISSION_GRANTED
+    }
 
     fun captureDirectory(context: Context): File =
         File(context.cacheDir, CAPTURE_DIR_NAME).apply {
@@ -66,7 +92,7 @@ object CameraCaptureHelper {
      *
      * @param keepFilePath optional absolute path of an active capture file to preserve.
      * @param maxAgeMs when > 0, only deletes files older than [maxAgeMs]; when <= 0, deletes all
-     * non-kept files (used on fresh editor session startup).
+     * non-kept files.
      * @return number of deleted files.
      */
     fun cleanupStaleCaptures(
@@ -91,7 +117,7 @@ object CameraCaptureHelper {
     }
 
     /**
-     * Resolves the UI state to display after a `CAMERA` permission request is denied.
+     * Resolves the UI state to display after a runtime permission request is denied.
      */
     fun resolveCameraPermissionDenial(
         shouldShowRationale: Boolean,

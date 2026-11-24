@@ -82,6 +82,8 @@ import com.zamalfajji.zamlab.ui.theme.StudioBackground
 import com.zamalfajji.zamlab.ui.theme.StudioBorder
 import com.zamalfajji.zamlab.ui.theme.StudioBorderSubtle
 import com.zamalfajji.zamlab.ui.theme.StudioCyan
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioSurface
 import com.zamalfajji.zamlab.ui.theme.StudioSurfaceElevated
 import com.zamalfajji.zamlab.ui.theme.StudioSurfaceHighest
@@ -313,8 +315,10 @@ fun ProfileMenuSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = StudioSurface,
-        contentColor = StudioTextPrimary
+        containerColor = StudioFrostedGlass,
+        scrimColor = Color.Black.copy(alpha = 0.24f),
+        contentColor = StudioTextPrimary,
+        modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
     ) {
         Column(
             modifier = Modifier
@@ -719,8 +723,10 @@ fun ProfileBrowserSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = StudioSurface,
-        contentColor = StudioTextPrimary
+        containerColor = StudioFrostedGlass,
+        scrimColor = Color.Black.copy(alpha = 0.24f),
+        contentColor = StudioTextPrimary,
+        modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
     ) {
         Column(
             modifier = Modifier

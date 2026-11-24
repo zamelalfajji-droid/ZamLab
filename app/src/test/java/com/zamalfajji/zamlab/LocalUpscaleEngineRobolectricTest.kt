@@ -12,8 +12,10 @@ import com.zamalfajji.zamlab.ai.LocalUpscaleEngine.UpscaleBackend
 import com.zamalfajji.zamlab.ai.LocalUpscaleEngine.UpscaleScale
 import com.zamalfajji.zamlab.editor.EditorViewModel
 import com.zamalfajji.zamlab.editor.StudioTab
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -74,15 +76,15 @@ class LocalUpscaleEngineRobolectricTest {
     }
 
     @Test
-    fun `upscale tab is positioned immediately next to ALL in StudioTab order`() {
+    fun `upscale tab is positioned immediately next to STUDIO in StudioTab order`() {
         val tabs = StudioTab.entries
-        val allIdx = tabs.indexOf(StudioTab.ALL)
+        val studioIdx = tabs.indexOf(StudioTab.STUDIO)
         val upscaleIdx = tabs.indexOf(StudioTab.UPSCALE)
-        assertEquals(allIdx + 1, upscaleIdx)
+        assertEquals(studioIdx + 1, upscaleIdx)
         assertEquals(
             listOf(
                 StudioTab.ADJUST,
-                StudioTab.ALL,
+                StudioTab.STUDIO,
                 StudioTab.UPSCALE,
                 StudioTab.DENOISE,
                 StudioTab.LUTS,
@@ -223,51 +225,56 @@ class LocalUpscaleEngineRobolectricTest {
     fun `EditorViewModel applyUpscale updates dimensions and supports single-step global Undo and Redo`() = runTest(testDispatcher) {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val vm = EditorViewModel(app)
-        awaitInitialLoad(vm)
+        try {
+            awaitInitialLoad(vm)
 
-        val initialW = vm.uiState.value.fullWidth
-        val initialH = vm.uiState.value.fullHeight
-        assertTrue(initialW > 0 && initialH > 0)
-        assertFalse(vm.uiState.value.hasUpscaleEdits)
-        assertFalse(vm.uiState.value.canUndo)
+            val initialW = vm.uiState.value.fullWidth
+            val initialH = vm.uiState.value.fullHeight
+            assertTrue(initialW > 0 && initialH > 0)
+            assertFalse(vm.uiState.value.hasUpscaleEdits)
+            assertFalse(vm.uiState.value.canUndo)
 
-        vm.selectTab(StudioTab.UPSCALE)
-        assertEquals(StudioTab.UPSCALE, vm.uiState.value.activeTab)
+            vm.selectTab(StudioTab.UPSCALE)
+            assertEquals(StudioTab.UPSCALE, vm.uiState.value.activeTab)
 
-        vm.selectUpscaleScale(UpscaleScale.X2)
-        assertEquals(UpscaleScale.X2, vm.uiState.value.upscaleScale)
+            vm.selectUpscaleScale(UpscaleScale.X2)
+            assertEquals(UpscaleScale.X2, vm.uiState.value.upscaleScale)
 
-        vm.applyUpscale()
-        awaitUpscaleFinish(vm)
+            vm.applyUpscale()
+            awaitUpscaleFinish(vm)
 
-        val upscaledState = vm.uiState.value
-        assertEquals(initialW * 2, upscaledState.fullWidth)
-        assertEquals(initialH * 2, upscaledState.fullHeight)
-        assertTrue(upscaledState.hasUpscaleEdits)
-        assertEquals(2, upscaledState.appliedUpscaleFactor)
-        assertTrue(upscaledState.canUndo)
-        assertEquals("Upscale 2x", upscaledState.undoLabel)
+            val upscaledState = vm.uiState.value
+            assertEquals(initialW * 2, upscaledState.fullWidth)
+            assertEquals(initialH * 2, upscaledState.fullHeight)
+            assertTrue(upscaledState.hasUpscaleEdits)
+            assertEquals(2, upscaledState.appliedUpscaleFactor)
+            assertTrue(upscaledState.canUndo)
+            assertEquals("Upscale 2x", upscaledState.undoLabel)
 
-        // Single-step global Undo restores exact original dimensions and bitmap
-        vm.undo()
-        testDispatcher.scheduler.advanceUntilIdle()
-        val undoneState = vm.uiState.value
-        assertEquals(initialW, undoneState.fullWidth)
-        assertEquals(initialH, undoneState.fullHeight)
-        assertFalse(undoneState.hasUpscaleEdits)
-        assertEquals(1, undoneState.appliedUpscaleFactor)
-        assertFalse(undoneState.canUndo)
-        assertTrue(undoneState.canRedo)
+            // Single-step global Undo restores exact original dimensions and bitmap
+            vm.undo()
+            testDispatcher.scheduler.advanceUntilIdle()
+            val undoneState = vm.uiState.value
+            assertEquals(initialW, undoneState.fullWidth)
+            assertEquals(initialH, undoneState.fullHeight)
+            assertFalse(undoneState.hasUpscaleEdits)
+            assertEquals(1, undoneState.appliedUpscaleFactor)
+            assertFalse(undoneState.canUndo)
+            assertTrue(undoneState.canRedo)
 
-        // Single-step global Redo restores exact upscaled dimensions
-        vm.redo()
-        testDispatcher.scheduler.advanceUntilIdle()
-        val redoneState = vm.uiState.value
-        assertEquals(initialW * 2, redoneState.fullWidth)
-        assertEquals(initialH * 2, redoneState.fullHeight)
-        assertTrue(redoneState.hasUpscaleEdits)
-        assertEquals(2, redoneState.appliedUpscaleFactor)
-        assertTrue(redoneState.canUndo)
-        assertFalse(redoneState.canRedo)
+            // Single-step global Redo restores exact upscaled dimensions
+            vm.redo()
+            testDispatcher.scheduler.advanceUntilIdle()
+            val redoneState = vm.uiState.value
+            assertEquals(initialW * 2, redoneState.fullWidth)
+            assertEquals(initialH * 2, redoneState.fullHeight)
+            assertTrue(redoneState.hasUpscaleEdits)
+            assertEquals(2, redoneState.appliedUpscaleFactor)
+            assertTrue(redoneState.canUndo)
+            assertFalse(redoneState.canRedo)
+        } finally {
+            vm.viewModelScope.cancel()
+            testDispatcher.scheduler.advanceUntilIdle()
+        }
     }
 }

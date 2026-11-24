@@ -45,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -60,6 +61,8 @@ import com.zamalfajji.zamlab.ui.theme.StudioActiveOffWhite
 import com.zamalfajji.zamlab.ui.theme.StudioCharcoal
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioEraserCrimson
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedBorder
+import com.zamalfajji.zamlab.ui.theme.StudioFrostedGlass
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHairline
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHighlight
 import com.zamalfajji.zamlab.ui.theme.StudioGlassSurface
@@ -104,9 +107,11 @@ fun ExportBottomSheet(
             if (!isExporting) onDismiss()
         },
         sheetState = sheetState,
-        containerColor = StudioGlassSurface.copy(alpha = 0.96f),
+        containerColor = StudioFrostedGlass,
+        scrimColor = Color.Black.copy(alpha = 0.24f),
         contentColor = StudioTextPrimary,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        modifier = Modifier.border(1.dp, StudioFrostedBorder, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
         dragHandle = {
             Box(
                 modifier = Modifier

@@ -437,15 +437,20 @@ class ColorPipelineParityUnitTest {
         val pkgInfo = app.packageManager.getPackageInfo(app.packageName, PackageManager.GET_PERMISSIONS)
         val permissions = pkgInfo.requestedPermissions?.toSet().orEmpty()
         val forbidden = setOf(
-            "android.permission.INTERNET",
-            "android.permission.READ_EXTERNAL_STORAGE",
             "android.permission.WRITE_EXTERNAL_STORAGE",
-            "android.permission.READ_MEDIA_IMAGES",
             "android.permission.MANAGE_EXTERNAL_STORAGE"
         )
         assertTrue(
-            "Manifest must not declare broad storage or INTERNET permissions, found: ${permissions intersect forbidden}",
+            "Manifest must keep unrestricted legacy storage permissions excluded, found: ${permissions intersect forbidden}",
             (permissions intersect forbidden).isEmpty()
+        )
+        assertTrue(
+            "Manifest should declare INTERNET for keyless online sticker search",
+            "android.permission.INTERNET" in permissions
+        )
+        assertTrue(
+            "Manifest should declare ACCESS_NETWORK_STATE for safe offline checks and ML Kit TransportRuntime",
+            "android.permission.ACCESS_NETWORK_STATE" in permissions
         )
     }
 }

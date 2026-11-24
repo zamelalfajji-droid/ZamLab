@@ -667,7 +667,8 @@ private fun AspectRatioControlsRow(
             DropdownMenu(
                 expanded = menuExpanded,
                 onDismissRequest = { menuExpanded = false },
-                modifier = Modifier.background(StudioSurfaceElevated)
+                containerColor = StudioGlassSurface,
+                modifier = Modifier.border(1.dp, StudioGlassHairline, RoundedCornerShape(12.dp))
             ) {
                 CropAspectPreset.entries.forEach { preset ->
                     val isSelected = preset == aspectPreset
