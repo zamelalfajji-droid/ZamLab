@@ -339,6 +339,10 @@ class EditorViewModel(
             val (aiUpscaleAvailable, aiDenoiseAvailable) = withContext(Dispatchers.IO) {
                 loadProfilePreferences()
                 loadClipboardPreferences()
+                CameraCaptureHelper.cleanupStaleCaptures(
+                    context = getApplication(),
+                    maxAgeMs = CameraCaptureHelper.DEFAULT_STALE_MAX_AGE_MS
+                )
                 Pair(
                     LocalUpscaleEngine.isOnnxModelAssetAvailable(getApplication()),
                     LocalDenoiseEngine.isOnnxModelAssetAvailable(getApplication())
@@ -407,6 +411,10 @@ class EditorViewModel(
             runCatching { file.delete() }
         }
         activeCachedImportFile = null
+        CameraCaptureHelper.cleanupStaleCaptures(
+            context = getApplication(),
+            maxAgeMs = CameraCaptureHelper.DEFAULT_STALE_MAX_AGE_MS
+        )
     }
 
     private fun replaceActiveCachedImportFile(nextFile: File?) {
@@ -1045,6 +1053,21 @@ class EditorViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * Loads a newly captured full-resolution photo returned by `ActivityResultContracts.TakePicture`
+     * via `FileProvider`, preserving EXIF orientation and cleaning up any older temporary capture
+     * files in `cacheDir/camera_captures/`.
+     */
+    fun onCameraPhotoCaptured(uri: Uri, captureFile: File? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            CameraCaptureHelper.cleanupStaleCaptures(
+                context = getApplication(),
+                keepFilePath = captureFile?.absolutePath
+            )
+        }
+        openPhotoFromUri(uri)
     }
 
     /**

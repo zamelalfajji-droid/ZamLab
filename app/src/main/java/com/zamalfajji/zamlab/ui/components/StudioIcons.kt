@@ -76,6 +76,32 @@ object StudioIcons {
 
     // ---- Top Utility Bar ----
 
+    /** Built-in camera body + viewfinder prism + lens icon for direct photo capture */
+    val CameraCapture: ImageVector by lazy {
+        buildIcon("StudioCameraCapture") {
+            strokePath {
+                // Camera body with top viewfinder prism housing
+                moveTo(4.0f, 9.0f)
+                arcTo(2.0f, 2.0f, 0f, false, true, 6.0f, 7.0f)
+                lineTo(8.1f, 7.0f)
+                lineTo(9.4f, 4.9f)
+                arcTo(1.1f, 1.1f, 0f, false, true, 10.35f, 4.4f)
+                lineTo(13.65f, 4.4f)
+                arcTo(1.1f, 1.1f, 0f, false, true, 14.6f, 4.9f)
+                lineTo(15.9f, 7.0f)
+                lineTo(18.0f, 7.0f)
+                arcTo(2.0f, 2.0f, 0f, false, true, 20.0f, 9.0f)
+                lineTo(20.0f, 17.5f)
+                arcTo(2.0f, 2.0f, 0f, false, true, 18.0f, 19.5f)
+                lineTo(6.0f, 19.5f)
+                arcTo(2.0f, 2.0f, 0f, false, true, 4.0f, 17.5f)
+                close()
+                // Primary circular lens barrel
+                addCircle(12.0f, 13.2f, 3.3f)
+            }
+        }
+    }
+
     val OpenPhoto: ImageVector by lazy {
         buildIcon("StudioOpenPhoto") {
             strokePath {

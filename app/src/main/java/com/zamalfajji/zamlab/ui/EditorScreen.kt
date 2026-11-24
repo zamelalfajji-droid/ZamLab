@@ -2,11 +2,17 @@
 
 package com.zamalfajji.zamlab.ui
 
+import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
@@ -84,6 +90,7 @@ import androidx.compose.material.icons.outlined.Gradient
 import androidx.compose.material.icons.outlined.Healing
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -108,6 +115,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,6 +146,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zamalfajji.zamlab.R
+import com.zamalfajji.zamlab.editor.CameraCaptureHelper
+import com.zamalfajji.zamlab.editor.CameraPermissionUiState
 import com.zamalfajji.zamlab.editor.CompositionGridMode
 import com.zamalfajji.zamlab.editor.EditorUiState
 import com.zamalfajji.zamlab.editor.EditorViewModel
@@ -185,6 +195,7 @@ import com.zamalfajji.zamlab.ui.theme.StudioTextPrimary
 import com.zamalfajji.zamlab.ui.theme.StudioTextSecondary
 import com.zamalfajji.zamlab.ui.theme.StudioTileBorder
 import com.zamalfajji.zamlab.ui.theme.StudioTileSurface
+import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -202,16 +213,110 @@ fun EditorScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
 
     var showExportSheet by remember { mutableStateOf(false) }
     var showProfileMenu by remember { mutableStateOf(false) }
     var showProfileBrowser by remember { mutableStateOf(false) }
     var isViewportZoomed by remember { mutableStateOf(false) }
     var pendingSafOptions by remember { mutableStateOf(ExportOptions()) }
+    var cameraPermissionUiState by remember { mutableStateOf(CameraPermissionUiState.IDLE) }
+    var hasRequestedCameraPermission by rememberSaveable { mutableStateOf(false) }
+    var pendingCaptureUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingCaptureFilePath by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Primary photo import: opens Android system photo gallery directly (zero storage permissions)
+    val cameraUnavailableMsg = stringResource(R.string.camera_unavailable_error)
+    val cameraCaptureErrorMsg = stringResource(R.string.camera_capture_error)
+    val galleryPickerUnavailableMsg = stringResource(R.string.gallery_picker_unavailable_error)
+
+    // Built-in system camera capture saving full-resolution JPEG via FileProvider
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture(),
+        onResult = { captured ->
+            val capturedUri = pendingCaptureUriString?.let { runCatching { Uri.parse(it) }.getOrNull() }
+            val capturedFile = pendingCaptureFilePath?.let { File(it) }
+            pendingCaptureUriString = null
+            pendingCaptureFilePath = null
+            if (captured && capturedUri != null) {
+                viewModel.onCameraPhotoCaptured(capturedUri, capturedFile)
+            } else {
+                CameraCaptureHelper.deleteCaptureFileQuietly(capturedFile)
+            }
+        }
+    )
+
+    val launchSystemCamera: () -> Unit = {
+        runCatching { CameraCaptureHelper.createCaptureOutput(context) }
+            .onSuccess { output ->
+                pendingCaptureFilePath = output.file.absolutePath
+                pendingCaptureUriString = output.uri.toString()
+                try {
+                    takePictureLauncher.launch(output.uri)
+                } catch (_: ActivityNotFoundException) {
+                    CameraCaptureHelper.deleteCaptureFileQuietly(output.file)
+                    pendingCaptureFilePath = null
+                    pendingCaptureUriString = null
+                    uiScope.launch {
+                        snackbarHostState.showSnackbar(
+                            message = cameraUnavailableMsg,
+                            duration = SnackbarDuration.Short
+                        )
+                    }
+                } catch (_: Exception) {
+                    CameraCaptureHelper.deleteCaptureFileQuietly(output.file)
+                    pendingCaptureFilePath = null
+                    pendingCaptureUriString = null
+                    uiScope.launch {
+                        snackbarHostState.showSnackbar(
+                            message = cameraCaptureErrorMsg,
+                            duration = SnackbarDuration.Short
+                        )
+                    }
+                }
+            }
+            .onFailure {
+                uiScope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = cameraCaptureErrorMsg,
+                        duration = SnackbarDuration.Short
+                    )
+                }
+            }
+    }
+
+    // Runtime CAMERA permission launcher for direct camera capture
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            if (granted) {
+                cameraPermissionUiState = CameraPermissionUiState.IDLE
+                launchSystemCamera()
+            } else {
+                val activity = CameraCaptureHelper.findActivity(context)
+                val shouldShowRationale = activity != null &&
+                    ActivityCompat.shouldShowRequestPermissionRationale(
+                        activity,
+                        Manifest.permission.CAMERA
+                    )
+                cameraPermissionUiState = CameraCaptureHelper.resolveCameraPermissionDenial(
+                    shouldShowRationale = shouldShowRationale,
+                    hasRequestedBefore = hasRequestedCameraPermission
+                )
+            }
+        }
+    )
+
+    // Primary photo import: opens Android system Photo Picker directly (zero storage permissions)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri ->
+            uri?.let { viewModel.openPhotoFromUri(it) }
+        }
+    )
+
+    // Zero-permission SAF fallback when Photo Picker is unavailable on older/custom ROMs
+    val fallbackGalleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri ->
             uri?.let { viewModel.openPhotoFromUri(it) }
         }
@@ -317,10 +422,41 @@ fun EditorScreen(
         }
     }
 
-    val openPhotoAction = {
-        photoPickerLauncher.launch(
-            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-        )
+    val capturePhotoAction: () -> Unit = {
+        val hasCameraPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasCameraPermission) {
+            launchSystemCamera()
+        } else {
+            hasRequestedCameraPermission = true
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    val openPhotoAction: () -> Unit = {
+        val launched = if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+            runCatching {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            }.isSuccess
+        } else {
+            false
+        }
+        if (!launched) {
+            runCatching {
+                fallbackGalleryLauncher.launch(arrayOf("image/*"))
+            }.onFailure {
+                uiScope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = galleryPickerUnavailableMsg,
+                        duration = SnackbarDuration.Short
+                    )
+                }
+            }
+        }
     }
 
     val openRawFileAction = {
@@ -389,6 +525,7 @@ fun EditorScreen(
                         applyTopStatusBarPadding = false,
                         viewModel = viewModel,
                         onZoomChanged = { isViewportZoomed = it },
+                        onCapturePhoto = capturePhotoAction,
                         onOpenPhoto = openPhotoAction,
                         onOpenRawFile = openRawFileAction,
                         onQuickShare = viewModel::exportAndShareNow,
@@ -502,6 +639,7 @@ fun EditorScreen(
                                 applyTopStatusBarPadding = true,
                                 viewModel = viewModel,
                                 onZoomChanged = { isViewportZoomed = it },
+                                onCapturePhoto = capturePhotoAction,
                                 onOpenPhoto = openPhotoAction,
                                 onOpenRawFile = openRawFileAction,
                                 onQuickShare = viewModel::exportAndShareNow,
@@ -707,6 +845,121 @@ fun EditorScreen(
             onDismiss = { showProfileBrowser = false }
         )
     }
+
+    if (cameraPermissionUiState != CameraPermissionUiState.IDLE) {
+        CameraPermissionDialog(
+            permissionState = cameraPermissionUiState,
+            onRetryRequest = {
+                cameraPermissionUiState = CameraPermissionUiState.IDLE
+                hasRequestedCameraPermission = true
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            },
+            onOpenAppSettings = {
+                cameraPermissionUiState = CameraPermissionUiState.IDLE
+                runCatching {
+                    context.startActivity(CameraCaptureHelper.buildAppSettingsIntent(context))
+                }
+            },
+            onDismiss = {
+                cameraPermissionUiState = CameraPermissionUiState.IDLE
+            }
+        )
+    }
+}
+
+@Composable
+private fun CameraPermissionDialog(
+    permissionState: CameraPermissionUiState,
+    onRetryRequest: () -> Unit,
+    onOpenAppSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val isPermanentlyDenied = permissionState == CameraPermissionUiState.PERMANENTLY_DENIED
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = StudioGraphite,
+        titleContentColor = StudioTextPrimary,
+        textContentColor = StudioTextSecondary,
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier
+            .border(1.dp, StudioHairline, RoundedCornerShape(18.dp))
+            .testTag("camera_permission_dialog"),
+        icon = {
+            Icon(
+                imageVector = StudioIcons.CameraCapture,
+                contentDescription = null,
+                tint = StudioCinemaAmber,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Text(
+                text = stringResource(R.string.camera_permission_title),
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    color = StudioTextPrimary
+                )
+            )
+        },
+        text = {
+            Text(
+                text = stringResource(
+                    if (isPermanentlyDenied) {
+                        R.string.camera_permission_permanently_denied
+                    } else {
+                        R.string.camera_permission_rationale
+                    }
+                ),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    color = StudioTextSecondary,
+                    lineHeight = 20.sp
+                )
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = if (isPermanentlyDenied) onOpenAppSettings else onRetryRequest,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = StudioCinemaAmber,
+                    contentColor = StudioObsidian
+                ),
+                shape = RoundedCornerShape(50),
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag(
+                        if (isPermanentlyDenied) {
+                            "camera_permission_settings_button"
+                        } else {
+                            "camera_permission_retry_button"
+                        }
+                    )
+            ) {
+                Text(
+                    text = stringResource(
+                        if (isPermanentlyDenied) {
+                            R.string.action_open_settings
+                        } else {
+                            R.string.action_allow_camera
+                        }
+                    ),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("camera_permission_dismiss_button")
+            ) {
+                Text(
+                    text = stringResource(R.string.action_not_now),
+                    color = StudioTextSecondary
+                )
+            }
+        }
+    )
 }
 
 @Composable
@@ -719,6 +972,7 @@ private fun ImmersiveCanvasStage(
     applyTopStatusBarPadding: Boolean,
     viewModel: EditorViewModel,
     onZoomChanged: (Boolean) -> Unit,
+    onCapturePhoto: () -> Unit,
     onOpenPhoto: () -> Unit,
     onOpenRawFile: () -> Unit,
     onQuickShare: () -> Unit,
@@ -821,6 +1075,7 @@ private fun ImmersiveCanvasStage(
             canRedo = uiState.canRedo,
             isComparingOriginal = uiState.isComparingOriginal,
             isSplitCompareEnabled = uiState.isSplitCompareEnabled,
+            onCapturePhoto = onCapturePhoto,
             onOpenPhoto = onOpenPhoto,
             onOpenRawFile = onOpenRawFile,
             onUndo = viewModel::undo,
@@ -967,6 +1222,7 @@ private fun TopFloatingGlassHeader(
     canRedo: Boolean,
     isComparingOriginal: Boolean,
     isSplitCompareEnabled: Boolean,
+    onCapturePhoto: () -> Unit,
     onOpenPhoto: () -> Unit,
     onOpenRawFile: () -> Unit,
     onUndo: () -> Unit,
@@ -987,7 +1243,7 @@ private fun TopFloatingGlassHeader(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val useCompactScroll = maxWidth < 436.dp
+            val useCompactScroll = maxWidth < 486.dp
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1005,7 +1261,7 @@ private fun TopFloatingGlassHeader(
                     Arrangement.SpaceBetween
                 }
             ) {
-                // Left Elevated Graphite Pill: ZamLab Emblem + Gallery Open + Secondary Import RAW / File
+                // Left Elevated Graphite Pill: Z-Effect Emblem + Camera Capture + Gallery Picker + RAW / File Import
                 Surface(
                     shape = RoundedCornerShape(50),
                     color = StudioGraphite,
@@ -1036,6 +1292,27 @@ private fun TopFloatingGlassHeader(
                         }
 
                         Spacer(modifier = Modifier.width(5.dp))
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(16.dp)
+                                .background(StudioHairline)
+                        )
+
+                        IconButton(
+                            onClick = onCapturePhoto,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("camera_capture_button")
+                        ) {
+                            Icon(
+                                imageVector = StudioIcons.CameraCapture,
+                                contentDescription = stringResource(R.string.cd_capture_photo),
+                                tint = StudioCoolWhite,
+                                modifier = Modifier.size(23.dp)
+                            )
+                        }
+
                         Box(
                             modifier = Modifier
                                 .width(1.dp)

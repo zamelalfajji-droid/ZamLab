@@ -126,4 +126,14 @@
     <string name="cd_toggle_mask_overlay_quick">Toggle Rubylith mask overlay visibility</string>
     <string name="info_hud_edits_count">%1$d edits</string>
     <string name="info_hud_masks_count">%1$d masks</string>
+    <string name="cd_capture_photo">Take a new photo with the device camera</string>
+    <string name="camera_permission_title">Camera Access Required</string>
+    <string name="camera_permission_rationale">Z-Effect needs camera permission so you can capture new photos directly into the studio editor.</string>
+    <string name="camera_permission_permanently_denied">Camera permission is turned off. Open App Settings and enable Camera access to shoot new photos directly from Z-Effect.</string>
+    <string name="action_allow_camera">Allow Camera</string>
+    <string name="action_open_settings">App Settings</string>
+    <string name="action_not_now">Not Now</string>
+    <string name="camera_unavailable_error">No camera app found on this device.</string>
+    <string name="camera_capture_error">Unable to start camera capture.</string>
+    <string name="gallery_picker_unavailable_error">Unable to open photo picker.</string>
 </resources>
