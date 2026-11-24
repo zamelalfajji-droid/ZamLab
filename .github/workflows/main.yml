@@ -23,6 +23,8 @@ jobs:
           gradle-version: '9.3.1'
       - name: Download MI-GAN ONNX Model
         run: |
+        
+         rm -rf app/src/main/java/com/example
           mkdir -p app/src/main/assets
           curl -fL "https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx" -o app/src/main/assets/migan_pipeline_v2.onnx
       - name: Build Debug APK
