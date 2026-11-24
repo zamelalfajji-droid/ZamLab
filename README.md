@@ -2,7 +2,7 @@
 
 **ZamLab** is a fast, 100% offline, studio-grade mobile photo editor and color-grading suite for Android built with Jetpack Compose and OpenGL shaders.
 
-[![Download APK](https://shields.io)](https://github.com)
+
 
 ---
 
