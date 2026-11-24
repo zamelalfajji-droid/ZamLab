@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Keep ZamLab 100% offline: strip network/telemetry permissions merged from onnxruntime-android -->
+    <!-- Keep Z-Effect 100% offline: strip network/telemetry permissions merged from onnxruntime-android -->
     <uses-permission
         android:name="android.permission.INTERNET"
         tools:node="remove" />

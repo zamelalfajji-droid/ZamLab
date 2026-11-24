@@ -2,6 +2,7 @@ package com.zamalfajji.zamlab.editor
 
 import android.graphics.Bitmap
 import androidx.core.graphics.createBitmap
+import com.zamalfajji.zamlab.ai.LocalDenoiseEngine
 import com.zamalfajji.zamlab.gl.GlGradingShaders
 import com.zamalfajji.zamlab.lut.CubeLut
 import com.zamalfajji.zamlab.lut.LutSourceFormat
@@ -510,12 +511,12 @@ object ColorGradingEngine {
         val nrNorm = (params.noiseReduction / 100f).coerceIn(0f, 1f)
         val cnrNorm = (params.colorNoiseReduction / 100f).coerceIn(0f, 1f)
 
+        val hasDenoisePass = nrNorm > 0.005f || cnrNorm > 0.005f || params.denoiseAiClean
         val hasSpatialPass = abs(texNorm) > 0.0005f ||
             abs(clarityNorm) > 0.0005f ||
             abs(dehazeNorm) > 0.0005f ||
             sharpNorm > 0.0005f ||
-            nrNorm > 0.005f ||
-            cnrNorm > 0.005f
+            hasDenoisePass
 
         val distortionK = (params.lensDistortion / 100f) * 0.45f
         val distortionEdgeScale = 1f + max(0f, distortionK) * 0.35f
@@ -630,11 +631,12 @@ object ColorGradingEngine {
         val chunkRows = (height + workerCount - 1) / workerCount
         val resolvedOobMask = oobMask
 
-        // Intermediate float planes allocated ONLY when Pass 2 spatial filters (Dehaze/Texture/Clarity/Sharpen/NR) are active
-        val gradedR = if (hasSpatialPass) FloatArray(total) else null
-        val gradedG = if (hasSpatialPass) FloatArray(total) else null
-        val gradedB = if (hasSpatialPass) FloatArray(total) else null
-        val alphaBuf = if (hasSpatialPass) IntArray(total) else null
+        // Intermediate float planes allocated when Pass 2 spatial filters OR selective local masks are active
+        val needsFloatPlanes = hasSpatialPass || hasActiveMasks
+        val gradedR = if (needsFloatPlanes) FloatArray(total) else null
+        val gradedG = if (needsFloatPlanes) FloatArray(total) else null
+        val gradedB = if (needsFloatPlanes) FloatArray(total) else null
+        val alphaBuf = if (needsFloatPlanes) IntArray(total) else null
 
         fun applyFinishingAndPack(
             idx: Int,
@@ -1175,51 +1177,7 @@ object ColorGradingEngine {
                                 cgGlobalVec[2] + cgGlobalVec[3]).coerceIn(0f, 1f)
                         }
 
-                        // Selective Local Masks (Radial & Linear gradients)
-                        if (hasActiveMasks) {
-                            for (mIdx in activeMasks.indices) {
-                                val lm = activeMasks[mIdx]
-                                val mw = evaluateLocalMaskWeight(lm, u, v, outputAspect)
-                                if (mw <= 0.001f) continue
-                                if (abs(lm.exposure) > 0.001f || abs(lm.warmth) > 0.01f) {
-                                    var mlr = srgbToLinearChan(r)
-                                    var mlg = srgbToLinearChan(g)
-                                    var mlb = srgbToLinearChan(b)
-                                    if (abs(lm.exposure) > 0.001f) {
-                                        val em = 2f.pow(lm.exposure * mw)
-                                        mlr *= em; mlg *= em; mlb *= em
-                                    }
-                                    if (abs(lm.warmth) > 0.01f) {
-                                        val lt = (lm.warmth / 100f) * mw
-                                        val mR = exp(lt * 0.42f)
-                                        val mG = exp(lt * 0.04f)
-                                        val mB = exp(-lt * 0.46f)
-                                        val mLuma = (0.2126f * mR + 0.7152f * mG + 0.0722f * mB).coerceAtLeast(1e-4f)
-                                        mlr *= mR / mLuma
-                                        mlg *= mG / mLuma
-                                        mlb *= mB / mLuma
-                                    }
-                                    r = linearToSrgbChan(softShoulderChan(max(mlr, 0f), 0.88f))
-                                    g = linearToSrgbChan(softShoulderChan(max(mlg, 0f), 0.88f))
-                                    b = linearToSrgbChan(softShoulderChan(max(mlb, 0f), 0.88f))
-                                }
-                                if (abs(lm.contrast) > 0.01f) {
-                                    val mc = (lm.contrast / 100f) * mw
-                                    r = applySmoothContrastChan(r, mc)
-                                    g = applySmoothContrastChan(g, mc)
-                                    b = applySmoothContrastChan(b, mc)
-                                }
-                                if (abs(lm.saturation) > 0.01f) {
-                                    val ml = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                                    val sf = max(0f, 1f + (lm.saturation / 100f) * mw)
-                                    r = (ml + (r - ml) * sf).coerceIn(0f, 1f)
-                                    g = (ml + (g - ml) * sf).coerceIn(0f, 1f)
-                                    b = (ml + (b - ml) * sf).coerceIn(0f, 1f)
-                                }
-                            }
-                        }
-
-                        if (hasSpatialPass) {
+                        if (needsFloatPlanes) {
                             gradedR!![idx] = r
                             gradedG!![idx] = g
                             gradedB!![idx] = b
@@ -1234,6 +1192,19 @@ object ColorGradingEngine {
         pass1Jobs.awaitAll()
 
         // =========================================================================
+        // SELECTIVE LOCAL MASKS: Boolean Sub-Masks + Guided Filter Edge-Snap + 8 Local Adjustments
+        // =========================================================================
+        if (hasActiveMasks) {
+            val gR = gradedR!!
+            val gG = gradedG!!
+            val gB = gradedB!!
+            for (lm in activeMasks) {
+                val maskAlpha = MaskEngine.computeMaskAlphaBuffer(lm, gR, gG, gB, width, height)
+                MaskEngine.applyLocalMaskAdjustmentsCpu(lm, maskAlpha, gR, gG, gB, width, height)
+            }
+        }
+
+        // =========================================================================
         // PASS 2 (STEP 6): Real Multi-Pixel Spatial Detail Passes on Graded Buffer
         // =========================================================================
         if (hasSpatialPass) {
@@ -1241,6 +1212,18 @@ object ColorGradingEngine {
             val gG = gradedG!!
             val gB = gradedB!!
             val aBuf = alphaBuf!!
+
+            // 6a. Professional BT.709 YCbCr edge-preserving Chroma + Luminance Noise Reduction
+            if (hasDenoisePass) {
+                LocalDenoiseEngine.applyDenoiseToRgbPlanes(
+                    r = gR,
+                    g = gG,
+                    b = gB,
+                    width = width,
+                    height = height,
+                    params = params
+                )
+            }
 
             val pass2Jobs = (0 until workerCount).map { worker ->
                 val yStart = worker * chunkRows
@@ -1264,74 +1247,6 @@ object ColorGradingEngine {
                             var r = gR[idx]
                             var g = gG[idx]
                             var b = gB[idx]
-
-                            // 6a. Edge-preserving Luminance & Color Noise Reduction (distinguishes isolated speckles from coherent edges)
-                            if (nrNorm > 0.005f || cnrNorm > 0.005f) {
-                                val xm1 = max(0, x - 1)
-                                val xp1 = min(width - 1, x + 1)
-                                val ym1 = max(0, y - 1)
-                                val yp1 = min(height - 1, y + 1)
-                                val iL = rowBase + xm1
-                                val iR = rowBase + xp1
-                                val iU = ym1 * width + x
-                                val iD = yp1 * width + x
-
-                                val nearR = 0.25f * (gR[iL] + gR[iR] + gR[iU] + gR[iD])
-                                val nearG = 0.25f * (gG[iL] + gG[iR] + gG[iU] + gG[iD])
-                                val nearB = 0.25f * (gB[iL] + gB[iR] + gB[iU] + gB[iD])
-                                sampleGaussian9Rgb(gR, gG, gB, width, height, x, y, 1.65f, blurOut)
-                                val tR = nearR + (blurOut[0] - nearR) * 0.45f
-                                val tG = nearG + (blurOut[1] - nearG) * 0.45f
-                                val tB = nearB + (blurOut[2] - nearB) * 0.45f
-
-                                val lL = 0.2126f * gR[iL] + 0.7152f * gG[iL] + 0.0722f * gB[iL]
-                                val lR = 0.2126f * gR[iR] + 0.7152f * gG[iR] + 0.0722f * gB[iR]
-                                val lU = 0.2126f * gR[iU] + 0.7152f * gG[iU] + 0.0722f * gB[iU]
-                                val lD = 0.2126f * gR[iD] + 0.7152f * gG[iD] + 0.0722f * gB[iD]
-
-                                if (nrNorm > 0.005f) {
-                                    val cLum = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                                    val sLum = 0.2126f * tR + 0.7152f * tG + 0.0722f * tB
-                                    val dMin = min(
-                                        min(abs(cLum - lL), abs(cLum - lR)),
-                                        min(abs(cLum - lU), abs(cLum - lD))
-                                    )
-                                    val coherentEdge = max(abs(cLum - sLum) - dMin * 0.85f, 0f)
-                                    val edgeKeep = (1f - coherentEdge * 6.5f).coerceIn(0.08f, 1f)
-                                    val delta = (sLum - cLum) * (nrNorm * 0.86f * edgeKeep)
-                                    r = (r + delta).coerceIn(0f, 1f)
-                                    g = (g + delta).coerceIn(0f, 1f)
-                                    b = (b + delta).coerceIn(0f, 1f)
-                                }
-                                if (cnrNorm > 0.005f) {
-                                    val cLum = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                                    val sLum = 0.2126f * tR + 0.7152f * tG + 0.0722f * tB
-                                    val cCr = r - cLum
-                                    val cCg = g - cLum
-                                    val cCb = b - cLum
-                                    val sCr = tR - sLum
-                                    val sCg = tG - sLum
-                                    val sCb = tB - sLum
-
-                                    fun chDist(ni: Int, nl: Float): Float {
-                                        val dr = cCr - (gR[ni] - nl)
-                                        val dg = cCg - (gG[ni] - nl)
-                                        val db = cCb - (gB[ni] - nl)
-                                        return sqrt(dr * dr + dg * dg + db * db)
-                                    }
-                                    val dChMin = min(
-                                        min(chDist(iL, lL), chDist(iR, lR)),
-                                        min(chDist(iU, lU), chDist(iD, lD))
-                                    )
-                                    val dChAvg = sqrt((cCr - sCr) * (cCr - sCr) + (cCg - sCg) * (cCg - sCg) + (cCb - sCb) * (cCb - sCb))
-                                    val chromaEdge = max(dChAvg - dChMin * 0.85f, 0f)
-                                    val chromaKeep = (1f - chromaEdge * 3.0f).coerceIn(0.14f, 1f)
-                                    val blend = cnrNorm * 0.94f * chromaKeep
-                                    r = (cLum + cCr + (sCr - cCr) * blend).coerceIn(0f, 1f)
-                                    g = (cLum + cCg + (sCg - cCg) * blend).coerceIn(0f, 1f)
-                                    b = (cLum + cCb + (sCb - cCb) * blend).coerceIn(0f, 1f)
-                                }
-                            }
 
                             // 6b. Dehaze: 9-tap local dark-channel atmospheric veil estimation + radiance & saturation recovery
                             if (abs(dehazeNorm) > 0.0005f) {
@@ -1457,6 +1372,32 @@ object ColorGradingEngine {
                 }
             }
             pass2Jobs.awaitAll()
+        } else if (needsFloatPlanes) {
+            val gR = gradedR!!
+            val gG = gradedG!!
+            val gB = gradedB!!
+            val aBuf = alphaBuf!!
+            val packJobs = (0 until workerCount).map { worker ->
+                val yStart = worker * chunkRows
+                val yEnd = min(height, yStart + chunkRows)
+                async(Dispatchers.Default) {
+                    val lutOut = FloatArray(3)
+                    for (y in yStart until yEnd) {
+                        val v = (y + 0.5f) / height.toFloat()
+                        val rowBase = y * width
+                        for (x in 0 until width) {
+                            val u = (x + 0.5f) / width.toFloat()
+                            val idx = rowBase + x
+                            if (resolvedOobMask != null && resolvedOobMask[idx]) {
+                                dstPixels[idx] = 0xFF0B0E14.toInt()
+                                continue
+                            }
+                            applyFinishingAndPack(idx, x, y, u, v, aBuf[idx], gR[idx], gG[idx], gB[idx], lutOut)
+                        }
+                    }
+                }
+            }
+            packJobs.awaitAll()
         }
 
         rawPixels = null

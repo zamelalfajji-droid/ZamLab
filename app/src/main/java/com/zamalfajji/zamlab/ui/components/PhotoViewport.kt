@@ -93,17 +93,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.zamalfajji.zamlab.R
 import com.zamalfajji.zamlab.editor.ColorGradingEngine
+import com.zamalfajji.zamlab.editor.CompositionGridMode
 import com.zamalfajji.zamlab.editor.CropAspectPreset
 import com.zamalfajji.zamlab.editor.CropOverlayMode
 import com.zamalfajji.zamlab.editor.EyedropperMode
 import com.zamalfajji.zamlab.editor.GeometryMath
 import com.zamalfajji.zamlab.editor.GradingParams
+import com.zamalfajji.zamlab.editor.SpiralOrientation
+import com.zamalfajji.zamlab.editor.toCompositionGridMode
 import com.zamalfajji.zamlab.editor.HealMode
 import com.zamalfajji.zamlab.editor.HealStroke
 import com.zamalfajji.zamlab.editor.HistogramData
 import com.zamalfajji.zamlab.editor.HslBand
 import com.zamalfajji.zamlab.editor.HslBandAdjustment
 import com.zamalfajji.zamlab.editor.LocalMask
+import com.zamalfajji.zamlab.editor.MaskEngine
+import com.zamalfajji.zamlab.editor.MaskSubMask
 import com.zamalfajji.zamlab.editor.MaskType
 import com.zamalfajji.zamlab.editor.NormalizedCropRect
 import com.zamalfajji.zamlab.editor.StudioTab
@@ -126,11 +131,15 @@ import com.zamalfajji.zamlab.ui.theme.StudioTextSecondary
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 @Composable
 fun PhotoViewport(
@@ -158,8 +167,12 @@ fun PhotoViewport(
     isHealProcessing: Boolean = false,
     activeEyedropperMode: EyedropperMode = EyedropperMode.NONE,
     cropOverlayMode: CropOverlayMode = CropOverlayMode.THIRDS,
+    compositionGridMode: CompositionGridMode = CompositionGridMode.OFF,
+    spiralOrientation: SpiralOrientation = SpiralOrientation.BOTTOM_RIGHT,
     activeMask: LocalMask? = null,
+    activeSubMask: MaskSubMask? = activeMask?.resolvedSubMasks()?.firstOrNull(),
     showMaskOverlay: Boolean = true,
+    maskBrushRadius: Float = 0.055f,
     viewportResetToken: Long = 0L,
     isTouchAdjustEnabled: Boolean = false,
     touchAdjustSelectedBand: HslBand? = null,
@@ -184,6 +197,10 @@ fun PhotoViewport(
     onCropRectChange: (NormalizedCropRect) -> Unit = {},
     onCropDragStateChanged: (Boolean) -> Unit = {},
     onUpdateMask: (String, (LocalMask) -> LocalMask) -> Unit = { _, _ -> },
+    onUpdateSubMask: (String, String, (MaskSubMask) -> MaskSubMask) -> Unit = { _, _, _ -> },
+    onStartMaskBrushStroke: (Float, Float) -> Unit = { _, _ -> },
+    onAppendMaskBrushStroke: (Float, Float) -> Unit = { _, _ -> },
+    onFinishMaskBrushStroke: () -> Unit = {},
     onMaskDragStateChanged: (Boolean) -> Unit = {},
     onToggleTouchAdjust: () -> Unit = {},
     onTouchAdjustTap: (Float, Float) -> Unit = { _, _ -> },
@@ -701,6 +718,8 @@ fun PhotoViewport(
                 }
             }
 
+            val effectiveShowRubylith = showMaskOverlay && isMaskMode && !isComparingOriginal && activeMask != null
+
             SideEffect {
                 glController?.updateState(
                     imageBitmap = previewBitmap,
@@ -710,7 +729,9 @@ fun PhotoViewport(
                     splitRatio = effectiveSplitRatio,
                     applyCrop = applyCropInShader,
                     showHighlightClipping = showHighlightClipping,
-                    showShadowClipping = showShadowClipping
+                    showShadowClipping = showShadowClipping,
+                    activeMaskId = activeMask?.id,
+                    showMaskOverlay = effectiveShowRubylith
                 )
             }
 
@@ -725,7 +746,9 @@ fun PhotoViewport(
                 isComparingOriginal,
                 applyCropInShader,
                 showHighlightClipping,
-                showShadowClipping
+                showShadowClipping,
+                activeMask,
+                effectiveShowRubylith
             ) {
                 if (!glRenderFailed || previewBitmap.isRecycled) {
                     val prev = cpuFallbackBitmap
@@ -753,7 +776,7 @@ fun PhotoViewport(
                     params = effectiveParams,
                     lut = if (isComparingOriginal) null else activeLut
                 )
-                val rendered = if (!isComparingOriginal && (showHighlightClipping || showShadowClipping)) {
+                val withClipping = if (!isComparingOriginal && (showHighlightClipping || showShadowClipping)) {
                     val overlaid = ColorGradingEngine.applyClippingWarningOverlay(
                         source = graded,
                         showHighlightClipping = showHighlightClipping,
@@ -765,6 +788,16 @@ fun PhotoViewport(
                     overlaid
                 } else {
                     graded
+                }
+                val rubylithMask = if (effectiveShowRubylith) activeMask else null
+                val rendered = if (rubylithMask != null) {
+                    val rubylith = MaskEngine.applyRubylithOverlayBitmap(withClipping, rubylithMask)
+                    if (rubylith !== withClipping && withClipping !== previewBitmap && !withClipping.isRecycled) {
+                        withClipping.recycle()
+                    }
+                    rubylith
+                } else {
+                    withClipping
                 }
                 val old = cpuFallbackBitmap
                 cpuFallbackBitmap = rendered
@@ -808,7 +841,9 @@ fun PhotoViewport(
                                     splitRatio = effectiveSplitRatio,
                                     applyCrop = applyCropInShader,
                                     showHighlightClipping = showHighlightClipping,
-                                    showShadowClipping = showShadowClipping
+                                    showShadowClipping = showShadowClipping,
+                                    activeMaskId = activeMask?.id,
+                                    showMaskOverlay = effectiveShowRubylith
                                 )
                                 glController = controller
                             }
@@ -822,7 +857,9 @@ fun PhotoViewport(
                                 splitRatio = effectiveSplitRatio,
                                 applyCrop = applyCropInShader,
                                 showHighlightClipping = showHighlightClipping,
-                                showShadowClipping = showShadowClipping
+                                showShadowClipping = showShadowClipping,
+                                activeMaskId = activeMask?.id,
+                                showMaskOverlay = effectiveShowRubylith
                             )
                         },
                         modifier = Modifier.fillMaxSize()
@@ -839,6 +876,15 @@ fun PhotoViewport(
                     }
                 }
 
+                // Live composition grid overlay across all non-crop tabs (strictly viewport-only, never exported)
+                if (!isCropMode && !isComparingOriginal && compositionGridMode != CompositionGridMode.OFF && fittedW > 1f && fittedH > 1f) {
+                    CompositionGridOverlay(
+                        mode = compositionGridMode,
+                        spiralOrientation = spiralOrientation,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
                 // Interactive crop box & composition overlays when Crop & Rotate tab is active
                 if (isCropMode && !isComparingOriginal && fittedW > 1f && fittedH > 1f) {
                     val displayedCropRect = GeometryMath.effectiveCropRect(srcW, srcH, gradingParams.crop)
@@ -852,10 +898,17 @@ fun PhotoViewport(
                     }
                     val orientAspect = GeometryMath.orientedAspect(srcW, srcH, gradingParams.crop)
                     val targetNormRatio = targetPixelAspect?.let { (it / orientAspect).coerceIn(0.05f, 20f) }
+                    val effectiveCropGrid = if (compositionGridMode != CompositionGridMode.OFF) {
+                        compositionGridMode
+                    } else {
+                        cropOverlayMode.toCompositionGridMode()
+                    }
 
                     InteractiveCropOverlay(
                         cropRect = displayedCropRect,
                         overlayMode = cropOverlayMode,
+                        compositionGridMode = effectiveCropGrid,
+                        spiralOrientation = spiralOrientation,
                         targetNormRatio = targetNormRatio,
                         onCropRectChange = onCropRectChange,
                         onDragStateChanged = onCropDragStateChanged,
@@ -863,12 +916,18 @@ fun PhotoViewport(
                     )
                 }
 
-                // Interactive Radial / Linear Local Mask canvas handles & feather overlay
-                if (isMaskMode && !isComparingOriginal && activeMask != null && fittedW > 1f && fittedH > 1f) {
+                // Interactive Vector Brush painting & Rotatable Radial / Linear handles on active sub-mask
+                if (isMaskMode && !isComparingOriginal && !isEyedropperActive &&
+                    activeMask != null && activeSubMask != null && fittedW > 1f && fittedH > 1f
+                ) {
                     InteractiveLocalMaskOverlay(
-                        mask = activeMask,
-                        showOverlayTint = showMaskOverlay,
-                        onUpdateMask = onUpdateMask,
+                        layerId = activeMask.id,
+                        subMask = activeSubMask,
+                        maskBrushRadius = maskBrushRadius,
+                        onUpdateSubMask = onUpdateSubMask,
+                        onStartMaskBrushStroke = onStartMaskBrushStroke,
+                        onAppendMaskBrushStroke = onAppendMaskBrushStroke,
+                        onFinishMaskBrushStroke = onFinishMaskBrushStroke,
                         onDragStateChanged = onMaskDragStateChanged,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1231,10 +1290,10 @@ fun PhotoViewport(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = if (activeEyedropperMode == EyedropperMode.WHITE_BALANCE) {
-                            "Tap neutral gray/white on photo"
-                        } else {
-                            "Tap target color on photo"
+                        text = when (activeEyedropperMode) {
+                            EyedropperMode.WHITE_BALANCE -> "Tap neutral gray/white on photo"
+                            EyedropperMode.MASK_COLOR_RANGE -> stringResource(R.string.mask_eyedropper_prompt)
+                            else -> "Tap target color on photo"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = StudioTextPrimary,
@@ -1555,6 +1614,7 @@ private enum class MaskHandle {
     RADIAL_RIGHT,
     RADIAL_BOTTOM,
     RADIAL_FEATHER,
+    RADIAL_ROTATE,
     LINEAR_START,
     LINEAR_END,
     LINEAR_MID
@@ -1562,192 +1622,246 @@ private enum class MaskHandle {
 
 @Composable
 private fun InteractiveLocalMaskOverlay(
-    mask: LocalMask,
-    showOverlayTint: Boolean,
-    onUpdateMask: (String, (LocalMask) -> LocalMask) -> Unit,
+    layerId: String,
+    subMask: MaskSubMask,
+    maskBrushRadius: Float,
+    onUpdateSubMask: (String, String, (MaskSubMask) -> MaskSubMask) -> Unit,
+    onStartMaskBrushStroke: (Float, Float) -> Unit,
+    onAppendMaskBrushStroke: (Float, Float) -> Unit,
+    onFinishMaskBrushStroke: () -> Unit,
     onDragStateChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val latestMask by rememberUpdatedState(mask)
-    val latestOnUpdate by rememberUpdatedState(onUpdateMask)
+    val latestLayerId by rememberUpdatedState(layerId)
+    val latestSub by rememberUpdatedState(subMask)
+    val latestOnUpdate by rememberUpdatedState(onUpdateSubMask)
+    val latestStartBrush by rememberUpdatedState(onStartMaskBrushStroke)
+    val latestAppendBrush by rememberUpdatedState(onAppendMaskBrushStroke)
+    val latestFinishBrush by rememberUpdatedState(onFinishMaskBrushStroke)
     val latestOnDragState by rememberUpdatedState(onDragStateChanged)
     var activeHandle by remember { mutableStateOf<MaskHandle?>(null) }
+    var brushCursorNorm by remember { mutableStateOf<Offset?>(null) }
+
+    val inputModifier = when (subMask.type) {
+        MaskType.BRUSH -> Modifier.pointerInput(layerId, subMask.id, MaskType.BRUSH) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val w = size.width.toFloat().coerceAtLeast(1f)
+                val h = size.height.toFloat().coerceAtLeast(1f)
+                var hadMultiTouch = false
+                val startNorm = Offset(
+                    (down.position.x / w).coerceIn(0f, 1f),
+                    (down.position.y / h).coerceIn(0f, 1f)
+                )
+                brushCursorNorm = startNorm
+                latestStartBrush(startNorm.x, startNorm.y)
+                down.consume()
+
+                try {
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.size >= 2) {
+                            hadMultiTouch = true
+                            brushCursorNorm = null
+                            break
+                        }
+                        if (pressed.size == 1 && !hadMultiTouch) {
+                            val ch = pressed.first()
+                            val norm = Offset(
+                                (ch.position.x / w).coerceIn(0f, 1f),
+                                (ch.position.y / h).coerceIn(0f, 1f)
+                            )
+                            brushCursorNorm = norm
+                            latestAppendBrush(norm.x, norm.y)
+                            ch.consume()
+                        }
+                    } while (event.changes.any { it.pressed })
+                } finally {
+                    brushCursorNorm = null
+                    latestFinishBrush()
+                }
+            }
+        }
+
+        MaskType.RADIAL, MaskType.LINEAR -> Modifier.pointerInput(layerId, subMask.id, subMask.type) {
+            val touchRadiusPx = 34.dp.toPx()
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val w = size.width.toFloat().coerceAtLeast(1f)
+                val h = size.height.toFloat().coerceAtLeast(1f)
+                val cur = latestSub
+                val handle = hitTestMaskHandle(down.position, cur, w, h, touchRadiusPx)
+                if (handle == null) {
+                    return@awaitEachGesture
+                }
+                down.consume()
+                activeHandle = handle
+                latestOnDragState(true)
+
+                val startSub = cur
+                var cumDx = 0f
+                var cumDy = 0f
+                try {
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.size >= 2) {
+                            break
+                        }
+                        if (pressed.size == 1) {
+                            val ch = pressed.first()
+                            val delta = ch.position - ch.previousPosition
+                            cumDx += delta.x / w
+                            cumDy += delta.y / h
+                            ch.consume()
+                            val curPos = ch.position
+                            latestOnUpdate(latestLayerId, startSub.id) {
+                                applyMaskHandleDrag(startSub, handle, cumDx, cumDy, curPos, w, h)
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                } finally {
+                    activeHandle = null
+                    latestOnDragState(false)
+                }
+            }
+        }
+
+        // Parametric masks (Luminance Range & Color Range) have no spatial handles; allow normal zoom/pan
+        MaskType.LUMINANCE_RANGE, MaskType.COLOR_RANGE -> Modifier
+    }
 
     Canvas(
         modifier = modifier
-            .pointerInput(mask.id) {
-                val touchRadiusPx = 34.dp.toPx()
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val w = size.width.toFloat().coerceAtLeast(1f)
-                    val h = size.height.toFloat().coerceAtLeast(1f)
-                    val cur = latestMask
-                    val handle = hitTestMaskHandle(down.position, cur, w, h, touchRadiusPx)
-                    if (handle == null) {
-                        return@awaitEachGesture
-                    }
-                    down.consume()
-                    activeHandle = handle
-                    latestOnDragState(true)
-
-                    val startMask = cur
-                    var cumDx = 0f
-                    var cumDy = 0f
-                    try {
-                        do {
-                            val event = awaitPointerEvent()
-                            val pressed = event.changes.filter { it.pressed }
-                            if (pressed.size >= 2) {
-                                // Yield to 2-finger pinch/pan zoom
-                                break
-                            }
-                            if (pressed.size == 1) {
-                                val ch = pressed.first()
-                                val delta = ch.position - ch.previousPosition
-                                cumDx += delta.x / w
-                                cumDy += delta.y / h
-                                ch.consume()
-                                latestOnUpdate(startMask.id) {
-                                    applyMaskHandleDrag(startMask, handle, cumDx, cumDy, w, h)
-                                }
-                            }
-                        } while (event.changes.any { it.pressed })
-                    } finally {
-                        activeHandle = null
-                        latestOnDragState(false)
-                    }
-                }
-            }
+            .then(inputModifier)
             .testTag("local_mask_overlay")
     ) {
         val w = size.width
         val h = size.height
-        val shouldShowFill = showOverlayTint || activeHandle != null
-        val maskTint = if (mask.type == MaskType.RADIAL) StudioEraserCrimson else StudioCyan
 
-        if (mask.type == MaskType.RADIAL) {
-            val cx = mask.centerX * w
-            val cy = mask.centerY * h
-            val rxPx = (mask.radiusX * w).coerceAtLeast(8f)
-            val ryPx = (mask.radiusY * h).coerceAtLeast(8f)
-            val innerScale = (1f - mask.feather).coerceIn(0.02f, 0.98f)
-            val outerScale = (1f + mask.feather * 0.15f).coerceAtLeast(innerScale + 0.02f)
-
-            if (shouldShowFill) {
-                val outerR = rxPx * outerScale
-                val stopInner = (innerScale / outerScale).coerceIn(0f, 0.99f)
-                val fillColors = if (mask.inverted) {
-                    arrayOf(
-                        0f to Color.Transparent,
-                        stopInner to Color.Transparent,
-                        1f to maskTint.copy(alpha = 0.28f)
-                    )
-                } else {
-                    arrayOf(
-                        0f to maskTint.copy(alpha = 0.28f),
-                        stopInner to maskTint.copy(alpha = 0.22f),
-                        1f to Color.Transparent
-                    )
-                }
-                withTransform({
-                    translate(cx, cy)
-                    scale(1f, ryPx / rxPx.coerceAtLeast(1f), pivot = Offset.Zero)
-                }) {
+        when (subMask.type) {
+            MaskType.BRUSH -> {
+                brushCursorNorm?.let { c ->
+                    val rPx = maskBrushRadius * min(w, h)
+                    val pt = Offset(c.x * w, c.y * h)
                     drawCircle(
-                        brush = Brush.radialGradient(
-                            colorStops = fillColors,
-                            center = Offset.Zero,
-                            radius = outerR
-                        ),
-                        radius = outerR,
-                        center = Offset.Zero
+                        color = Color(0xFFFF2A2A).copy(alpha = 0.22f),
+                        radius = rPx,
+                        center = pt
+                    )
+                    drawCircle(
+                        color = Color.White.copy(alpha = 0.92f),
+                        radius = rPx,
+                        center = pt,
+                        style = Stroke(width = 1.6.dp.toPx())
                     )
                 }
             }
 
-            // Main radial boundary
-            drawOval(
-                color = Color.White.copy(alpha = 0.9f),
-                topLeft = Offset(cx - rxPx, cy - ryPx),
-                size = Size(rxPx * 2f, ryPx * 2f),
-                style = Stroke(width = 1.6.dp.toPx())
-            )
-            // Dashed inner feather boundary
-            if (mask.feather > 0.04f) {
-                val irx = rxPx * innerScale
-                val iry = ryPx * innerScale
-                drawOval(
-                    color = StudioAmber.copy(alpha = 0.85f),
-                    topLeft = Offset(cx - irx, cy - iry),
-                    size = Size(irx * 2f, iry * 2f),
-                    style = Stroke(
-                        width = 1.2.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                    )
-                )
-            }
+            MaskType.RADIAL -> {
+                val cx = subMask.centerX * w
+                val cy = subMask.centerY * h
+                val rxPx = (subMask.radiusX * w).coerceAtLeast(8f)
+                val ryPx = (subMask.radiusY * h).coerceAtLeast(8f)
+                val innerScale = (1f - subMask.feather).coerceIn(0.02f, 0.98f)
+                val rotDeg = subMask.rotationDeg
+                val rotRad = (rotDeg * (PI / 180.0)).toFloat()
 
-            // Draggable handles: Center, Right X, Bottom Y, 45deg Feather
-            val featherFrac = (1f - mask.feather * 0.85f).coerceIn(0.15f, 1f)
-            val featherPos = Offset(cx + rxPx * featherFrac * 0.707f, cy - ryPx * featherFrac * 0.707f)
-            drawMaskHandleDot(Offset(cx, cy), StudioAmber, isActive = activeHandle == MaskHandle.RADIAL_CENTER, radiusDp = 7f)
-            drawMaskHandleDot(Offset(cx + rxPx, cy), Color.White, isActive = activeHandle == MaskHandle.RADIAL_RIGHT, radiusDp = 5.5f)
-            drawMaskHandleDot(Offset(cx, cy + ryPx), Color.White, isActive = activeHandle == MaskHandle.RADIAL_BOTTOM, radiusDp = 5.5f)
-            drawMaskHandleDot(featherPos, StudioCyan, isActive = activeHandle == MaskHandle.RADIAL_FEATHER, radiusDp = 5.5f)
-        } else {
-            val startPt = Offset(mask.startX * w, mask.startY * h)
-            val endPt = Offset(mask.endX * w, mask.endY * h)
-            val midPt = Offset((startPt.x + endPt.x) * 0.5f, (startPt.y + endPt.y) * 0.5f)
-
-            if (shouldShowFill) {
-                val colors = if (mask.inverted) {
-                    listOf(Color.Transparent, maskTint.copy(alpha = 0.28f))
-                } else {
-                    listOf(maskTint.copy(alpha = 0.28f), Color.Transparent)
+                fun rotatedPoint(localX: Float, localY: Float): Offset {
+                    val c = cos(rotRad)
+                    val s = sin(rotRad)
+                    return Offset(cx + localX * c - localY * s, cy + localX * s + localY * c)
                 }
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = colors,
-                        start = startPt,
-                        end = endPt
-                    ),
-                    topLeft = Offset.Zero,
-                    size = Size(w, h)
+
+                withTransform({
+                    rotate(degrees = rotDeg, pivot = Offset(cx, cy))
+                }) {
+                    // Main radial boundary
+                    drawOval(
+                        color = Color.White.copy(alpha = 0.92f),
+                        topLeft = Offset(cx - rxPx, cy - ryPx),
+                        size = Size(rxPx * 2f, ryPx * 2f),
+                        style = Stroke(width = 1.6.dp.toPx())
+                    )
+                    // Dashed inner feather boundary
+                    if (subMask.feather > 0.04f) {
+                        val irx = rxPx * innerScale
+                        val iry = ryPx * innerScale
+                        drawOval(
+                            color = StudioAmber.copy(alpha = 0.88f),
+                            topLeft = Offset(cx - irx, cy - iry),
+                            size = Size(irx * 2f, iry * 2f),
+                            style = Stroke(
+                                width = 1.2.dp.toPx(),
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+                            )
+                        )
+                    }
+                }
+
+                // Rotation stem & handle above top vertex
+                val topEdge = rotatedPoint(0f, -ryPx)
+                val rotatePos = rotatedPoint(0f, -(ryPx + 24.dp.toPx()))
+                drawLine(
+                    color = Color.White.copy(alpha = 0.80f),
+                    start = topEdge,
+                    end = rotatePos,
+                    strokeWidth = 1.4.dp.toPx()
                 )
+
+                val featherFrac = (1f - subMask.feather * 0.85f).coerceIn(0.15f, 1f)
+                val rightPos = rotatedPoint(rxPx, 0f)
+                val bottomPos = rotatedPoint(0f, ryPx)
+                val featherPos = rotatedPoint(rxPx * featherFrac * 0.707f, -ryPx * featherFrac * 0.707f)
+
+                drawMaskHandleDot(Offset(cx, cy), StudioAmber, isActive = activeHandle == MaskHandle.RADIAL_CENTER, radiusDp = 7f)
+                drawMaskHandleDot(rightPos, Color.White, isActive = activeHandle == MaskHandle.RADIAL_RIGHT, radiusDp = 5.5f)
+                drawMaskHandleDot(bottomPos, Color.White, isActive = activeHandle == MaskHandle.RADIAL_BOTTOM, radiusDp = 5.5f)
+                drawMaskHandleDot(featherPos, StudioCyan, isActive = activeHandle == MaskHandle.RADIAL_FEATHER, radiusDp = 5.5f)
+                drawMaskHandleDot(rotatePos, Color(0xFFFF2A2A), isActive = activeHandle == MaskHandle.RADIAL_ROTATE, radiusDp = 5.5f)
             }
 
-            val dx = endPt.x - startPt.x
-            val dy = endPt.y - startPt.y
-            val len = hypot(dx, dy).coerceAtLeast(1f)
-            val perpX = (-dy / len) * max(w, h)
-            val perpY = (dx / len) * max(w, h)
+            MaskType.LINEAR -> {
+                val startPt = Offset(subMask.startX * w, subMask.startY * h)
+                val endPt = Offset(subMask.endX * w, subMask.endY * h)
+                val midPt = Offset((startPt.x + endPt.x) * 0.5f, (startPt.y + endPt.y) * 0.5f)
 
-            // 100% start guide line
-            drawLine(
-                color = StudioAmber.copy(alpha = 0.85f),
-                start = Offset(startPt.x - perpX, startPt.y - perpY),
-                end = Offset(startPt.x + perpX, startPt.y + perpY),
-                strokeWidth = 1.4.dp.toPx()
-            )
-            // 0% end guide line (dashed)
-            drawLine(
-                color = Color.White.copy(alpha = 0.78f),
-                start = Offset(endPt.x - perpX, endPt.y - perpY),
-                end = Offset(endPt.x + perpX, endPt.y + perpY),
-                strokeWidth = 1.2.dp.toPx(),
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f), 0f)
-            )
-            // Axis stem
-            drawLine(
-                color = Color.White.copy(alpha = 0.75f),
-                start = startPt,
-                end = endPt,
-                strokeWidth = 1.4.dp.toPx()
-            )
+                val dx = endPt.x - startPt.x
+                val dy = endPt.y - startPt.y
+                val len = hypot(dx, dy).coerceAtLeast(1f)
+                val perpX = (-dy / len) * max(w, h)
+                val perpY = (dx / len) * max(w, h)
 
-            drawMaskHandleDot(startPt, StudioAmber, isActive = activeHandle == MaskHandle.LINEAR_START, radiusDp = 6f)
-            drawMaskHandleDot(midPt, Color.White, isActive = activeHandle == MaskHandle.LINEAR_MID, radiusDp = 7f)
-            drawMaskHandleDot(endPt, StudioCyan, isActive = activeHandle == MaskHandle.LINEAR_END, radiusDp = 6f)
+                // 100% start guide line
+                drawLine(
+                    color = StudioAmber.copy(alpha = 0.88f),
+                    start = Offset(startPt.x - perpX, startPt.y - perpY),
+                    end = Offset(startPt.x + perpX, startPt.y + perpY),
+                    strokeWidth = 1.5.dp.toPx()
+                )
+                // 0% end guide line (dashed)
+                drawLine(
+                    color = Color.White.copy(alpha = 0.82f),
+                    start = Offset(endPt.x - perpX, endPt.y - perpY),
+                    end = Offset(endPt.x + perpX, endPt.y + perpY),
+                    strokeWidth = 1.2.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f), 0f)
+                )
+                // Axis stem
+                drawLine(
+                    color = Color.White.copy(alpha = 0.78f),
+                    start = startPt,
+                    end = endPt,
+                    strokeWidth = 1.4.dp.toPx()
+                )
+
+                drawMaskHandleDot(startPt, StudioAmber, isActive = activeHandle == MaskHandle.LINEAR_START, radiusDp = 6f)
+                drawMaskHandleDot(midPt, Color.White, isActive = activeHandle == MaskHandle.LINEAR_MID, radiusDp = 7f)
+                drawMaskHandleDot(endPt, StudioCyan, isActive = activeHandle == MaskHandle.LINEAR_END, radiusDp = 6f)
+            }
+
+            MaskType.LUMINANCE_RANGE, MaskType.COLOR_RANGE -> Unit
         }
     }
 }
@@ -1766,33 +1880,42 @@ private fun DrawScope.drawMaskHandleDot(
 
 private fun hitTestMaskHandle(
     pos: Offset,
-    mask: LocalMask,
+    sub: MaskSubMask,
     w: Float,
     h: Float,
     touchRadiusPx: Float
 ): MaskHandle? {
-    val candidates: List<Pair<MaskHandle, Offset>> = if (mask.type == MaskType.RADIAL) {
-        val cx = mask.centerX * w
-        val cy = mask.centerY * h
-        val rxPx = (mask.radiusX * w).coerceAtLeast(8f)
-        val ryPx = (mask.radiusY * h).coerceAtLeast(8f)
-        val featherFrac = (1f - mask.feather * 0.85f).coerceIn(0.15f, 1f)
-        val featherPos = Offset(cx + rxPx * featherFrac * 0.707f, cy - ryPx * featherFrac * 0.707f)
-        listOf(
-            MaskHandle.RADIAL_FEATHER to featherPos,
-            MaskHandle.RADIAL_RIGHT to Offset(cx + rxPx, cy),
-            MaskHandle.RADIAL_BOTTOM to Offset(cx, cy + ryPx),
-            MaskHandle.RADIAL_CENTER to Offset(cx, cy)
-        )
-    } else {
-        val s = Offset(mask.startX * w, mask.startY * h)
-        val e = Offset(mask.endX * w, mask.endY * h)
-        val m = Offset((s.x + e.x) * 0.5f, (s.y + e.y) * 0.5f)
-        listOf(
-            MaskHandle.LINEAR_START to s,
-            MaskHandle.LINEAR_END to e,
-            MaskHandle.LINEAR_MID to m
-        )
+    val candidates: List<Pair<MaskHandle, Offset>> = when (sub.type) {
+        MaskType.RADIAL -> {
+            val cx = sub.centerX * w
+            val cy = sub.centerY * h
+            val rxPx = (sub.radiusX * w).coerceAtLeast(8f)
+            val ryPx = (sub.radiusY * h).coerceAtLeast(8f)
+            val rotRad = (sub.rotationDeg * (PI / 180.0)).toFloat()
+            val c = cos(rotRad)
+            val s = sin(rotRad)
+            fun rot(lx: Float, ly: Float) = Offset(cx + lx * c - ly * s, cy + lx * s + ly * c)
+            val featherFrac = (1f - sub.feather * 0.85f).coerceIn(0.15f, 1f)
+            val rotStemPx = touchRadiusPx * 0.7f
+            listOf(
+                MaskHandle.RADIAL_ROTATE to rot(0f, -(ryPx + rotStemPx)),
+                MaskHandle.RADIAL_FEATHER to rot(rxPx * featherFrac * 0.707f, -ryPx * featherFrac * 0.707f),
+                MaskHandle.RADIAL_RIGHT to rot(rxPx, 0f),
+                MaskHandle.RADIAL_BOTTOM to rot(0f, ryPx),
+                MaskHandle.RADIAL_CENTER to Offset(cx, cy)
+            )
+        }
+        MaskType.LINEAR -> {
+            val s = Offset(sub.startX * w, sub.startY * h)
+            val e = Offset(sub.endX * w, sub.endY * h)
+            val m = Offset((s.x + e.x) * 0.5f, (s.y + e.y) * 0.5f)
+            listOf(
+                MaskHandle.LINEAR_START to s,
+                MaskHandle.LINEAR_END to e,
+                MaskHandle.LINEAR_MID to m
+            )
+        }
+        else -> emptyList()
     }
     var best: MaskHandle? = null
     var bestDist = touchRadiusPx
@@ -1807,31 +1930,44 @@ private fun hitTestMaskHandle(
 }
 
 private fun applyMaskHandleDrag(
-    start: LocalMask,
+    start: MaskSubMask,
     handle: MaskHandle,
     dxNorm: Float,
     dyNorm: Float,
+    currentPosPx: Offset,
     w: Float,
     h: Float
-): LocalMask {
+): MaskSubMask {
+    val rotRad = (start.rotationDeg * (PI / 180.0)).toFloat()
+    val c = cos(-rotRad)
+    val s = sin(-rotRad)
+    val localDx = dxNorm * c - dyNorm * s
+    val localDy = dxNorm * s + dyNorm * c
+
     return when (handle) {
         MaskHandle.RADIAL_CENTER -> start.copy(
             centerX = (start.centerX + dxNorm).coerceIn(0.05f, 0.95f),
             centerY = (start.centerY + dyNorm).coerceIn(0.05f, 0.95f)
         )
         MaskHandle.RADIAL_RIGHT -> start.copy(
-            radiusX = (start.radiusX + dxNorm).coerceIn(0.05f, 0.95f)
+            radiusX = (start.radiusX + localDx).coerceIn(0.05f, 0.95f)
         )
         MaskHandle.RADIAL_BOTTOM -> start.copy(
-            radiusY = (start.radiusY + dyNorm).coerceIn(0.05f, 0.95f)
+            radiusY = (start.radiusY + localDy).coerceIn(0.05f, 0.95f)
         )
+        MaskHandle.RADIAL_ROTATE -> {
+            val cx = start.centerX * w
+            val cy = start.centerY * h
+            val angleDeg = Math.toDegrees(atan2((currentPosPx.y - cy).toDouble(), (currentPosPx.x - cx).toDouble())).toFloat() + 90f
+            val wrapped = ((angleDeg + 180f) % 360f + 360f) % 360f - 180f
+            start.copy(rotationDeg = wrapped.coerceIn(-180f, 180f))
+        }
         MaskHandle.RADIAL_FEATHER -> {
-            // Pulling closer to center increases feather; pushing toward edge sharpens transition
             val rx = start.radiusX.coerceAtLeast(0.05f)
             val ry = start.radiusY.coerceAtLeast(0.05f)
             val baseFrac = (1f - start.feather * 0.85f).coerceIn(0.15f, 1f)
-            val fx = rx * baseFrac * 0.707f + dxNorm
-            val fy = -ry * baseFrac * 0.707f + dyNorm
+            val fx = rx * baseFrac * 0.707f + localDx
+            val fy = -ry * baseFrac * 0.707f + localDy
             val normDist = hypot(fx / rx, fy / ry).coerceIn(0.15f, 1f)
             val nextFeather = ((1f - normDist) / 0.85f).coerceIn(0f, 1f)
             start.copy(feather = nextFeather)
@@ -1875,6 +2011,8 @@ private enum class CropDragHandle {
 private fun InteractiveCropOverlay(
     cropRect: NormalizedCropRect,
     overlayMode: CropOverlayMode,
+    compositionGridMode: CompositionGridMode,
+    spiralOrientation: SpiralOrientation,
     targetNormRatio: Float?,
     onCropRectChange: (NormalizedCropRect) -> Unit,
     onDragStateChanged: (Boolean) -> Unit,
@@ -1967,8 +2105,19 @@ private fun InteractiveCropOverlay(
             drawRect(color = scrimColor, topLeft = Offset(r, t), size = Size(w - r, cropH))
         }
 
-        // Dynamic composition guide clipped inside crop frame
-        if (overlayMode != CropOverlayMode.NONE) {
+        // Dynamic composition guide clipped inside crop frame with crisp dual-stroke contrast
+        if (compositionGridMode != CompositionGridMode.OFF) {
+            clipRect(left = l, top = t, right = r, bottom = b) {
+                drawCompositionGridGuide(
+                    mode = compositionGridMode,
+                    spiralOrientation = spiralOrientation,
+                    l = l,
+                    t = t,
+                    r = r,
+                    b = b
+                )
+            }
+        } else if (overlayMode == CropOverlayMode.TRIANGLE) {
             clipRect(left = l, top = t, right = r, bottom = b) {
                 drawCompositionOverlay(
                     mode = overlayMode,

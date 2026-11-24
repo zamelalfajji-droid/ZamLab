@@ -78,6 +78,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -1569,7 +1570,10 @@ internal fun GradientRangeSlider(
     compact: Boolean = false,
     step: Float = SliderStepMath.defaultStepForRange(valueRange)
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1590,33 +1594,53 @@ internal fun GradientRangeSlider(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = if (isModified) accentColor else StudioTextSecondary,
+                    tint = if (isModified) accentColor else StudioTextPrimary.copy(alpha = 0.78f),
                     modifier = Modifier.size(if (compact) 13.dp else 15.dp)
                 )
                 Text(
                     text = label,
-                    style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleSmall,
-                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
+                    style = (if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleSmall).copy(
+                        fontWeight = FontWeight.SemiBold
+                    ),
+                    color = if (isModified) StudioTextPrimary else StudioTextPrimary.copy(alpha = 0.88f),
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (isModified) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(StudioAmber)
+                    )
+                }
             }
 
             Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = if (isModified) accentColor.copy(alpha = 0.16f) else StudioSurfaceHighest,
-                modifier = Modifier.testTag("${testTag}_value")
+                shape = RoundedCornerShape(8.dp),
+                color = if (isModified) StudioAmber.copy(alpha = 0.16f) else StudioSurface,
+                modifier = Modifier
+                    .border(
+                        width = 1.dp,
+                        color = if (isModified) StudioAmber.copy(alpha = 0.72f) else StudioBorderSubtle,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .testTag("${testTag}_value")
             ) {
                 Text(
                     text = formattedValue,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isModified) accentColor else StudioTextSecondary,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
                     maxLines = 1,
                     softWrap = false,
                     modifier = Modifier.padding(
-                        horizontal = if (compact) 6.dp else 8.dp,
-                        vertical = if (compact) 2.dp else 3.dp
+                        horizontal = if (compact) 7.dp else 8.dp,
+                        vertical = if (compact) 2.5.dp else 3.dp
                     )
                 )
             }

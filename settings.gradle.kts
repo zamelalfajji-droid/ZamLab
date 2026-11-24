@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "ZamLab"
+rootProject.name = "Z-Effect"
 
 include(":app")

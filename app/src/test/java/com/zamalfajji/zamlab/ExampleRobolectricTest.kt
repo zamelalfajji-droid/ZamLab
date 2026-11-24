@@ -16,6 +16,7 @@ class ExampleRobolectricTest {
   fun `read string from context`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("ZamLab", appName)
+    assertEquals("Z-Effect", appName)
+    assertEquals("Z-Effect aperture prism emblem", context.getString(R.string.cd_zamlab_emblem))
   }
 }

@@ -12,6 +12,10 @@ import androidx.core.content.edit
 import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.zamalfajji.zamlab.ai.LocalDenoiseEngine
+import com.zamalfajji.zamlab.ai.LocalUpscaleEngine
+import com.zamalfajji.zamlab.ai.LocalUpscaleEngine.UpscaleBackend
+import com.zamalfajji.zamlab.ai.LocalUpscaleEngine.UpscaleScale
 import com.zamalfajji.zamlab.gl.GlOffscreenRenderer
 import com.zamalfajji.zamlab.lut.CubeLut
 import com.zamalfajji.zamlab.lut.LutImporter
@@ -47,10 +51,13 @@ import kotlin.math.max
 
 private const val TAG = "EditorViewModel"
 private const val DEFAULT_LUT_INTENSITY = 1.0f
+private const val MAX_INTERACTIVE_UPSCALE_DIM = 4096
 
 enum class StudioTab {
     ADJUST,
     ALL,
+    UPSCALE,
+    DENOISE,
     LUTS,
     CROP,
     HEAL,
@@ -60,7 +67,8 @@ enum class StudioTab {
 enum class EyedropperMode {
     NONE,
     WHITE_BALANCE,
-    POINT_COLOR
+    POINT_COLOR,
+    MASK_COLOR_RANGE
 }
 
 @Immutable
@@ -114,7 +122,10 @@ data class EditorSnapshot(
     val selectedLutId: String?,
     val healStrokes: List<HealStroke>,
     val label: String,
-    val selectedUserPresetId: String? = null
+    val selectedUserPresetId: String? = null,
+    val nativeWidth: Int = sourceBitmap.width,
+    val nativeHeight: Int = sourceBitmap.height,
+    val appliedUpscaleFactor: Int = 1
 )
 
 data class CopiedEdits(
@@ -147,7 +158,11 @@ data class EditorUiState(
     val isLoadingProfileThumbnails: Boolean = false,
     val activeEyedropperMode: EyedropperMode = EyedropperMode.NONE,
     val selectedMaskId: String? = null,
+    val selectedSubMaskId: String? = null,
     val showMaskOverlay: Boolean = true,
+    val maskBrushRadius: Float = 0.06f,
+    val maskBrushHardness: Float = 0.50f,
+    val maskBrushFlow: Float = 1.0f,
     val preHealPreviewBitmap: Bitmap? = null,
     val canPasteEdits: Boolean = false,
     val isComparingOriginal: Boolean = false,
@@ -157,6 +172,8 @@ data class EditorUiState(
     val showHighlightClipping: Boolean = false,
     val showShadowClipping: Boolean = false,
     val cropOverlayMode: CropOverlayMode = CropOverlayMode.THIRDS,
+    val compositionGridMode: CompositionGridMode = CompositionGridMode.OFF,
+    val spiralOrientation: SpiralOrientation = SpiralOrientation.BOTTOM_RIGHT,
     val healMode: HealMode = HealMode.SPOT_HEAL,
     val healBrushSizePx: Float = OfflineHealEngine.DEFAULT_BRUSH_SIZE_PX,
     val healFeather: Float = OfflineHealEngine.DEFAULT_FEATHER,
@@ -182,13 +199,31 @@ data class EditorUiState(
     val touchAdjustSwatchArgb: Long? = null,
     val touchAdjustHudLabel: String? = null,
     val touchAdjustHudValueText: String? = null,
-    val isTouchAdjustSwiping: Boolean = false
+    val isTouchAdjustSwiping: Boolean = false,
+    val upscaleScale: UpscaleScale = UpscaleScale.X2,
+    val isUpscaling: Boolean = false,
+    val upscaleProgress: Float = 0f,
+    val appliedUpscaleFactor: Int = 1,
+    val isUpscaleAiModelAvailable: Boolean = false,
+    val isDenoiseProcessing: Boolean = false,
+    val denoiseProgress: Float = 0f,
+    val isDenoiseAiModelAvailable: Boolean = false
 ) {
     val healBrushRadiusNorm: Float
         get() = OfflineHealEngine.brushSizePxToRadiusNorm(healBrushSizePx)
 
     val hasHealEdits: Boolean
         get() = healStrokes.isNotEmpty() || preHealPreviewBitmap != null
+
+    val effectiveCropGridMode: CompositionGridMode
+        get() = if (compositionGridMode != CompositionGridMode.OFF) {
+            compositionGridMode
+        } else {
+            cropOverlayMode.toCompositionGridMode()
+        }
+
+    val hasUpscaleEdits: Boolean
+        get() = appliedUpscaleFactor > 1
 
     val chromaticAberration: Float
         get() = gradingParams.chromaticAberration
@@ -199,6 +234,13 @@ data class EditorUiState(
     val activeMask: LocalMask?
         get() = gradingParams.masks.firstOrNull { it.id == selectedMaskId }
             ?: gradingParams.masks.firstOrNull()
+
+    val activeSubMask: MaskSubMask?
+        get() {
+            val mask = activeMask ?: return null
+            val subs = mask.resolvedSubMasks()
+            return subs.firstOrNull { it.id == selectedSubMaskId } ?: subs.lastOrNull()
+        }
 
     val effectiveOutputWidth: Int
         get() = if (fullWidth > 0 && fullHeight > 0) {
@@ -252,6 +294,7 @@ class EditorViewModel(
     private var activeCachedImportFile: File? = null
     private var nativePhotoWidth: Int = 0
     private var nativePhotoHeight: Int = 0
+    private var appliedUpscaleFactor: Int = 1
     private val fullSourceBitmap = MutableStateFlow<Bitmap?>(null) // <=2048px proxy for real-time editing
     private val histSourceBitmap = MutableStateFlow<Bitmap?>(null)
     private var initialPhotoSourceBitmap: Bitmap? = null
@@ -277,11 +320,15 @@ class EditorViewModel(
     private var userPresetThumbJob: Job? = null
     private var histPrepareJob: Job? = null
     private var healJob: Job? = null
+    private var upscaleJob: Job? = null
+    private var denoiseJob: Job? = null
     private val photoGeneration = AtomicLong(0L)
     private val photoLoadRequestSeq = AtomicLong(0L)
     private val lutSelectionSeq = AtomicLong(0L)
     private val hasExternalOrUserPhoto = AtomicBoolean(false)
     private val maskIdCounter = AtomicLong(0L)
+    private var pendingMaskBrushSnapshot: EditorSnapshot? = null
+    private var activeMaskBrushStrokeId: String? = null
     private var touchSwipeZone: TouchToneZone = TouchToneZone.MIDTONES
     private var touchSwipeStartVal: Float = 0f
     private var touchSwipeStartSat: Float = 0f
@@ -289,9 +336,19 @@ class EditorViewModel(
 
     init {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val (aiUpscaleAvailable, aiDenoiseAvailable) = withContext(Dispatchers.IO) {
                 loadProfilePreferences()
                 loadClipboardPreferences()
+                Pair(
+                    LocalUpscaleEngine.isOnnxModelAssetAvailable(getApplication()),
+                    LocalDenoiseEngine.isOnnxModelAssetAvailable(getApplication())
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    isUpscaleAiModelAvailable = aiUpscaleAvailable,
+                    isDenoiseAiModelAvailable = aiDenoiseAvailable
+                )
             }
         }
         loadStarterLutsAndSamplePhoto()
@@ -310,6 +367,10 @@ class EditorViewModel(
         histPrepareJob = null
         healJob?.cancel()
         healJob = null
+        upscaleJob?.cancel()
+        upscaleJob = null
+        denoiseJob?.cancel()
+        denoiseJob = null
 
         val toRecycle = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
         toRecycle.addAll(thumbnailCache.values)
@@ -547,9 +608,10 @@ class EditorViewModel(
             undoStack.clear()
             redoStack.clear()
             pendingDragSnapshot = null
-            nativePhotoWidth = nativeWidth
-            nativePhotoHeight = nativeHeight
+            appliedUpscaleFactor = 1
         }
+        nativePhotoWidth = nativeWidth
+        nativePhotoHeight = nativeHeight
 
         // Invalidate thumbnail cache for the new source photo (keep parsedLutCache & copiedEdits intact!)
         val token = photoGeneration.incrementAndGet()
@@ -614,6 +676,11 @@ class EditorViewModel(
                 cloneSourcePoint = if (clearHealSession) null else state.cloneSourcePoint,
                 isPickingCloneSource = if (clearHealSession) false else state.isPickingCloneSource,
                 isHealProcessing = false,
+                isUpscaling = false,
+                upscaleProgress = 0f,
+                appliedUpscaleFactor = appliedUpscaleFactor,
+                isDenoiseProcessing = false,
+                denoiseProgress = 0f,
                 canUndoHealStroke = healUndoStack.isNotEmpty(),
                 canRedoHealStroke = healRedoStack.isNotEmpty(),
                 canUndo = undoStack.isNotEmpty(),
@@ -850,7 +917,10 @@ class EditorViewModel(
             selectedLutId = state.selectedLutId,
             healStrokes = state.healStrokes,
             label = label,
-            selectedUserPresetId = state.selectedUserPresetId
+            selectedUserPresetId = state.selectedUserPresetId,
+            nativeWidth = nativePhotoWidth.takeIf { it > 0 } ?: src.width,
+            nativeHeight = nativePhotoHeight.takeIf { it > 0 } ?: src.height,
+            appliedUpscaleFactor = appliedUpscaleFactor
         )
     }
 
@@ -878,6 +948,10 @@ class EditorViewModel(
         hasExternalOrUserPhoto.set(true)
         healJob?.cancel()
         healJob = null
+        upscaleJob?.cancel()
+        upscaleJob = null
+        denoiseJob?.cancel()
+        denoiseJob = null
         val requestToken = photoLoadRequestSeq.incrementAndGet()
         viewModelScope.launch {
             val ctx = getApplication<Application>()
@@ -1208,7 +1282,10 @@ class EditorViewModel(
 
     fun selectTab(tab: StudioTab) {
         _uiState.update { state ->
-            val disableTouchAdjust = tab == StudioTab.CROP || tab == StudioTab.HEAL
+            val disableTouchAdjust = tab == StudioTab.CROP ||
+                tab == StudioTab.HEAL ||
+                tab == StudioTab.UPSCALE ||
+                tab == StudioTab.DENOISE
             state.copy(
                 activeTab = tab,
                 activeEyedropperMode = EyedropperMode.NONE,
@@ -1391,30 +1468,77 @@ class EditorViewModel(
             return
         }
         val nextNum = existing.size + 1
-        val newMask = if (type == MaskType.RADIAL) {
-            LocalMask(
-                id = "mask_${System.currentTimeMillis()}_${maskIdCounter.incrementAndGet()}",
-                name = "Radial $nextNum",
+        val maskId = "mask_${System.currentTimeMillis()}_${maskIdCounter.incrementAndGet()}"
+        val subId = "sub_${System.currentTimeMillis()}_${maskIdCounter.incrementAndGet()}"
+        val initialSub = when (type) {
+            MaskType.RADIAL -> MaskSubMask(
+                id = subId,
+                name = "Radial 1",
                 type = MaskType.RADIAL,
+                op = MaskBooleanOp.ADD,
                 centerX = 0.5f,
                 centerY = 0.5f,
                 radiusX = 0.30f,
                 radiusY = 0.30f,
-                feather = 0.50f,
-                exposure = 0.35f
+                feather = 0.50f
             )
-        } else {
-            LocalMask(
-                id = "mask_${System.currentTimeMillis()}_${maskIdCounter.incrementAndGet()}",
-                name = "Linear $nextNum",
+            MaskType.LINEAR -> MaskSubMask(
+                id = subId,
+                name = "Linear 1",
                 type = MaskType.LINEAR,
+                op = MaskBooleanOp.ADD,
                 startX = 0.5f,
                 startY = 0.14f,
                 endX = 0.5f,
                 endY = 0.58f,
-                exposure = -0.45f
+                feather = 0.50f
+            )
+            MaskType.BRUSH -> MaskSubMask(
+                id = subId,
+                name = "Brush 1",
+                type = MaskType.BRUSH,
+                op = MaskBooleanOp.ADD
+            )
+            MaskType.LUMINANCE_RANGE -> MaskSubMask(
+                id = subId,
+                name = "Luminance 1",
+                type = MaskType.LUMINANCE_RANGE,
+                op = MaskBooleanOp.ADD,
+                lumMin = 0.50f,
+                lumMax = 1.0f,
+                lumFalloff = 0.12f
+            )
+            MaskType.COLOR_RANGE -> MaskSubMask(
+                id = subId,
+                name = "Color Range 1",
+                type = MaskType.COLOR_RANGE,
+                op = MaskBooleanOp.ADD,
+                colorTolerance = 24f,
+                colorSmoothness = 0.35f,
+                colorSampled = false
             )
         }
+        val defaultExposure = when (type) {
+            MaskType.RADIAL -> 0.35f
+            MaskType.LINEAR -> -0.45f
+            else -> 0f
+        }
+        val newMask = LocalMask(
+            id = maskId,
+            name = "${type.label} $nextNum",
+            type = type,
+            centerX = initialSub.centerX,
+            centerY = initialSub.centerY,
+            radiusX = initialSub.radiusX,
+            radiusY = initialSub.radiusY,
+            feather = initialSub.feather,
+            startX = initialSub.startX,
+            startY = initialSub.startY,
+            endX = initialSub.endX,
+            endY = initialSub.endY,
+            exposure = defaultExposure,
+            subMasks = listOf(initialSub)
+        )
         pushUndoSnapshot(captureCurrentSnapshot("Add ${type.label} Mask"))
         val updated = current.gradingParams.copy(masks = existing + newMask)
         gradingInput.value = updated to current.activeLut
@@ -1423,15 +1547,224 @@ class EditorViewModel(
                 it.copy(
                     gradingParams = updated,
                     selectedMaskId = newMask.id,
+                    selectedSubMaskId = initialSub.id,
                     showMaskOverlay = true,
-                    activeTab = StudioTab.MASK
+                    activeTab = StudioTab.MASK,
+                    activeEyedropperMode = if (type == MaskType.COLOR_RANGE) {
+                        EyedropperMode.MASK_COLOR_RANGE
+                    } else {
+                        EyedropperMode.NONE
+                    }
                 )
             )
         }
     }
 
     fun selectMask(maskId: String?) {
-        _uiState.update { it.copy(selectedMaskId = maskId) }
+        _uiState.update { state ->
+            val nextMask = state.gradingParams.masks.firstOrNull { it.id == maskId }
+            val nextSubId = nextMask?.resolvedSubMasks()?.lastOrNull()?.id
+            state.copy(
+                selectedMaskId = maskId,
+                selectedSubMaskId = nextSubId
+            )
+        }
+    }
+
+    fun selectSubMask(subMaskId: String?) {
+        _uiState.update { it.copy(selectedSubMaskId = subMaskId) }
+    }
+
+    fun addSubMask(maskId: String, type: MaskType, op: MaskBooleanOp = MaskBooleanOp.ADD) {
+        val currentState = _uiState.value
+        val curMasks = currentState.gradingParams.masks
+        val idx = curMasks.indexOfFirst { it.id == maskId }
+        if (idx < 0) return
+        val targetMask = curMasks[idx]
+        val existingSubs = targetMask.resolvedSubMasks()
+        val subId = "sub_${System.currentTimeMillis()}_${maskIdCounter.incrementAndGet()}"
+        val nextNum = existingSubs.size + 1
+        val newSub = MaskSubMask(
+            id = subId,
+            name = "${type.label} $nextNum",
+            type = type,
+            op = op
+        )
+        pushUndoSnapshot(captureCurrentSnapshot("Add ${type.label} Sub-Mask"))
+        val nextMask = targetMask.copy(subMasks = existingSubs + newSub)
+        val nextMasks = curMasks.toMutableList().apply { this[idx] = nextMask }
+        val updated = currentState.gradingParams.copy(masks = nextMasks)
+        gradingInput.value = updated to currentState.activeLut
+        _uiState.update {
+            syncHistoryFlags(
+                it.copy(
+                    gradingParams = updated,
+                    selectedMaskId = maskId,
+                    selectedSubMaskId = newSub.id,
+                    activeEyedropperMode = if (type == MaskType.COLOR_RANGE) {
+                        EyedropperMode.MASK_COLOR_RANGE
+                    } else {
+                        EyedropperMode.NONE
+                    }
+                )
+            )
+        }
+    }
+
+    fun setSubMaskBooleanOp(maskId: String, subMaskId: String, op: MaskBooleanOp) {
+        updateSubMask(maskId, subMaskId, recordUndo = true) { sub ->
+            if (sub.op == op) sub else sub.copy(op = op)
+        }
+    }
+
+    fun deleteSubMask(maskId: String, subMaskId: String) {
+        val currentState = _uiState.value
+        val curMasks = currentState.gradingParams.masks
+        val idx = curMasks.indexOfFirst { it.id == maskId }
+        if (idx < 0) return
+        val targetMask = curMasks[idx]
+        val subs = targetMask.resolvedSubMasks()
+        if (subs.size <= 1) return
+        val nextSubs = subs.filterNot { it.id == subMaskId }
+        if (nextSubs.size == subs.size) return
+        pushUndoSnapshot(captureCurrentSnapshot("Delete Sub-Mask"))
+        val nextMask = targetMask.copy(subMasks = nextSubs)
+        val nextMasks = curMasks.toMutableList().apply { this[idx] = nextMask }
+        val updated = currentState.gradingParams.copy(masks = nextMasks)
+        gradingInput.value = updated to currentState.activeLut
+        _uiState.update { state ->
+            val nextSubId = if (state.selectedSubMaskId == subMaskId) nextSubs.lastOrNull()?.id else state.selectedSubMaskId
+            syncHistoryFlags(
+                state.copy(
+                    gradingParams = updated,
+                    selectedSubMaskId = nextSubId
+                )
+            )
+        }
+    }
+
+    fun clearBrushStrokes(maskId: String, subMaskId: String) {
+        updateSubMask(maskId, subMaskId, recordUndo = true) { sub ->
+            if (sub.strokes.isEmpty()) sub else sub.copy(strokes = emptyList())
+        }
+    }
+
+    fun updateSubMask(
+        maskId: String,
+        subMaskId: String,
+        recordUndo: Boolean = true,
+        transform: (MaskSubMask) -> MaskSubMask
+    ) {
+        val currentState = _uiState.value
+        val curMasks = currentState.gradingParams.masks
+        val idx = curMasks.indexOfFirst { it.id == maskId }
+        if (idx < 0) return
+        val targetMask = curMasks[idx]
+        val subs = targetMask.resolvedSubMasks()
+        val subIdx = subs.indexOfFirst { it.id == subMaskId }
+        if (subIdx < 0) return
+        val nextSub = transform(subs[subIdx])
+        if (nextSub == subs[subIdx]) return
+        val nextSubs = subs.toMutableList().apply { this[subIdx] = nextSub }
+        val nextMask = if (subIdx == 0 && nextSubs.size == 1) {
+            targetMask.copy(
+                centerX = nextSub.centerX,
+                centerY = nextSub.centerY,
+                radiusX = nextSub.radiusX,
+                radiusY = nextSub.radiusY,
+                rotationDeg = nextSub.rotationDeg,
+                feather = nextSub.feather,
+                startX = nextSub.startX,
+                startY = nextSub.startY,
+                endX = nextSub.endX,
+                endY = nextSub.endY,
+                subMasks = nextSubs
+            )
+        } else {
+            targetMask.copy(subMasks = nextSubs)
+        }
+        val nextMasks = curMasks.toMutableList().apply { this[idx] = nextMask }
+        val updated = currentState.gradingParams.copy(masks = nextMasks)
+        if (recordUndo && !currentState.isDraggingSlider) {
+            pushUndoSnapshot(captureCurrentSnapshot("Sub-Mask Adjustment"))
+        }
+        gradingInput.value = updated to currentState.activeLut
+        _uiState.update { syncHistoryFlags(it.copy(gradingParams = updated)) }
+    }
+
+    fun updateMaskBrushSettings(radius: Float? = null, hardness: Float? = null, flow: Float? = null) {
+        _uiState.update { state ->
+            state.copy(
+                maskBrushRadius = (radius ?: state.maskBrushRadius).coerceIn(0.01f, 0.25f),
+                maskBrushHardness = (hardness ?: state.maskBrushHardness).coerceIn(0f, 1f),
+                maskBrushFlow = (flow ?: state.maskBrushFlow).coerceIn(0.05f, 1f)
+            )
+        }
+    }
+
+    fun startMaskBrushStroke(u: Float, v: Float) {
+        val state = _uiState.value
+        val activeMask = state.activeMask ?: return
+        val activeSub = state.activeSubMask?.takeIf { it.type == MaskType.BRUSH }
+            ?: activeMask.resolvedSubMasks().lastOrNull { it.type == MaskType.BRUSH }
+            ?: return
+        pendingMaskBrushSnapshot = captureCurrentSnapshot("Brush Mask Stroke")
+        val strokeId = "mstroke_${System.currentTimeMillis()}_${maskIdCounter.incrementAndGet()}"
+        activeMaskBrushStrokeId = strokeId
+        val newStroke = MaskBrushStroke(
+            id = strokeId,
+            points = listOf(u.coerceIn(0f, 1f) to v.coerceIn(0f, 1f)),
+            radius = state.maskBrushRadius,
+            hardness = state.maskBrushHardness,
+            flow = state.maskBrushFlow
+        )
+        val subs = activeMask.resolvedSubMasks().map { sub ->
+            if (sub.id == activeSub.id) sub.copy(strokes = sub.strokes + newStroke) else sub
+        }
+        val nextMasks = state.gradingParams.masks.map { m ->
+            if (m.id == activeMask.id) m.copy(subMasks = subs) else m
+        }
+        val updated = state.gradingParams.copy(masks = nextMasks)
+        gradingInput.value = updated to state.activeLut
+        _uiState.update {
+            it.copy(
+                gradingParams = updated,
+                selectedMaskId = activeMask.id,
+                selectedSubMaskId = activeSub.id
+            )
+        }
+    }
+
+    fun appendMaskBrushStroke(u: Float, v: Float) {
+        val strokeId = activeMaskBrushStrokeId ?: return
+        val state = _uiState.value
+        val activeMask = state.activeMask ?: return
+        val activeSub = state.activeSubMask?.takeIf { it.type == MaskType.BRUSH } ?: return
+        val pt = u.coerceIn(0f, 1f) to v.coerceIn(0f, 1f)
+        val subs = activeMask.resolvedSubMasks().map { sub ->
+            if (sub.id != activeSub.id) sub
+            else sub.copy(
+                strokes = sub.strokes.map { stroke ->
+                    if (stroke.id == strokeId) stroke.copy(points = stroke.points + pt) else stroke
+                }
+            )
+        }
+        val nextMasks = state.gradingParams.masks.map { m ->
+            if (m.id == activeMask.id) m.copy(subMasks = subs) else m
+        }
+        val updated = state.gradingParams.copy(masks = nextMasks)
+        gradingInput.value = updated to state.activeLut
+        _uiState.update { it.copy(gradingParams = updated) }
+    }
+
+    fun finishMaskBrushStroke() {
+        val pending = pendingMaskBrushSnapshot
+        pendingMaskBrushSnapshot = null
+        activeMaskBrushStrokeId = null
+        if (pending != null && pending.gradingParams != _uiState.value.gradingParams) {
+            pushUndoSnapshot(pending)
+            _uiState.update { syncHistoryFlags(it) }
+        }
     }
 
     fun updateMask(maskId: String, transform: (LocalMask) -> LocalMask) {
@@ -1596,7 +1929,52 @@ class EditorViewModel(
     // --- Crop, Orientation & Geometry / Perspective Actions ---
 
     fun setCropOverlayMode(mode: CropOverlayMode) {
-        _uiState.update { it.copy(cropOverlayMode = mode) }
+        _uiState.update { state ->
+            state.copy(
+                cropOverlayMode = mode,
+                compositionGridMode = if (mode == CropOverlayMode.NONE) {
+                    CompositionGridMode.OFF
+                } else if (state.compositionGridMode != CompositionGridMode.OFF) {
+                    mode.toCompositionGridMode()
+                } else {
+                    state.compositionGridMode
+                }
+            )
+        }
+    }
+
+    fun setCompositionGridMode(mode: CompositionGridMode) {
+        _uiState.update {
+            it.copy(
+                compositionGridMode = mode,
+                cropOverlayMode = mode.toCropOverlayMode()
+            )
+        }
+    }
+
+    fun clearCompositionGrid() {
+        _uiState.update {
+            it.copy(
+                compositionGridMode = CompositionGridMode.OFF,
+                cropOverlayMode = CropOverlayMode.NONE
+            )
+        }
+    }
+
+    fun cycleCompositionGridMode() {
+        _uiState.update { state ->
+            val next = state.compositionGridMode.next()
+            state.copy(
+                compositionGridMode = next,
+                cropOverlayMode = next.toCropOverlayMode()
+            )
+        }
+    }
+
+    fun flipSpiralOrientation() {
+        _uiState.update { state ->
+            state.copy(spiralOrientation = state.spiralOrientation.next())
+        }
     }
 
     fun selectCropAspectPreset(preset: CropAspectPreset) {
@@ -2121,18 +2499,82 @@ class EditorViewModel(
         if (mode == EyedropperMode.NONE) return
         val sampleSource = (state.previewIdleBitmap ?: fullSourceBitmap.value)?.takeIf { !it.isRecycled } ?: return
 
-        viewModelScope.launch {
-            val mappedCoords = GeometryMath.mapOutputUvToSourceUv(
-                u = nx,
-                v = ny,
-                srcW = sampleSource.width,
-                srcH = sampleSource.height,
-                crop = state.gradingParams.crop,
-                applyCrop = state.activeTab != StudioTab.CROP
-            ) ?: (nx to ny)
-            val sampleNx = mappedCoords.first
-            val sampleNy = mappedCoords.second
+        val mappedCoords = GeometryMath.mapOutputUvToSourceUv(
+            u = nx,
+            v = ny,
+            srcW = sampleSource.width,
+            srcH = sampleSource.height,
+            crop = state.gradingParams.crop,
+            applyCrop = state.activeTab != StudioTab.CROP
+        ) ?: (nx to ny)
+        val sampleNx = mappedCoords.first
+        val sampleNy = mappedCoords.second
 
+        if (mode == EyedropperMode.MASK_COLOR_RANGE) {
+            val w = sampleSource.width
+            val h = sampleSource.height
+            val cx = (sampleNx.coerceIn(0f, 1f) * (w - 1).coerceAtLeast(0)).toInt().coerceIn(0, (w - 1).coerceAtLeast(0))
+            val cy = (sampleNy.coerceIn(0f, 1f) * (h - 1).coerceAtLeast(0)).toInt().coerceIn(0, (h - 1).coerceAtLeast(0))
+            var sumR = 0f
+            var sumG = 0f
+            var sumB = 0f
+            var count = 0
+            for (dy in -1..1) {
+                val py = (cy + dy).coerceIn(0, (h - 1).coerceAtLeast(0))
+                for (dx in -1..1) {
+                    val px = (cx + dx).coerceIn(0, (w - 1).coerceAtLeast(0))
+                    val c = sampleSource.getPixel(px, py)
+                    sumR += ((c ushr 16) and 0xFF) / 255f
+                    sumG += ((c ushr 8) and 0xFF) / 255f
+                    sumB += (c and 0xFF) / 255f
+                    count++
+                }
+            }
+            val inv = if (count > 0) 1f / count else 1f
+            val sampledR = (sumR * inv).coerceIn(0f, 1f)
+            val sampledG = (sumG * inv).coerceIn(0f, 1f)
+            val sampledB = (sumB * inv).coerceIn(0f, 1f)
+
+            val activeMask = state.activeMask
+            val targetSub = state.activeSubMask?.takeIf { it.type == MaskType.COLOR_RANGE }
+                ?: activeMask?.resolvedSubMasks()?.lastOrNull { it.type == MaskType.COLOR_RANGE }
+            if (activeMask != null && targetSub != null) {
+                pushUndoSnapshot(captureCurrentSnapshot("Color Range Sample"))
+                val nextSubs = activeMask.resolvedSubMasks().map { sub ->
+                    if (sub.id == targetSub.id) {
+                        sub.copy(
+                            targetR = sampledR,
+                            targetG = sampledG,
+                            targetB = sampledB,
+                            colorSampled = true
+                        )
+                    } else {
+                        sub
+                    }
+                }
+                val nextMasks = state.gradingParams.masks.map { m ->
+                    if (m.id == activeMask.id) m.copy(subMasks = nextSubs) else m
+                }
+                val updated = state.gradingParams.copy(masks = nextMasks)
+                gradingInput.value = updated to state.activeLut
+                _uiState.update {
+                    syncHistoryFlags(
+                        it.copy(
+                            gradingParams = updated,
+                            selectedMaskId = activeMask.id,
+                            selectedSubMaskId = targetSub.id,
+                            activeEyedropperMode = EyedropperMode.NONE,
+                            statusBannerMessage = "Color Range target sampled"
+                        )
+                    )
+                }
+            } else {
+                _uiState.update { it.copy(activeEyedropperMode = EyedropperMode.NONE) }
+            }
+            return
+        }
+
+        viewModelScope.launch {
             when (mode) {
                 EyedropperMode.WHITE_BALANCE -> {
                     val sample = withContext(Dispatchers.Default) {
@@ -2194,7 +2636,7 @@ class EditorViewModel(
                     }
                 }
 
-                EyedropperMode.NONE -> Unit
+                EyedropperMode.MASK_COLOR_RANGE, EyedropperMode.NONE -> Unit
             }
         }
     }
@@ -2576,7 +3018,8 @@ class EditorViewModel(
     }
 
     fun resetAllAdjustments() {
-        if (_uiState.value.isHealProcessing) return
+        val state = _uiState.value
+        if (state.isHealProcessing || state.isUpscaling || state.isDenoiseProcessing) return
         lutSelectionSeq.incrementAndGet()
         val currentState = _uiState.value
         if (currentState.gradingParams.isDefault && currentState.selectedLutId == null) {
@@ -2608,7 +3051,8 @@ class EditorViewModel(
     }
 
     fun undo() {
-        if (_uiState.value.isHealProcessing) return
+        val state = _uiState.value
+        if (state.isHealProcessing || state.isUpscaling || state.isDenoiseProcessing) return
         lutSelectionSeq.incrementAndGet()
         val target = undoStack.removeLastOrNull() ?: return
         val current = captureCurrentSnapshot(target.label)
@@ -2619,7 +3063,8 @@ class EditorViewModel(
     }
 
     fun redo() {
-        if (_uiState.value.isHealProcessing) return
+        val state = _uiState.value
+        if (state.isHealProcessing || state.isUpscaling || state.isDenoiseProcessing) return
         lutSelectionSeq.incrementAndGet()
         val target = redoStack.removeLastOrNull() ?: return
         val current = captureCurrentSnapshot(target.label)
@@ -2635,6 +3080,9 @@ class EditorViewModel(
         val resolvedLutId = if (resolvedLut != null) snapshot.selectedLutId else null
 
         isDraggingFlow.value = false
+        nativePhotoWidth = snapshot.nativeWidth.takeIf { it > 0 } ?: snapshot.sourceBitmap.width
+        nativePhotoHeight = snapshot.nativeHeight.takeIf { it > 0 } ?: snapshot.sourceBitmap.height
+        appliedUpscaleFactor = snapshot.appliedUpscaleFactor.coerceAtLeast(1)
 
         if (bitmapChanged) {
             val token = photoGeneration.incrementAndGet()
@@ -2659,8 +3107,8 @@ class EditorViewModel(
                 }
                 syncHistoryFlags(
                     state.copy(
-                        fullWidth = nativePhotoWidth.takeIf { it > 0 } ?: proxyTexture.width,
-                        fullHeight = nativePhotoHeight.takeIf { it > 0 } ?: proxyTexture.height,
+                        fullWidth = nativePhotoWidth,
+                        fullHeight = nativePhotoHeight,
                         previewIdleBitmap = proxyTexture,
                         previewDragBitmap = proxyTexture,
                         preHealPreviewBitmap = preHealPreview,
@@ -2674,6 +3122,11 @@ class EditorViewModel(
                         healStrokes = snapshot.healStrokes,
                         activeHealStroke = null,
                         isHealProcessing = false,
+                        isUpscaling = false,
+                        upscaleProgress = 0f,
+                        appliedUpscaleFactor = appliedUpscaleFactor,
+                        isDenoiseProcessing = false,
+                        denoiseProgress = 0f,
                         isDraggingSlider = false
                     )
                 )
@@ -2687,6 +3140,8 @@ class EditorViewModel(
                 gradingInput.value = snapshot.gradingParams to resolvedLut
                 syncHistoryFlags(
                     state.copy(
+                        fullWidth = nativePhotoWidth,
+                        fullHeight = nativePhotoHeight,
                         gradingParams = snapshot.gradingParams,
                         selectedLutId = resolvedLutId,
                         activeLut = resolvedLut,
@@ -2694,9 +3149,256 @@ class EditorViewModel(
                         healStrokes = snapshot.healStrokes,
                         activeHealStroke = null,
                         isHealProcessing = false,
+                        isUpscaling = false,
+                        upscaleProgress = 0f,
+                        appliedUpscaleFactor = appliedUpscaleFactor,
+                        isDenoiseProcessing = false,
+                        denoiseProgress = 0f,
                         isDraggingSlider = false
                     )
                 )
+            }
+        }
+    }
+
+    // --- Professional Non-Destructive YCbCr / Optional Offline ONNX AI Denoise ---
+
+    fun applyDenoisePreset(preset: DenoisePreset) {
+        val state = _uiState.value
+        if (state.isDenoiseProcessing || state.isUpscaling || state.isHealProcessing) return
+
+        val nextParams = state.gradingParams.applyDenoisePreset(preset)
+        val appContext = getApplication<Application>()
+
+        if (preset == DenoisePreset.AI_CLEAN && LocalDenoiseEngine.isOnnxModelAssetAvailable(appContext)) {
+            val source = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
+            val expectedPhotoGen = photoGeneration.get()
+            _uiState.update {
+                it.copy(
+                    isDenoiseProcessing = true,
+                    denoiseProgress = 0f
+                )
+            }
+            denoiseJob?.cancel()
+            denoiseJob = viewModelScope.launch {
+                var denoisedBitmap: Bitmap? = null
+                try {
+                    val result = withContext(Dispatchers.Default) {
+                        LocalDenoiseEngine.denoise(
+                            context = appContext,
+                            source = source,
+                            params = nextParams,
+                            onProgress = { progress ->
+                                _uiState.update { cur ->
+                                    if (cur.isDenoiseProcessing) cur.copy(denoiseProgress = progress) else cur
+                                }
+                            }
+                        )
+                    }
+                    denoisedBitmap = result.bitmap
+                    if (photoGeneration.get() != expectedPhotoGen) {
+                        if (denoisedBitmap !== source && !denoisedBitmap.isRecycled) {
+                            denoisedBitmap.recycle()
+                        }
+                        _uiState.update { it.copy(isDenoiseProcessing = false, denoiseProgress = 0f) }
+                        return@launch
+                    }
+
+                    val latest = _uiState.value
+                    pushUndoSnapshot(captureCurrentSnapshot("Denoise: ${preset.label}"))
+                    if (result.backend == LocalDenoiseEngine.DenoiseBackend.ONNX_AI_CLEAN) {
+                        val cleanedParams = nextParams.copy(
+                            noiseReduction = 0f,
+                            colorNoiseReduction = 0f,
+                            denoiseAiClean = true
+                        )
+                        applyLoadedSourceBitmap(
+                            bitmap = denoisedBitmap,
+                            name = latest.photoName,
+                            clearHealSession = false,
+                            nativeWidth = nativePhotoWidth.takeIf { it > 0 } ?: denoisedBitmap.width,
+                            nativeHeight = nativePhotoHeight.takeIf { it > 0 } ?: denoisedBitmap.height
+                        )
+                        gradingInput.value = cleanedParams to _uiState.value.activeLut
+                        _uiState.update {
+                            syncHistoryFlags(
+                                it.copy(
+                                    gradingParams = cleanedParams,
+                                    isDenoiseProcessing = false,
+                                    denoiseProgress = 0f,
+                                    statusBannerMessage = "AI Clean applied (${result.modelName ?: "ONNX"})"
+                                )
+                            )
+                        }
+                    } else {
+                        if (denoisedBitmap !== source && !denoisedBitmap.isRecycled) {
+                            denoisedBitmap.recycle()
+                        }
+                        gradingInput.value = nextParams to latest.activeLut
+                        _uiState.update {
+                            syncHistoryFlags(
+                                it.copy(
+                                    gradingParams = nextParams,
+                                    isDenoiseProcessing = false,
+                                    denoiseProgress = 0f,
+                                    statusBannerMessage = "Denoise: ${preset.label}"
+                                )
+                            )
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    denoisedBitmap?.let { out -> if (out !== source && !out.isRecycled) out.recycle() }
+                    _uiState.update { it.copy(isDenoiseProcessing = false, denoiseProgress = 0f) }
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Offline AI Clean failed; applying non-destructive YCbCr preset", e)
+                    denoisedBitmap?.let { out -> if (out !== source && !out.isRecycled) out.recycle() }
+                    pushUndoSnapshot(captureCurrentSnapshot("Denoise: ${preset.label}"))
+                    gradingInput.value = nextParams to _uiState.value.activeLut
+                    _uiState.update {
+                        syncHistoryFlags(
+                            it.copy(
+                                gradingParams = nextParams,
+                                isDenoiseProcessing = false,
+                                denoiseProgress = 0f,
+                                statusBannerMessage = "Denoise: ${preset.label}"
+                            )
+                        )
+                    }
+                }
+            }
+            return
+        }
+
+        if (nextParams == state.gradingParams) return
+        pushUndoSnapshot(captureCurrentSnapshot("Denoise: ${preset.label}"))
+        gradingInput.value = nextParams to state.activeLut
+        _uiState.update {
+            syncHistoryFlags(
+                it.copy(
+                    gradingParams = nextParams,
+                    statusBannerMessage = "Denoise: ${preset.label}"
+                )
+            )
+        }
+    }
+
+    // --- 100% Offline AI Image Upscaling (2x / 4x Real-ESRGAN ONNX + Lanczos3 Fallback) ---
+
+    fun selectUpscaleScale(scale: UpscaleScale) {
+        if (_uiState.value.isUpscaling) return
+        _uiState.update { it.copy(upscaleScale = scale) }
+    }
+
+    fun applyUpscale() {
+        val state = _uiState.value
+        if (state.isUpscaling || state.isHealProcessing || state.isDenoiseProcessing) return
+        val source = fullSourceBitmap.value?.takeIf { !it.isRecycled } ?: return
+        val scale = state.upscaleScale
+        val baseFullW = nativePhotoWidth.takeIf { it > 0 } ?: source.width
+        val baseFullH = nativePhotoHeight.takeIf { it > 0 } ?: source.height
+        val targetFullW = baseFullW * scale.factor
+        val targetFullH = baseFullH * scale.factor
+
+        val expectedPhotoGen = photoGeneration.get()
+        _uiState.update {
+            it.copy(
+                isUpscaling = true,
+                upscaleProgress = 0f
+            )
+        }
+
+        upscaleJob?.cancel()
+        upscaleJob = viewModelScope.launch {
+            var tempInput: Bitmap? = null
+            var upscaledBitmap: Bitmap? = null
+            try {
+                val appContext = getApplication<Application>()
+                val result = withContext(Dispatchers.Default) {
+                    val maxWorkInputDim = (MAX_INTERACTIVE_UPSCALE_DIM / scale.factor).coerceAtLeast(256)
+                    val workInput = if (max(source.width, source.height) > maxWorkInputDim) {
+                        ImageIoHelper.createPreviewBitmap(source, maxWorkInputDim).also {
+                            if (it !== source) tempInput = it
+                        }
+                    } else {
+                        source
+                    }
+                    LocalUpscaleEngine.upscale(
+                        context = appContext,
+                        source = workInput,
+                        scale = scale,
+                        onProgress = { progress ->
+                            _uiState.update { cur ->
+                                if (cur.isUpscaling) cur.copy(upscaleProgress = progress) else cur
+                            }
+                        }
+                    )
+                }
+                upscaledBitmap = result.bitmap
+                tempInput?.let { tmp ->
+                    if (tmp !== source && !tmp.isRecycled) tmp.recycle()
+                }
+                tempInput = null
+
+                if (photoGeneration.get() != expectedPhotoGen) {
+                    if (upscaledBitmap !== source && !upscaledBitmap.isRecycled) {
+                        upscaledBitmap.recycle()
+                    }
+                    _uiState.update { it.copy(isUpscaling = false, upscaleProgress = 0f) }
+                    return@launch
+                }
+
+                val latestState = _uiState.value
+                pushUndoSnapshot(captureCurrentSnapshot("Upscale ${scale.label}"))
+                appliedUpscaleFactor *= scale.factor
+
+                applyLoadedSourceBitmap(
+                    bitmap = upscaledBitmap,
+                    name = latestState.photoName,
+                    clearHealSession = false,
+                    nativeWidth = targetFullW,
+                    nativeHeight = targetFullH
+                )
+
+                val backendNote = when (result.backend) {
+                    UpscaleBackend.ONNX_REALESRGAN -> "Real-ESRGAN"
+                    UpscaleBackend.LANCZOS3_FALLBACK -> "Lanczos3"
+                }
+                _uiState.update {
+                    it.copy(
+                        isUpscaling = false,
+                        upscaleProgress = 0f,
+                        appliedUpscaleFactor = appliedUpscaleFactor,
+                        statusBannerMessage = "Upscaled ${scale.label} (${targetFullW}×${targetFullH}) · $backendNote"
+                    )
+                }
+            } catch (e: CancellationException) {
+                tempInput?.let { tmp -> if (tmp !== source && !tmp.isRecycled) tmp.recycle() }
+                upscaledBitmap?.let { out -> if (out !== source && !out.isRecycled) out.recycle() }
+                _uiState.update { it.copy(isUpscaling = false, upscaleProgress = 0f) }
+                throw e
+            } catch (oom: OutOfMemoryError) {
+                Log.e(TAG, "Offline upscale ran out of memory", oom)
+                tempInput?.let { tmp -> if (tmp !== source && !tmp.isRecycled) tmp.recycle() }
+                upscaledBitmap?.let { out -> if (out !== source && !out.isRecycled) out.recycle() }
+                _uiState.update {
+                    it.copy(
+                        isUpscaling = false,
+                        upscaleProgress = 0f,
+                        statusBannerMessage = "Upscale skipped: insufficient device memory"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Offline upscale failed", e)
+                tempInput?.let { tmp -> if (tmp !== source && !tmp.isRecycled) tmp.recycle() }
+                upscaledBitmap?.let { out -> if (out !== source && !out.isRecycled) out.recycle() }
+                _uiState.update {
+                    it.copy(
+                        isUpscaling = false,
+                        upscaleProgress = 0f,
+                        statusBannerMessage = "Upscale failed: ${e.localizedMessage ?: "Unexpected error"}"
+                    )
+                }
             }
         }
     }
@@ -3038,7 +3740,7 @@ class EditorViewModel(
         var gradedOutput: Bitmap? = null
 
         try {
-            val baseSource = if (sourceRef != null) {
+            val baseSource = if (sourceRef != null && appliedUpscaleFactor <= 1) {
                 val maxDecodeDim = computeExportDecodeMaxDim(nativeW, nativeH, params, options)
                 val decoded = try {
                     ImageIoHelper.loadNativeForExport(

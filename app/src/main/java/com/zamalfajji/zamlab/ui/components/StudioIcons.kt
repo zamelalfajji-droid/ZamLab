@@ -278,6 +278,56 @@ object StudioIcons {
         }
     }
 
+    /** Super-resolution frame expansion icon for Upscale */
+    val TabUpscale: ImageVector by lazy {
+        buildIcon("StudioTabUpscale") {
+            strokePath {
+                // Inner base frame (bottom-left)
+                addRoundedBox(3.8f, 12.6f, 11.4f, 20.2f, 1.6f)
+                // Expanded outer frame brackets (top-left, top-right, bottom-right)
+                moveTo(3.8f, 9.2f)
+                lineTo(3.8f, 5.6f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 5.6f, 3.8f)
+                lineTo(18.4f, 3.8f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 20.2f, 5.6f)
+                lineTo(20.2f, 18.4f)
+                arcTo(1.8f, 1.8f, 0f, false, true, 18.4f, 20.2f)
+                lineTo(14.8f, 20.2f)
+                // Outward diagonal resolution-boost arrow
+                moveTo(11.6f, 12.4f)
+                lineTo(16.8f, 7.2f)
+                moveTo(13.2f, 7.2f)
+                lineTo(16.8f, 7.2f)
+                lineTo(16.8f, 10.8f)
+            }
+        }
+    }
+
+    /** Split grain-to-clean frame icon for Denoise */
+    val TabDenoise: ImageVector by lazy {
+        buildIcon("StudioTabDenoise") {
+            strokePath {
+                // Outer rounded lens/sensor frame
+                addRoundedBox(3.8f, 4.2f, 20.2f, 19.8f, 2.2f)
+                // Clean diagonal split separating noisy left half from smooth right half
+                moveTo(13.8f, 4.2f)
+                lineTo(10.2f, 19.8f)
+                // Fine noise speckles on left side
+                moveTo(7.0f, 8.2f)
+                lineTo(7.05f, 8.2f)
+                moveTo(9.8f, 10.6f)
+                lineTo(9.85f, 10.6f)
+                moveTo(6.8f, 13.4f)
+                lineTo(6.85f, 13.4f)
+                moveTo(8.9f, 16.0f)
+                lineTo(8.95f, 16.0f)
+                // Smooth clean curve on right side
+                moveTo(13.8f, 14.6f)
+                curveTo(15.2f, 11.4f, 16.8f, 11.2f, 18.2f, 13.8f)
+            }
+        }
+    }
+
     /** 3D LUT isometric cube for LUTs */
     val TabLuts: ImageVector by lazy {
         buildIcon("StudioTabLuts") {
@@ -776,6 +826,43 @@ object StudioIcons {
                 lineTo(12.0f, 12.5f)
                 moveTo(9.5f, 10.0f)
                 lineTo(14.5f, 10.0f)
+            }
+        }
+    }
+
+    /** Crisp 3x3 viewfinder composition grid icon */
+    val CompositionGrid: ImageVector by lazy {
+        buildIcon("StudioCompositionGrid") {
+            strokePath {
+                addRoundedBox(3.6f, 3.6f, 20.4f, 20.4f, 2.0f)
+                // Vertical third lines
+                moveTo(9.2f, 3.6f)
+                lineTo(9.2f, 20.4f)
+                moveTo(14.8f, 3.6f)
+                lineTo(14.8f, 20.4f)
+                // Horizontal third lines
+                moveTo(3.6f, 9.2f)
+                lineTo(20.4f, 9.2f)
+                moveTo(3.6f, 14.8f)
+                lineTo(20.4f, 14.8f)
+            }
+        }
+    }
+
+    /** 90-degree corner rotation / mirror icon for Golden Spiral orientation */
+    val FlipSpiral: ImageVector by lazy {
+        buildIcon("StudioFlipSpiral") {
+            strokePath {
+                // Circular rotation arc with arrowhead
+                moveTo(19.2f, 12.0f)
+                arcTo(7.2f, 7.2f, 0f, true, true, 12.0f, 4.8f)
+                lineTo(15.2f, 4.8f)
+                // Arrowhead at top-right
+                moveTo(13.2f, 2.8f)
+                lineTo(15.4f, 4.8f)
+                lineTo(13.2f, 6.8f)
+                // Inner corner focal dot
+                addCircle(12.0f, 12.0f, 1.3f)
             }
         }
     }

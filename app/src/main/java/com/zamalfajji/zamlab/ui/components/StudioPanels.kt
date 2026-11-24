@@ -276,7 +276,8 @@ fun LutPanel(
                 .clip(RoundedCornerShape(12.dp))
                 .background(StudioGraphite)
                 .border(1.dp, StudioHairline, RoundedCornerShape(12.dp))
-                .padding(horizontal = 12.dp, vertical = 4.dp)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -290,7 +291,7 @@ fun LutPanel(
                         }
                     )
                     .testTag("lut_intensity_label"),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -300,6 +301,14 @@ fun LutPanel(
                     maxLines = 1,
                     softWrap = false
                 )
+                if (hasSelectedLut) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(StudioCinemaAmber)
+                    )
+                }
                 if (activeLut != null) {
                     Text(
                         text = "• ${activeLut.title}",
@@ -313,13 +322,13 @@ fun LutPanel(
                     Spacer(modifier = Modifier.weight(1f))
                 }
                 Surface(
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(8.dp),
                     color = if (hasSelectedLut) StudioAmberPillFill else StudioSurfaceHighest,
                     modifier = Modifier
                         .border(
                             1.dp,
-                            if (hasSelectedLut) StudioCinemaAmber.copy(alpha = 0.65f) else StudioHairline,
-                            RoundedCornerShape(6.dp)
+                            if (hasSelectedLut) StudioCinemaAmber.copy(alpha = 0.72f) else StudioHairline,
+                            RoundedCornerShape(8.dp)
                         )
                         .testTag("lut_intensity_value")
                 ) {
@@ -327,13 +336,13 @@ fun LutPanel(
                         text = "${(lutIntensity * 100f).roundToInt()}%",
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             fontFeatureSettings = "tnum"
                         ),
                         color = if (hasSelectedLut) StudioCoolWhite else StudioTextMuted,
                         maxLines = 1,
                         softWrap = false,
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
             }

@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -13,6 +14,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.core.content.IntentCompat
 import com.zamalfajji.zamlab.editor.EditorViewModel
+import com.zamalfajji.zamlab.editor.StudioTab
 import com.zamalfajji.zamlab.ui.EditorScreen
 import com.zamalfajji.zamlab.ui.theme.ZamLabTheme
 
@@ -46,6 +48,17 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIncomingIntent(intent)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_O && event?.repeatCount == 0) {
+            val st = editorViewModel.uiState.value
+            if (st.activeTab == StudioTab.MASK || st.gradingParams.masks.isNotEmpty()) {
+                editorViewModel.toggleShowMaskOverlay()
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     private fun handleIncomingIntent(incoming: Intent?) {

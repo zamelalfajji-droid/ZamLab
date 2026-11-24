@@ -8,7 +8,6 @@ import com.zamalfajji.zamlab.editor.CameraProfiles
 import com.zamalfajji.zamlab.editor.GeometryMath
 import com.zamalfajji.zamlab.editor.GradingParams
 import com.zamalfajji.zamlab.editor.HslBand
-import com.zamalfajji.zamlab.editor.MaskType
 import com.zamalfajji.zamlab.editor.ToneCurveData
 import com.zamalfajji.zamlab.lut.CubeLut
 import com.zamalfajji.zamlab.lut.LutType
@@ -96,7 +95,7 @@ object GlGradingShaders {
         return 1f - 0.22f * strength
     }
 
-    private const val VERTEX_SHADER = """
+    private val VERTEX_SHADER = """
         attribute vec2 aPosition;
         attribute vec2 aTexCoord;
         varying vec2 vTexCoord;
@@ -104,14 +103,14 @@ object GlGradingShaders {
             vTexCoord = aTexCoord;
             gl_Position = vec4(aPosition, 0.0, 1.0);
         }
-    """
+    """.trimIndent()
 
     /**
      * Pass 1 Fragment Shader: Geometry, Optics, Camera Profile, and Steps 1–5 (Tone & Color).
      * Compact packed-vec4 uniforms (~47 vec4 total, zero dynamic array indexing) for rock-solid
      * compatibility across all OpenGL ES 2.0 drivers and software emulators.
      */
-    private const val TONE_COLOR_FRAGMENT_SHADER = """
+    internal val TONE_COLOR_FRAGMENT_SHADER = """
         #ifdef GL_FRAGMENT_PRECISION_HIGH
         precision highp float;
         #else
@@ -678,14 +677,14 @@ object GlGradingShaders {
 
             gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
         }
-    """
+    """.trimIndent()
 
     /**
      * Pass 2 Fragment Shader: Step 6 Real Spatial Detail Filtering on Pass-1 Graded Texture
      * (`uGradedTex`) + Finishing (Vignette, Film Grain, 3D/1D LUT, Halation/Bloom, Anamorphic
      * Streak, and pixel-exact Before/After original & split comparison reading `uRawTex`).
      */
-    private const val SPATIAL_FINISH_FRAGMENT_SHADER = """
+    internal val SPATIAL_FINISH_FRAGMENT_SHADER = """
         #ifdef GL_FRAGMENT_PRECISION_HIGH
         precision highp float;
         #else
@@ -694,14 +693,16 @@ object GlGradingShaders {
 
         varying vec2 vTexCoord;
 
-        uniform sampler2D uGradedTex;   // Unit 0: Pass-1 tone & color graded FBO texture
+        uniform sampler2D uGradedTex;   // Unit 0: Pass-1 + GlMaskPipeline graded FBO texture
         uniform sampler2D uLutTex;      // Unit 1: 3D/1D .cube LUT tiled atlas
         uniform sampler2D uRawTex;      // Unit 2: Original unmodified source texture (for compare)
+        uniform sampler2D uMaskOverlayTex; // Unit 3: Refined active mask alpha for Rubylith overlay
 
         uniform vec4 uTexelInfo;        // (invW, invH, outW, outH)
         uniform vec4 uDetailA;          // (textureNorm, clarityNorm, dehazeNorm, sharpeningNorm)
         uniform vec4 uDetailB;          // (sharpenRadius, sharpenDetail, sharpenMasking, lumaNrNorm)
         uniform vec4 uDetailC;          // (colorNrNorm, vignetteNorm, grainNorm, grainSizeNorm)
+        uniform vec4 uDenoiseParams;    // (nrDetailNorm, nrContrastNorm, colorSmoothnessNorm, aiCleanFlag)
         uniform vec4 uEffectsA;         // (grainRoughNorm, halationNorm, bloomNorm, anamorphicNorm)
 
         uniform vec4 uLutParams;        // (lutType, lutSize, lutIntensity, lutTilesPerRow)
@@ -709,6 +710,7 @@ object GlGradingShaders {
         uniform vec3 uLutDomainMax;
 
         uniform vec4 uCompare;          // (isOriginal, splitRatio, applyCrop, clippingMask: bit0=hi, bit1=sh)
+        uniform vec4 uMaskOverlayParams; // (enabled [0/1], opacity [0.50], 0.0, 0.0)
         uniform mat3 uOrientMatrix;
         uniform vec4 uCropRect;
 
@@ -816,43 +818,173 @@ object GlGradingShaders {
             // STEP 6: Real Multi-Pixel Spatial Detail Passes on the Graded Image
             // =========================================================================
 
-            // 6a. Edge-preserving Luminance & Color Noise Reduction (distinguishes isolated speckles from coherent edges)
-            if (uDetailB.w > 0.005 || uDetailC.x > 0.005) {
+            // 6a. Professional BT.709 YCbCr Edge-Preserving Chroma & Luminance Denoise
+            // Controlled by Luminance, Detail, Contrast, Color, and Smoothness
+            float lumaNr = uDetailB.w;
+            float colorNr = uDetailC.x;
+            float aiCleanFlag = uDenoiseParams.w;
+            if (aiCleanFlag > 0.5 && lumaNr <= 0.005) lumaNr = 0.50;
+            if (aiCleanFlag > 0.5 && colorNr <= 0.005) colorNr = 0.35;
+
+            if (lumaNr > 0.005 || colorNr > 0.005) {
+                float nrDetail = clamp(uDenoiseParams.x, 0.0, 1.0);
+                float nrContrast = clamp(uDenoiseParams.y, 0.0, 1.0);
+                float cSmooth = clamp(uDenoiseParams.z, 0.0, 1.0);
+
+                vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
+                float cY = dot(c, lumaW);
+                vec2 cCh = vec2((c.b - cY) / 1.8556, (c.r - cY) / 1.5748);
+
                 vec3 nL = texture2D(uGradedTex, clamp(vTexCoord - vec2(texel.x, 0.0), 0.0, 1.0)).rgb;
                 vec3 nR = texture2D(uGradedTex, clamp(vTexCoord + vec2(texel.x, 0.0), 0.0, 1.0)).rgb;
                 vec3 nU = texture2D(uGradedTex, clamp(vTexCoord - vec2(0.0, texel.y), 0.0, 1.0)).rgb;
                 vec3 nD = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0, texel.y), 0.0, 1.0)).rgb;
-                vec3 nearAvg = 0.25 * (nL + nR + nU + nD);
-                vec3 wideSmooth = sampleGaussian9(vTexCoord, texel * 1.65);
-                vec3 targetSmooth = mix(nearAvg, wideSmooth, 0.45);
+                vec3 nTL = texture2D(uGradedTex, clamp(vTexCoord + vec2(-texel.x, -texel.y), 0.0, 1.0)).rgb;
+                vec3 nTR = texture2D(uGradedTex, clamp(vTexCoord + vec2( texel.x, -texel.y), 0.0, 1.0)).rgb;
+                vec3 nBL = texture2D(uGradedTex, clamp(vTexCoord + vec2(-texel.x,  texel.y), 0.0, 1.0)).rgb;
+                vec3 nBR = texture2D(uGradedTex, clamp(vTexCoord + vec2( texel.x,  texel.y), 0.0, 1.0)).rgb;
 
-                if (uDetailB.w > 0.005) {
-                    float cLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
-                    float sLum = dot(targetSmooth, vec3(0.2126, 0.7152, 0.0722));
-                    float dMin = min(
-                        min(abs(cLum - dot(nL, vec3(0.2126, 0.7152, 0.0722))), abs(cLum - dot(nR, vec3(0.2126, 0.7152, 0.0722)))),
-                        min(abs(cLum - dot(nU, vec3(0.2126, 0.7152, 0.0722))), abs(cLum - dot(nD, vec3(0.2126, 0.7152, 0.0722))))
-                    );
-                    float coherentEdge = max(abs(cLum - sLum) - dMin * 0.85, 0.0);
-                    float edgeKeep = clamp(1.0 - coherentEdge * 6.5, 0.08, 1.0);
-                    float newLum = mix(cLum, sLum, uDetailB.w * 0.86 * edgeKeep);
-                    c = clamp(c + vec3(newLum - cLum), 0.0, 1.0);
-                }
-                if (uDetailC.x > 0.005) {
-                    float cLum = dot(c, vec3(0.2126, 0.7152, 0.0722));
-                    float sLum = dot(targetSmooth, vec3(0.2126, 0.7152, 0.0722));
-                    vec3 cCh = c - vec3(cLum);
-                    vec3 sCh = targetSmooth - vec3(sLum);
+                float yL = dot(nL, lumaW);
+                float yR = dot(nR, lumaW);
+                float yU = dot(nU, lumaW);
+                float yD = dot(nD, lumaW);
+                float yTL = dot(nTL, lumaW);
+                float yTR = dot(nTR, lumaW);
+                float yBL = dot(nBL, lumaW);
+                float yBR = dot(nBR, lumaW);
+
+                float outY = cY;
+                vec2 outCh = cCh;
+
+                // Chroma Noise Pipeline: Y-guided + chroma-edge-stopping multi-ring bilateral
+                if (colorNr > 0.005) {
+                    vec2 chL = vec2((nL.b - yL) / 1.8556, (nL.r - yL) / 1.5748);
+                    vec2 chR = vec2((nR.b - yR) / 1.8556, (nR.r - yR) / 1.5748);
+                    vec2 chU = vec2((nU.b - yU) / 1.8556, (nU.r - yU) / 1.5748);
+                    vec2 chD = vec2((nD.b - yD) / 1.8556, (nD.r - yD) / 1.5748);
+                    vec2 chTL = vec2((nTL.b - yTL) / 1.8556, (nTL.r - yTL) / 1.5748);
+                    vec2 chTR = vec2((nTR.b - yTR) / 1.8556, (nTR.r - yTR) / 1.5748);
+                    vec2 chBL = vec2((nBL.b - yBL) / 1.8556, (nBL.r - yBL) / 1.5748);
+                    vec2 chBR = vec2((nBR.b - yBR) / 1.8556, (nBR.r - yBR) / 1.5748);
+
                     float dChMin = min(
-                        min(length(cCh - (nL - vec3(dot(nL, vec3(0.2126, 0.7152, 0.0722))))),
-                            length(cCh - (nR - vec3(dot(nR, vec3(0.2126, 0.7152, 0.0722)))))),
-                        min(length(cCh - (nU - vec3(dot(nU, vec3(0.2126, 0.7152, 0.0722))))),
-                            length(cCh - (nD - vec3(dot(nD, vec3(0.2126, 0.7152, 0.0722))))))
+                        min(length(cCh - chL), length(cCh - chR)),
+                        min(length(cCh - chU), length(cCh - chD))
                     );
-                    float chromaEdge = max(length(cCh - sCh) - dChMin * 0.85, 0.0);
-                    float chromaKeep = clamp(1.0 - chromaEdge * 3.0, 0.14, 1.0);
-                    c = clamp(vec3(cLum) + mix(cCh, sCh, uDetailC.x * 0.94 * chromaKeep), 0.0, 1.0);
+                    float isChSpeckle = step(0.09, dChMin);
+
+                    float sigmaY = 0.052 + 0.050 * colorNr;
+                    float inv2SY = 1.0 / (2.0 * sigmaY * sigmaY);
+                    float shadowBoost = 1.0 + clamp(1.0 - cY, 0.0, 1.0) * 0.28 * cSmooth;
+                    float baseSigmaC = (0.085 + 0.145 * colorNr + 0.075 * cSmooth) * shadowBoost;
+                    float sigmaC = mix(baseSigmaC, baseSigmaC * 3.6, isChSpeckle);
+                    float inv2SC = 1.0 / (2.0 * sigmaC * sigmaC);
+
+                    float wSumC = mix(0.85, 0.06, isChSpeckle);
+                    vec2 chAcc = cCh * wSumC;
+
+                    float wL = exp(-(yL - cY) * (yL - cY) * inv2SY - dot(chL - cCh, chL - cCh) * inv2SC);
+                    float wR = exp(-(yR - cY) * (yR - cY) * inv2SY - dot(chR - cCh, chR - cCh) * inv2SC);
+                    float wU = exp(-(yU - cY) * (yU - cY) * inv2SY - dot(chU - cCh, chU - cCh) * inv2SC);
+                    float wD = exp(-(yD - cY) * (yD - cY) * inv2SY - dot(chD - cCh, chD - cCh) * inv2SC);
+                    float wTL = 0.707 * exp(-(yTL - cY) * (yTL - cY) * inv2SY - dot(chTL - cCh, chTL - cCh) * inv2SC);
+                    float wTR = 0.707 * exp(-(yTR - cY) * (yTR - cY) * inv2SY - dot(chTR - cCh, chTR - cCh) * inv2SC);
+                    float wBL = 0.707 * exp(-(yBL - cY) * (yBL - cY) * inv2SY - dot(chBL - cCh, chBL - cCh) * inv2SC);
+                    float wBR = 0.707 * exp(-(yBR - cY) * (yBR - cY) * inv2SY - dot(chBR - cCh, chBR - cCh) * inv2SC);
+                    wSumC += wL + wR + wU + wD + wTL + wTR + wBL + wBR;
+                    chAcc += chL * wL + chR * wR + chU * wU + chD * wD + chTL * wTL + chTR * wTR + chBL * wBL + chBR * wBR;
+
+                    // Wide ring scaled by Smoothness (radius 2.0 .. 4.5 px) suppresses low-frequency shadow chroma mottling
+                    vec2 wideR = texel * (2.0 + cSmooth * 2.5);
+                    vec3 w1 = texture2D(uGradedTex, clamp(vTexCoord + vec2( wideR.x, 0.0), 0.0, 1.0)).rgb;
+                    vec3 w2 = texture2D(uGradedTex, clamp(vTexCoord + vec2(-wideR.x, 0.0), 0.0, 1.0)).rgb;
+                    vec3 w3 = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0,  wideR.y), 0.0, 1.0)).rgb;
+                    vec3 w4 = texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0, -wideR.y), 0.0, 1.0)).rgb;
+                    float yW1 = dot(w1, lumaW);
+                    float yW2 = dot(w2, lumaW);
+                    float yW3 = dot(w3, lumaW);
+                    float yW4 = dot(w4, lumaW);
+                    vec2 chW1 = vec2((w1.b - yW1) / 1.8556, (w1.r - yW1) / 1.5748);
+                    vec2 chW2 = vec2((w2.b - yW2) / 1.8556, (w2.r - yW2) / 1.5748);
+                    vec2 chW3 = vec2((w3.b - yW3) / 1.8556, (w3.r - yW3) / 1.5748);
+                    vec2 chW4 = vec2((w4.b - yW4) / 1.8556, (w4.r - yW4) / 1.5748);
+                    float wideWt = 0.55 + 0.55 * cSmooth;
+                    float ww1 = wideWt * exp(-(yW1 - cY) * (yW1 - cY) * inv2SY - dot(chW1 - cCh, chW1 - cCh) * inv2SC);
+                    float ww2 = wideWt * exp(-(yW2 - cY) * (yW2 - cY) * inv2SY - dot(chW2 - cCh, chW2 - cCh) * inv2SC);
+                    float ww3 = wideWt * exp(-(yW3 - cY) * (yW3 - cY) * inv2SY - dot(chW3 - cCh, chW3 - cCh) * inv2SC);
+                    float ww4 = wideWt * exp(-(yW4 - cY) * (yW4 - cY) * inv2SY - dot(chW4 - cCh, chW4 - cCh) * inv2SC);
+                    wSumC += ww1 + ww2 + ww3 + ww4;
+                    chAcc += chW1 * ww1 + chW2 * ww2 + chW3 * ww3 + chW4 * ww4;
+
+                    float chBlend = mix(clamp(colorNr * (0.78 + 0.18 * cSmooth), 0.0, 0.96), clamp(colorNr * 0.96, 0.0, 0.98), isChSpeckle);
+                    outCh = mix(cCh, chAcc / max(wSumC, 0.0001), chBlend);
                 }
+
+                // Luminance Noise Pipeline: edge-stopping multi-scale bilateral + Detail protection + Contrast recovery
+                if (lumaNr > 0.005) {
+                    float dMinY = min(min(abs(cY - yL), abs(cY - yR)), min(abs(cY - yU), abs(cY - yD)));
+                    float isImpulse = step(0.075 + nrDetail * 0.06, dMinY);
+                    float edgeMag = max(abs(yR - yL), abs(yD - yU));
+                    float detailGuard = mix(clamp(1.0 - edgeMag * (1.6 + nrDetail * 5.2), 0.10, 1.0), 1.0, isImpulse);
+
+                    float baseSigmaR = clamp(0.022 + 0.125 * lumaNr * (1.0 - nrDetail * 0.78), 0.016, 0.16);
+                    float sigmaR = mix(max(baseSigmaR * (0.45 + 0.55 * detailGuard), 0.012), max(baseSigmaR * 3.5, dMinY * 1.45), isImpulse);
+                    float inv2SR = 1.0 / (2.0 * sigmaR * sigmaR);
+
+                    float wSumY = mix(1.0 + nrDetail * 0.45, 0.08, isImpulse);
+                    float yAcc = cY * wSumY;
+
+                    float wyL = exp(-(yL - cY) * (yL - cY) * inv2SR);
+                    float wyR = exp(-(yR - cY) * (yR - cY) * inv2SR);
+                    float wyU = exp(-(yU - cY) * (yU - cY) * inv2SR);
+                    float wyD = exp(-(yD - cY) * (yD - cY) * inv2SR);
+                    float wyTL = 0.72 * exp(-(yTL - cY) * (yTL - cY) * inv2SR);
+                    float wyTR = 0.72 * exp(-(yTR - cY) * (yTR - cY) * inv2SR);
+                    float wyBL = 0.72 * exp(-(yBL - cY) * (yBL - cY) * inv2SR);
+                    float wyBR = 0.72 * exp(-(yBR - cY) * (yBR - cY) * inv2SR);
+                    wSumY += wyL + wyR + wyU + wyD + wyTL + wyTR + wyBL + wyBR;
+                    yAcc += yL * wyL + yR * wyR + yU * wyU + yD * wyD + yTL * wyTL + yTR * wyTR + yBL * wyBL + yBR * wyBR;
+
+                    // Outer stride-2 ring for broad grain smoothing when Luminance > 35 or AI Clean active
+                    if ((lumaNr > 0.35 || aiCleanFlag > 0.5) && isImpulse < 0.5) {
+                        vec2 r2 = texel * 2.0;
+                        float yo1 = dot(texture2D(uGradedTex, clamp(vTexCoord + vec2( r2.x, 0.0), 0.0, 1.0)).rgb, lumaW);
+                        float yo2 = dot(texture2D(uGradedTex, clamp(vTexCoord + vec2(-r2.x, 0.0), 0.0, 1.0)).rgb, lumaW);
+                        float yo3 = dot(texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0,  r2.y), 0.0, 1.0)).rgb, lumaW);
+                        float yo4 = dot(texture2D(uGradedTex, clamp(vTexCoord + vec2(0.0, -r2.y), 0.0, 1.0)).rgb, lumaW);
+                        float outerScale = (0.45 + 0.40 * lumaNr) * (1.0 - nrDetail * 0.35) * 0.55;
+                        float wo1 = outerScale * exp(-(yo1 - cY) * (yo1 - cY) * inv2SR);
+                        float wo2 = outerScale * exp(-(yo2 - cY) * (yo2 - cY) * inv2SR);
+                        float wo3 = outerScale * exp(-(yo3 - cY) * (yo3 - cY) * inv2SR);
+                        float wo4 = outerScale * exp(-(yo4 - cY) * (yo4 - cY) * inv2SR);
+                        wSumY += wo1 + wo2 + wo3 + wo4;
+                        yAcc += yo1 * wo1 + yo2 * wo2 + yo3 * wo3 + yo4 * wo4;
+                    }
+
+                    float lumaBlend = mix(
+                        clamp(lumaNr * (0.92 - nrDetail * 0.24) * (0.25 + 0.75 * detailGuard), 0.0, 0.94),
+                        clamp(lumaNr * 0.92, 0.0, 0.96),
+                        isImpulse
+                    );
+                    outY = mix(cY, yAcc / max(wSumY, 0.0001), lumaBlend);
+
+                    // Local midtone Contrast recovery without re-amplifying deep shadow noise
+                    if (nrContrast > 0.005) {
+                        vec3 wideBlur = sampleGaussian9(vTexCoord, texel * 2.8);
+                        float wideY = dot(wideBlur, lumaW);
+                        float midMask = clamp(4.0 * outY * (1.0 - outY), 0.0, 1.0);
+                        float cGain = nrContrast * (0.42 + 0.45 * lumaNr);
+                        float cDelta = clamp((outY - wideY) * cGain * (0.35 + 0.65 * midMask), -0.14, 0.14);
+                        outY = clamp(outY + cDelta, 0.0, 1.0);
+                    }
+                }
+
+                // Reconstruct RGB from BT.709 (outY, outCh.x=Cb, outCh.y=Cr)
+                c = clamp(vec3(
+                    outY + 1.5748 * outCh.y,
+                    outY - 0.187324 * outCh.x - 0.468124 * outCh.y,
+                    outY + 1.8556 * outCh.x
+                ), 0.0, 1.0);
             }
 
             // 6b. Dehaze: Local dark-channel atmospheric veil estimation + radiance & saturation recovery
@@ -1080,9 +1212,17 @@ object GlGradingShaders {
                 }
             }
 
+            // Preview-only Rubylith Red (#FF2A2A @ 50% opacity) Mask Overlay
+            // Renders live edge-snapped mask alpha while painting or adjusting sliders; never active on export.
+            if (uMaskOverlayParams.x > 0.5) {
+                float mAlpha = clamp(texture2D(uMaskOverlayTex, vTexCoord).r, 0.0, 1.0);
+                float mixAmt = clamp(mAlpha * uMaskOverlayParams.y, 0.0, uMaskOverlayParams.y);
+                c = mix(c, vec3(1.0, 0.16470588, 0.16470588), mixAmt);
+            }
+
             gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
         }
-    """
+    """.trimIndent()
 
     class ToneColorUniformHandles(program: Int) {
         val aPosition = GLES20.glGetAttribLocation(program, "aPosition")
@@ -1150,11 +1290,13 @@ object GlGradingShaders {
         val uGradedTex = GLES20.glGetUniformLocation(program, "uGradedTex")
         val uLutTex = GLES20.glGetUniformLocation(program, "uLutTex")
         val uRawTex = GLES20.glGetUniformLocation(program, "uRawTex")
+        val uMaskOverlayTex = GLES20.glGetUniformLocation(program, "uMaskOverlayTex")
 
         val uTexelInfo = GLES20.glGetUniformLocation(program, "uTexelInfo")
         val uDetailA = GLES20.glGetUniformLocation(program, "uDetailA")
         val uDetailB = GLES20.glGetUniformLocation(program, "uDetailB")
         val uDetailC = GLES20.glGetUniformLocation(program, "uDetailC")
+        val uDenoiseParams = GLES20.glGetUniformLocation(program, "uDenoiseParams")
         val uEffectsA = GLES20.glGetUniformLocation(program, "uEffectsA")
 
         val uLutParams = GLES20.glGetUniformLocation(program, "uLutParams")
@@ -1162,6 +1304,7 @@ object GlGradingShaders {
         val uLutDomainMax = GLES20.glGetUniformLocation(program, "uLutDomainMax")
 
         val uCompare = GLES20.glGetUniformLocation(program, "uCompare")
+        val uMaskOverlayParams = GLES20.glGetUniformLocation(program, "uMaskOverlayParams")
         val uOrientMatrix = GLES20.glGetUniformLocation(program, "uOrientMatrix")
         val uCropRect = GLES20.glGetUniformLocation(program, "uCropRect")
 
@@ -1514,31 +1657,9 @@ object GlGradingShaders {
             GLES20.glUniform4f(handles.uHsl[i], adj.hue, adj.saturation, adj.luminance, 0f)
         }
 
-        val activeMasks = params.masks.filter { it.enabled && it.hasAdjustments }.take(4)
-        GLES20.glUniform4f(handles.uMaskMeta, activeMasks.size.toFloat(), 0f, 0f, 0f)
-        for (i in activeMasks.indices) {
-            val m = activeMasks[i]
-            val typeFloat = if (m.type == MaskType.RADIAL) 0f else 1f
-            GLES20.glUniform4f(
-                handles.uMaskA[i],
-                typeFloat,
-                if (m.inverted) 1f else 0f,
-                m.feather.coerceIn(0.02f, 1f),
-                m.exposure
-            )
-            if (m.type == MaskType.RADIAL) {
-                GLES20.glUniform4f(handles.uMaskB[i], m.centerX, m.centerY, m.radiusX, m.radiusY)
-            } else {
-                GLES20.glUniform4f(handles.uMaskB[i], m.startX, m.startY, m.endX, m.endY)
-            }
-            GLES20.glUniform4f(
-                handles.uMaskC[i],
-                m.contrast / 100f,
-                m.warmth / 100f,
-                m.saturation / 100f,
-                m.sharpness / 100f
-            )
-        }
+        // Local masks are now rendered in the dedicated multi-pass GlMaskPipeline
+        // (Boolean sub-masks, Vector Brush, Luminance/Color Range, Guided Image Filter, 8 local adjustments).
+        GLES20.glUniform4f(handles.uMaskMeta, 0f, 0f, 0f, 0f)
     }
 
     fun bindSpatialFinishUniforms(
@@ -1554,7 +1675,8 @@ object GlGradingShaders {
         splitRatio: Float,
         applyCrop: Boolean,
         showHighlightClipping: Boolean = false,
-        showShadowClipping: Boolean = false
+        showShadowClipping: Boolean = false,
+        showMaskOverlay: Boolean = false
     ) {
         val fw = max(1, fboWidth).toFloat()
         val fh = max(1, fboHeight).toFloat()
@@ -1580,6 +1702,13 @@ object GlGradingShaders {
             (params.vignette / 100f).coerceIn(-1f, 1f),
             (params.grain / 100f).coerceIn(0f, 1f),
             (params.grainSize / 100f).coerceIn(0f, 1f)
+        )
+        GLES20.glUniform4f(
+            handles.uDenoiseParams,
+            (params.noiseReductionDetail / 100f).coerceIn(0f, 1f),
+            (params.noiseReductionContrast / 100f).coerceIn(0f, 1f),
+            (params.colorNoiseReductionSmoothness / 100f).coerceIn(0f, 1f),
+            if (params.denoiseAiClean) 1f else 0f
         )
         GLES20.glUniform4f(
             handles.uEffectsA,
@@ -1612,6 +1741,13 @@ object GlGradingShaders {
             splitRatio,
             if (applyCrop) 1f else 0f,
             clippingMask
+        )
+        GLES20.glUniform4f(
+            handles.uMaskOverlayParams,
+            if (showMaskOverlay && !isOriginal) 1f else 0f,
+            0.50f,
+            0f,
+            0f
         )
 
         GeometryMath.buildOrientToRawSourceMatrixInto(

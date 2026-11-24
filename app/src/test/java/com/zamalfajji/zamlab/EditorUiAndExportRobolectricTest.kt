@@ -93,6 +93,8 @@ class EditorUiAndExportRobolectricTest {
         val tabExpectations = listOf(
             "tab_adjust" to StudioTab.ADJUST,
             "tab_all" to StudioTab.ALL,
+            "tab_upscale" to StudioTab.UPSCALE,
+            "tab_denoise" to StudioTab.DENOISE,
             "tab_luts" to StudioTab.LUTS,
             "tab_crop" to StudioTab.CROP,
             "tab_heal" to StudioTab.HEAL,
@@ -118,7 +120,7 @@ class EditorUiAndExportRobolectricTest {
 
     @Test
     @Config(qualifiers = "w840dp-h720dp")
-    fun `ZamLab 6 bottom navigation tabs fit cleanly inside 360dp side panel on wide tablet layout`() {
+    fun `ZamLab 8 bottom navigation tabs fit cleanly inside 360dp side panel on wide tablet layout`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val vm = EditorViewModel(app)
         awaitInitialLoad(vm)
@@ -130,10 +132,29 @@ class EditorUiAndExportRobolectricTest {
         }
         composeTestRule.waitForIdle()
 
-        listOf("tab_adjust", "tab_all", "tab_luts", "tab_crop", "tab_heal", "tab_mask").forEach { tag ->
-            composeTestRule.onNodeWithTag(tag).assertIsDisplayed()
+        listOf("tab_adjust", "tab_all", "tab_upscale", "tab_denoise", "tab_luts", "tab_crop", "tab_heal", "tab_mask").forEach { tag ->
+            composeTestRule.onNodeWithTag(tag).performScrollTo().assertIsDisplayed()
         }
-        composeTestRule.onNodeWithTag("tab_crop").performClick()
+        composeTestRule.onNodeWithTag("tab_upscale").performScrollTo().performClick()
+        testDispatcher.scheduler.advanceUntilIdle()
+        composeTestRule.waitForIdle()
+        assertEquals(StudioTab.UPSCALE, vm.uiState.value.activeTab)
+        composeTestRule.onNodeWithTag("upscale_2x_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("upscale_4x_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("upscale_apply_button").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("tab_denoise").performScrollTo().performClick()
+        testDispatcher.scheduler.advanceUntilIdle()
+        composeTestRule.waitForIdle()
+        assertEquals(StudioTab.DENOISE, vm.uiState.value.activeTab)
+        composeTestRule.onNodeWithTag("denoise_preset_off").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("denoise_preset_natural").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("denoise_compare_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("denoise_slider_luminance").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("denoise_slider_color").performScrollTo().assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("tab_crop").performScrollTo().performClick()
+        testDispatcher.scheduler.advanceUntilIdle()
         composeTestRule.waitForIdle()
         assertEquals(StudioTab.CROP, vm.uiState.value.activeTab)
     }

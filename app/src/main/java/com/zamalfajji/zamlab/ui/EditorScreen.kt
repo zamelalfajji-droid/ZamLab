@@ -19,10 +19,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -80,6 +82,7 @@ import androidx.compose.material.icons.outlined.CropRotate
 import androidx.compose.material.icons.outlined.FilterVintage
 import androidx.compose.material.icons.outlined.Gradient
 import androidx.compose.material.icons.outlined.Healing
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -112,6 +115,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -122,6 +130,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -129,6 +138,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zamalfajji.zamlab.R
+import com.zamalfajji.zamlab.editor.CompositionGridMode
 import com.zamalfajji.zamlab.editor.EditorUiState
 import com.zamalfajji.zamlab.editor.EditorViewModel
 import com.zamalfajji.zamlab.editor.ExportFormat
@@ -140,7 +150,9 @@ import com.zamalfajji.zamlab.editor.PhotoFormatInfo
 import com.zamalfajji.zamlab.editor.StudioTab
 import com.zamalfajji.zamlab.ui.components.AdjustPanel
 import com.zamalfajji.zamlab.ui.components.AllParametersPanel
+import com.zamalfajji.zamlab.ui.components.CompositionGridSelectorPill
 import com.zamalfajji.zamlab.ui.components.CropPanel
+import com.zamalfajji.zamlab.ui.components.DenoisePanel
 import com.zamalfajji.zamlab.ui.components.ExportBottomSheet
 import com.zamalfajji.zamlab.ui.components.HealPanel
 import com.zamalfajji.zamlab.ui.components.LutPanel
@@ -148,7 +160,9 @@ import com.zamalfajji.zamlab.ui.components.MaskPanel
 import com.zamalfajji.zamlab.ui.components.PhotoViewport
 import com.zamalfajji.zamlab.ui.components.ProfileBrowserSheet
 import com.zamalfajji.zamlab.ui.components.ProfileMenuSheet
+import com.zamalfajji.zamlab.ui.components.SpiralFlipPillButton
 import com.zamalfajji.zamlab.ui.components.StudioIcons
+import com.zamalfajji.zamlab.ui.components.UpscalePanel
 import com.zamalfajji.zamlab.ui.theme.StudioActiveOffWhite
 import com.zamalfajji.zamlab.ui.theme.StudioAmberPillFill
 import com.zamalfajji.zamlab.ui.theme.StudioBackground
@@ -326,16 +340,31 @@ fun EditorScreen(
         uiState.touchAdjustSelectedBand != null &&
         uiState.activeTab != StudioTab.CROP &&
         uiState.activeTab != StudioTab.HEAL &&
+        uiState.activeTab != StudioTab.UPSCALE &&
+        uiState.activeTab != StudioTab.DENOISE &&
         !uiState.isComparingOriginal
 
     val canShowTouchAdjust = uiState.activeTab != StudioTab.CROP &&
         uiState.activeTab != StudioTab.HEAL &&
+        uiState.activeTab != StudioTab.UPSCALE &&
+        uiState.activeTab != StudioTab.DENOISE &&
         uiState.activeEyedropperMode == com.zamalfajji.zamlab.editor.EyedropperMode.NONE
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(StudioBackground)
+            .onPreviewKeyEvent { keyEvent ->
+                if (keyEvent.type == KeyEventType.KeyDown &&
+                    keyEvent.key == Key.O &&
+                    (uiState.activeTab == StudioTab.MASK || uiState.gradingParams.masks.isNotEmpty())
+                ) {
+                    viewModel.toggleShowMaskOverlay()
+                    true
+                } else {
+                    false
+                }
+            }
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val isWideLayout = maxWidth >= 720.dp
@@ -733,8 +762,12 @@ private fun ImmersiveCanvasStage(
             isHealProcessing = uiState.isHealProcessing,
             activeEyedropperMode = uiState.activeEyedropperMode,
             cropOverlayMode = uiState.cropOverlayMode,
+            compositionGridMode = uiState.compositionGridMode,
+            spiralOrientation = uiState.spiralOrientation,
             activeMask = uiState.activeMask,
+            activeSubMask = uiState.activeSubMask,
             showMaskOverlay = uiState.showMaskOverlay,
+            maskBrushRadius = uiState.maskBrushRadius,
             viewportResetToken = uiState.viewportResetToken,
             isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
             touchAdjustSelectedBand = uiState.touchAdjustSelectedBand,
@@ -760,6 +793,10 @@ private fun ImmersiveCanvasStage(
             onCropRectChange = viewModel::updateCropRect,
             onCropDragStateChanged = viewModel::setSliderDragging,
             onUpdateMask = viewModel::updateMask,
+            onUpdateSubMask = { maskId, subId, fn -> viewModel.updateSubMask(maskId, subId, false, fn) },
+            onStartMaskBrushStroke = viewModel::startMaskBrushStroke,
+            onAppendMaskBrushStroke = viewModel::appendMaskBrushStroke,
+            onFinishMaskBrushStroke = viewModel::finishMaskBrushStroke,
             onMaskDragStateChanged = viewModel::setSliderDragging,
             onToggleTouchAdjust = viewModel::toggleTouchAdjust,
             onTouchAdjustTap = viewModel::onTouchAdjustTap,
@@ -807,79 +844,116 @@ private fun ImmersiveCanvasStage(
                 .padding(horizontal = 8.dp, vertical = 8.dp)
         )
 
-        // Tiny Frosted-Glass Histogram toggle at bottom-start corner (48dp touch target)
-        AnimatedVisibility(
-            visible = !isTouchAdjustPillVisible && !uiState.isSplitCompareEnabled && uiState.histogram != null,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 8.dp, bottom = 8.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = viewModel::toggleHistogram)
-                    .testTag("histogram_toggle_button"),
-                contentAlignment = Alignment.Center
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = StudioGlassSurface,
-                    shadowElevation = 6.dp,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .border(
-                            width = 1.dp,
-                            color = if (uiState.showHistogram) StudioActiveOffWhite.copy(alpha = 0.28f) else StudioGlassHairline,
-                            shape = CircleShape
-                        )
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = StudioIcons.HistogramBars,
-                            contentDescription = stringResource(R.string.cd_toggle_histogram),
-                            tint = if (uiState.showHistogram) StudioCinemaAmber else StudioMutedSlate,
-                            modifier = Modifier.size(22.dp)
-                        )
-                        if (uiState.showHistogram) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .padding(bottom = 5.dp)
-                                    .size(3.5.dp)
-                                    .clip(CircleShape)
-                                    .background(StudioCinemaAmber)
-                            )
-                        }
-                    }
-                }
+        // Unified OLED Floating Utility Pill centered at bottom of photo viewport:
+        // Touch Adjust, Histogram, Info HUD, Mask Overlay, Grid Toggle + Copy/Paste/Reset
+        var isGridSelectorOpen by remember { mutableStateOf(false) }
+        var showPhotoInfoHud by remember { mutableStateOf(false) }
+        val haptic = LocalHapticFeedback.current
+        LaunchedEffect(isTouchAdjustPillVisible) {
+            if (isTouchAdjustPillVisible) {
+                isGridSelectorOpen = false
+                showPhotoInfoHud = false
             }
         }
+        val activeGridMode = if (uiState.activeTab == StudioTab.CROP) {
+            uiState.effectiveCropGridMode
+        } else {
+            uiState.compositionGridMode
+        }
+        val hasMasksOrMaskTab = uiState.activeTab == StudioTab.MASK || uiState.gradingParams.masks.isNotEmpty()
+        val isMaskOverlayHighlighted = uiState.showMaskOverlay && hasMasksOrMaskTab
 
-        // Tiny On-Photo Frosted-Glass Utility Pill at Bottom-End Corner: Touch Adjust, Copy/Paste, Reset
         AnimatedVisibility(
             visible = !isTouchAdjustPillVisible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 10.dp, bottom = 10.dp)
+                .align(Alignment.BottomCenter)
+                .padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
         ) {
-            CornerUtilityPill(
-                canShowTouchAdjust = canShowTouchAdjust,
-                isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
-                canPasteEdits = uiState.canPasteEdits,
-                canReset = canReset,
-                onToggleTouchAdjust = viewModel::toggleTouchAdjust,
-                onCopyEdits = viewModel::copyEdits,
-                onPasteEdits = viewModel::pasteEdits,
-                onResetAll = viewModel::resetAllAdjustments
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                AnimatedVisibility(
+                    visible = isGridSelectorOpen,
+                    enter = fadeIn() + slideInVertically { it / 2 },
+                    exit = fadeOut() + slideOutVertically { it / 2 }
+                ) {
+                    CompositionGridSelectorPill(
+                        selectedMode = activeGridMode,
+                        spiralOrientation = uiState.spiralOrientation,
+                        onSelectMode = { mode ->
+                            viewModel.setCompositionGridMode(mode)
+                            if (mode == CompositionGridMode.OFF) {
+                                isGridSelectorOpen = false
+                            }
+                        },
+                        onFlipSpiral = viewModel::flipSpiralOrientation
+                    )
+                }
+
+                AnimatedVisibility(
+                    visible = showPhotoInfoHud && !isGridSelectorOpen,
+                    enter = fadeIn() + slideInVertically { it / 2 },
+                    exit = fadeOut() + slideOutVertically { it / 2 }
+                ) {
+                    PhotoInfoHudPill(
+                        fullWidth = uiState.fullWidth,
+                        fullHeight = uiState.fullHeight,
+                        photoFormatInfo = uiState.photoFormatInfo,
+                        appliedUpscaleFactor = uiState.appliedUpscaleFactor,
+                        maskCount = uiState.gradingParams.masks.size,
+                        activeLutTitle = uiState.activeLut?.title
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (activeGridMode == CompositionGridMode.GOLDEN_SPIRAL && !isGridSelectorOpen) {
+                        SpiralFlipPillButton(
+                            orientation = uiState.spiralOrientation,
+                            onFlip = viewModel::flipSpiralOrientation,
+                            testTag = "floating_spiral_flip_button"
+                        )
+                    }
+
+                    CornerUtilityPill(
+                        canShowTouchAdjust = canShowTouchAdjust,
+                        isTouchAdjustEnabled = uiState.isTouchAdjustEnabled,
+                        canShowHistogram = !uiState.isSplitCompareEnabled && uiState.histogram != null,
+                        isHistogramVisible = uiState.showHistogram,
+                        isPhotoInfoVisible = showPhotoInfoHud,
+                        isMaskOverlayActive = isMaskOverlayHighlighted,
+                        canToggleMaskOverlay = hasMasksOrMaskTab,
+                        isCompositionGridActive = activeGridMode != CompositionGridMode.OFF,
+                        isGridSelectorOpen = isGridSelectorOpen,
+                        canPasteEdits = uiState.canPasteEdits,
+                        canReset = canReset,
+                        onToggleTouchAdjust = viewModel::toggleTouchAdjust,
+                        onToggleHistogram = viewModel::toggleHistogram,
+                        onTogglePhotoInfo = {
+                            showPhotoInfoHud = !showPhotoInfoHud
+                            if (showPhotoInfoHud) isGridSelectorOpen = false
+                        },
+                        onToggleMaskOverlay = viewModel::toggleShowMaskOverlay,
+                        onToggleGridSelector = {
+                            isGridSelectorOpen = !isGridSelectorOpen
+                            if (isGridSelectorOpen) showPhotoInfoHud = false
+                        },
+                        onLongPressGridClear = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.clearCompositionGrid()
+                            isGridSelectorOpen = false
+                        },
+                        onCopyEdits = viewModel::copyEdits,
+                        onPasteEdits = viewModel::pasteEdits,
+                        onResetAll = viewModel::resetAllAdjustments
+                    )
+                }
+            }
         }
     }
 }
@@ -1228,16 +1302,133 @@ private fun TopFloatingGlassHeader(
 }
 
 /**
- * Tiny frosted-glass utility pill placed at the bottom-end corner of the photo canvas:
- * Touch Adjust toggle, Copy/Paste edits, and Reset.
+ * Compact OLED Photo Info HUD pill displayed directly above the floating utility pill
+ * when the user taps the Info icon.
  */
+@Composable
+private fun PhotoInfoHudPill(
+    fullWidth: Int,
+    fullHeight: Int,
+    photoFormatInfo: PhotoFormatInfo,
+    appliedUpscaleFactor: Int,
+    maskCount: Int,
+    activeLutTitle: String?,
+    modifier: Modifier = Modifier
+) {
+    val dimsText = if (fullWidth > 0 && fullHeight > 0) "${fullWidth}×${fullHeight}" else "—"
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = StudioGlassSurface,
+        shadowElevation = 8.dp,
+        modifier = modifier
+            .border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
+            .testTag("photo_info_hud_pill")
+    ) {
+        Row(
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            val formatLabel = photoFormatInfo.badgeLabel?.takeIf { it.isNotBlank() } ?: "PHOTO"
+            Text(
+                text = formatLabel,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp
+                ),
+                color = StudioCinemaAmber,
+                maxLines = 1,
+                softWrap = false
+            )
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(11.dp)
+                    .background(StudioGlassHairline)
+            )
+            Text(
+                text = dimsText,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFeatureSettings = "tnum"
+                ),
+                color = StudioCoolWhite,
+                maxLines = 1,
+                softWrap = false
+            )
+            if (appliedUpscaleFactor > 1) {
+                Text(
+                    text = "${appliedUpscaleFactor}× AI",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    ),
+                    color = StudioCinemaAmber,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+            if (maskCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(11.dp)
+                        .background(StudioGlassHairline)
+                )
+                Text(
+                    text = stringResource(R.string.info_hud_masks_count, maskCount),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StudioMutedSlate,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+            if (!activeLutTitle.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(11.dp)
+                        .background(StudioGlassHairline)
+                )
+                Text(
+                    text = activeLutTitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StudioMutedSlate,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Unified OLED dark-charcoal (#121214) floating rounded utility pill directly below the photo viewport:
+ * Touch Adjust, Histogram, Info HUD, Mask Overlay, Composition Grid toggle, plus Copy/Paste/Reset.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CornerUtilityPill(
     canShowTouchAdjust: Boolean,
     isTouchAdjustEnabled: Boolean,
+    canShowHistogram: Boolean,
+    isHistogramVisible: Boolean,
+    isPhotoInfoVisible: Boolean,
+    isMaskOverlayActive: Boolean,
+    canToggleMaskOverlay: Boolean,
+    isCompositionGridActive: Boolean,
+    isGridSelectorOpen: Boolean,
     canPasteEdits: Boolean,
     canReset: Boolean,
     onToggleTouchAdjust: () -> Unit,
+    onToggleHistogram: () -> Unit,
+    onTogglePhotoInfo: () -> Unit,
+    onToggleMaskOverlay: () -> Unit,
+    onToggleGridSelector: () -> Unit,
+    onLongPressGridClear: () -> Unit,
     onCopyEdits: () -> Unit,
     onPasteEdits: () -> Unit,
     onResetAll: () -> Unit,
@@ -1246,13 +1437,15 @@ private fun CornerUtilityPill(
     Surface(
         shape = RoundedCornerShape(50),
         color = StudioGlassSurface,
-        shadowElevation = 6.dp,
+        shadowElevation = 8.dp,
         modifier = modifier
             .border(1.dp, StudioGlassHairline, RoundedCornerShape(50))
             .testTag("floating_utility_pill")
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(1.dp)
         ) {
@@ -1266,13 +1459,58 @@ private fun CornerUtilityPill(
                     testTag = "touch_adjust_toggle_button",
                     onClick = onToggleTouchAdjust
                 )
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .height(15.dp)
-                        .background(StudioGlassHairline)
+            }
+
+            if (canShowHistogram) {
+                CornerPillIconButton(
+                    icon = StudioIcons.HistogramBars,
+                    contentDescription = stringResource(R.string.cd_toggle_histogram),
+                    active = isHistogramVisible,
+                    showGoldDot = isHistogramVisible,
+                    enabled = true,
+                    testTag = "histogram_toggle_button",
+                    onClick = onToggleHistogram
                 )
             }
+
+            CornerPillIconButton(
+                icon = Icons.Outlined.Info,
+                contentDescription = stringResource(R.string.cd_toggle_photo_info),
+                active = isPhotoInfoVisible,
+                showGoldDot = isPhotoInfoVisible,
+                enabled = true,
+                testTag = "photo_info_toggle_button",
+                onClick = onTogglePhotoInfo
+            )
+
+            CornerPillIconButton(
+                icon = StudioIcons.TabMasks,
+                contentDescription = stringResource(R.string.cd_toggle_mask_overlay_quick),
+                active = isMaskOverlayActive,
+                showGoldDot = isMaskOverlayActive,
+                enabled = canToggleMaskOverlay,
+                testTag = "mask_overlay_quick_toggle_button",
+                onClick = onToggleMaskOverlay
+            )
+
+            CornerPillIconButton(
+                icon = StudioIcons.CompositionGrid,
+                contentDescription = stringResource(R.string.cd_composition_grid_toggle),
+                active = isCompositionGridActive || isGridSelectorOpen,
+                showGoldDot = isCompositionGridActive,
+                enabled = true,
+                testTag = "composition_grid_button",
+                onClick = onToggleGridSelector,
+                onLongClick = onLongPressGridClear
+            )
+
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 2.dp)
+                    .width(1.dp)
+                    .height(15.dp)
+                    .background(StudioGlassHairline)
+            )
 
             CornerPillIconButton(
                 icon = Icons.Default.ContentCopy,
@@ -1294,13 +1532,6 @@ private fun CornerUtilityPill(
                 onClick = onPasteEdits
             )
 
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(15.dp)
-                    .background(StudioGlassHairline)
-            )
-
             CornerPillIconButton(
                 icon = StudioIcons.ResetArc,
                 contentDescription = stringResource(R.string.cd_reset_adjustments),
@@ -1314,6 +1545,7 @@ private fun CornerUtilityPill(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CornerPillIconButton(
     icon: ImageVector,
@@ -1322,19 +1554,29 @@ private fun CornerPillIconButton(
     showGoldDot: Boolean,
     enabled: Boolean,
     testTag: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     val tint = when {
         !enabled -> StudioTextMuted.copy(alpha = 0.42f)
-        active -> StudioActiveOffWhite
+        active -> StudioCinemaAmber
         else -> StudioTextSecondary
+    }
+    val clickModifier = if (onLongClick != null) {
+        Modifier.combinedClickable(
+            enabled = enabled,
+            onClick = onClick,
+            onLongClick = onLongClick
+        )
+    } else {
+        Modifier.clickable(enabled = enabled, onClick = onClick)
     }
     Box(
         modifier = Modifier
             .size(48.dp)
             .clip(CircleShape)
-            .background(if (active && enabled) StudioGlassHighlight else Color.Transparent)
-            .clickable(enabled = enabled, onClick = onClick)
+            .background(if (active && enabled) StudioAmberPillFill else Color.Transparent)
+            .then(clickModifier)
             .testTag(testTag),
         contentAlignment = Alignment.Center
     ) {
@@ -1342,7 +1584,7 @@ private fun CornerPillIconButton(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = tint,
-            modifier = Modifier.size(17.dp)
+            modifier = Modifier.size(18.dp)
         )
         if (showGoldDot && enabled) {
             Box(
@@ -1351,7 +1593,7 @@ private fun CornerPillIconButton(
                     .padding(bottom = 7.dp)
                     .size(3.5.dp)
                     .clip(CircleShape)
-                    .background(StudioLuxuryGold)
+                    .background(StudioCinemaAmber)
             )
         }
     }
@@ -1401,6 +1643,30 @@ private fun ActiveToolPanel(
             onResetAnamorphicStreak = viewModel::resetAnamorphicStreak
         )
 
+        StudioTab.UPSCALE -> UpscalePanel(
+            selectedScale = uiState.upscaleScale,
+            currentWidth = uiState.fullWidth,
+            currentHeight = uiState.fullHeight,
+            isProcessing = uiState.isUpscaling,
+            progress = uiState.upscaleProgress,
+            isAiModelAvailable = uiState.isUpscaleAiModelAvailable,
+            onSelectScale = viewModel::selectUpscaleScale,
+            onApplyUpscale = viewModel::applyUpscale
+        )
+
+        StudioTab.DENOISE -> DenoisePanel(
+            params = uiState.gradingParams,
+            isComparingOriginal = uiState.isComparingOriginal,
+            isSplitCompareEnabled = uiState.isSplitCompareEnabled,
+            isProcessing = uiState.isDenoiseProcessing,
+            progress = uiState.denoiseProgress,
+            onSelectPreset = viewModel::applyDenoisePreset,
+            onParamsChange = viewModel::updateGradingParams,
+            onDraggingChanged = viewModel::setSliderDragging,
+            onCompareChanged = viewModel::setComparingOriginal,
+            onToggleSplitCompare = viewModel::toggleSplitCompare
+        )
+
         StudioTab.LUTS -> LutPanel(
             folders = uiState.lutFolders,
             selectedLutId = uiState.selectedLutId,
@@ -1425,7 +1691,11 @@ private fun ActiveToolPanel(
         StudioTab.CROP -> CropPanel(
             crop = uiState.gradingParams.crop,
             overlayMode = uiState.cropOverlayMode,
+            compositionGridMode = uiState.effectiveCropGridMode,
+            spiralOrientation = uiState.spiralOrientation,
             onOverlayModeChange = viewModel::setCropOverlayMode,
+            onSelectCompositionGrid = viewModel::setCompositionGridMode,
+            onFlipSpiralOrientation = viewModel::flipSpiralOrientation,
             onAspectPresetSelect = viewModel::selectCropAspectPreset,
             onToggleAspectLock = viewModel::toggleCropAspectLocked,
             onSwapAspect = viewModel::swapCropAspect,
@@ -1471,9 +1741,24 @@ private fun ActiveToolPanel(
         StudioTab.MASK -> MaskPanel(
             masks = uiState.gradingParams.masks,
             activeMask = uiState.activeMask,
+            activeSubMask = uiState.activeSubMask,
             showMaskOverlay = uiState.showMaskOverlay,
+            activeEyedropperMode = uiState.activeEyedropperMode,
+            maskBrushRadius = uiState.maskBrushRadius,
+            maskBrushHardness = uiState.maskBrushHardness,
+            maskBrushFlow = uiState.maskBrushFlow,
             onAddMask = viewModel::addLocalMask,
             onSelectMask = { viewModel.selectMask(it) },
+            onSelectSubMask = { viewModel.selectSubMask(it) },
+            onAddSubMask = viewModel::addSubMask,
+            onDeleteSubMask = viewModel::deleteSubMask,
+            onSetSubMaskOp = viewModel::setSubMaskBooleanOp,
+            onUpdateSubMask = { maskId, subId, fn -> viewModel.updateSubMask(maskId, subId, false, fn) },
+            onClearBrushStrokes = viewModel::clearBrushStrokes,
+            onUpdateBrushSettings = viewModel::updateMaskBrushSettings,
+            onToggleColorRangeEyedropper = {
+                viewModel.toggleEyedropperMode(com.zamalfajji.zamlab.editor.EyedropperMode.MASK_COLOR_RANGE)
+            },
             onUpdateMask = viewModel::updateMask,
             onToggleMaskEnabled = viewModel::toggleMaskEnabled,
             onToggleMaskInverted = viewModel::toggleMaskInverted,
@@ -1485,8 +1770,8 @@ private fun ActiveToolPanel(
 }
 
 /**
- * Compact 6-tab floating frosted-glass capsule bottom navigation:
- * Adjust | All | LUTs | Crop | Heal | Masks.
+ * Compact 8-tab floating frosted-glass capsule bottom navigation:
+ * Adjust | All | Upscale | Denoise | LUTs | Crop | Heal | Masks.
  */
 @Composable
 private fun FloatingCapsuleNavDock(
@@ -1497,6 +1782,8 @@ private fun FloatingCapsuleNavDock(
     val capsuleShape = RoundedCornerShape(34.dp)
     val gp = uiState.gradingParams
     val hasAdjustEdits = gp.hasLightEdits || gp.hasColorEdits || gp.hasEffectsEdits || gp.hasDetailEdits || gp.hasProfileEdits
+    val hasUpscaleEdits = uiState.hasUpscaleEdits
+    val hasDenoiseEdits = gp.hasDenoiseEdits
     val hasLutEdits = uiState.selectedLutId != null || uiState.selectedUserPresetId != null
     val hasCropEdits = !gp.crop.isDefault
     val hasHealEdits = uiState.hasHealEdits
@@ -1512,7 +1799,7 @@ private fun FloatingCapsuleNavDock(
             .testTag("floating_capsule_nav")
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val useHorizontalScroll = maxWidth < 388.dp
+            val useHorizontalScroll = maxWidth < 520.dp
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1554,6 +1841,26 @@ private fun FloatingCapsuleNavDock(
                     hasEdits = hasAdjustEdits,
                     testTag = "tab_all",
                     onClick = { onSelectTab(StudioTab.ALL) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_upscale),
+                    selectedIcon = StudioIcons.TabUpscale,
+                    unselectedIcon = StudioIcons.TabUpscale,
+                    selected = uiState.activeTab == StudioTab.UPSCALE,
+                    hasEdits = hasUpscaleEdits,
+                    testTag = "tab_upscale",
+                    onClick = { onSelectTab(StudioTab.UPSCALE) },
+                    modifier = itemModifier
+                )
+                CapsuleNavTabItem(
+                    label = stringResource(R.string.tab_denoise),
+                    selectedIcon = StudioIcons.TabDenoise,
+                    unselectedIcon = StudioIcons.TabDenoise,
+                    selected = uiState.activeTab == StudioTab.DENOISE,
+                    hasEdits = hasDenoiseEdits,
+                    testTag = "tab_denoise",
+                    onClick = { onSelectTab(StudioTab.DENOISE) },
                     modifier = itemModifier
                 )
                 CapsuleNavTabItem(

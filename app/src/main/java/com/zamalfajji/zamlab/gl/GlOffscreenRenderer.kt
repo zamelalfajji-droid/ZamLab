@@ -70,36 +70,69 @@ object GlOffscreenRenderer {
         var surface: EGLSurface = EGL14.EGL_NO_SURFACE
         var toneProgram = 0
         var spatialProgram = 0
-        val textures = IntArray(4)
+        var maskPipeline: GlMaskPipeline? = null
+        val textures = IntArray(5)
         val fbos = IntArray(1)
         var packedLut: GlGradingShaders.PackedLutTexture? = null
         var curveBmp: Bitmap? = null
 
         try {
-            val attribList = intArrayOf(
+            val eglEs3Bit = 0x0040 // EGL_OPENGL_ES3_BIT_KHR
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val numConfigs = IntArray(1)
+            var config: EGLConfig? = null
+            var isEs3 = false
+
+            val attribListEs3 = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RENDERABLE_TYPE, eglEs3Bit,
                 EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
                 EGL14.EGL_NONE
             )
-            val configs = arrayOfNulls<EGLConfig>(1)
-            val numConfigs = IntArray(1)
-            if (!EGL14.eglChooseConfig(display, attribList, 0, configs, 0, 1, numConfigs, 0)) {
-                return null
+            if (EGL14.eglChooseConfig(display, attribListEs3, 0, configs, 0, 1, numConfigs, 0) &&
+                numConfigs[0] > 0 && configs[0] != null
+            ) {
+                val ctx3 = EGL14.eglCreateContext(
+                    display,
+                    configs[0],
+                    EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE),
+                    0
+                )
+                if (ctx3 != null && ctx3 != EGL14.EGL_NO_CONTEXT) {
+                    config = configs[0]
+                    context = ctx3
+                    isEs3 = true
+                }
             }
-            val config = configs[0] ?: return null
 
-            context = EGL14.eglCreateContext(
-                display,
-                config,
-                EGL14.EGL_NO_CONTEXT,
-                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
-                0
-            )
-            if (context == EGL14.EGL_NO_CONTEXT) return null
+            if (config == null || context == EGL14.EGL_NO_CONTEXT) {
+                val attribList = intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                    EGL14.EGL_NONE
+                )
+                if (!EGL14.eglChooseConfig(display, attribList, 0, configs, 0, 1, numConfigs, 0)) {
+                    return null
+                }
+                config = configs[0] ?: return null
+                context = EGL14.eglCreateContext(
+                    display,
+                    config,
+                    EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
+                    0
+                )
+                if (context == EGL14.EGL_NO_CONTEXT) return null
+                isEs3 = false
+            }
 
             surface = EGL14.eglCreatePbufferSurface(
                 display,
@@ -129,7 +162,7 @@ object GlOffscreenRenderer {
             val sHandles = GlGradingShaders.SpatialFinishUniformHandles(spatialProgram)
             val quadBuffer = GlGradingShaders.createQuadBuffer(readbackFlipY = true)
 
-            GLES20.glGenTextures(4, textures, 0)
+            GLES20.glGenTextures(5, textures, 0)
             GlGradingShaders.uploadTexture(textures[0], source)
 
             if (effectiveLut != null) {
@@ -148,6 +181,9 @@ object GlOffscreenRenderer {
                 GlGradingShaders.uploadTexture(textures[2], dummyCurve)
                 dummyCurve.recycle()
             }
+            val dummyMask = createBitmap(1, 1)
+            GlGradingShaders.uploadTexture(textures[4], dummyMask)
+            dummyMask.recycle()
 
             // Allocate Pass-1 offscreen FBO texture (outW x outH)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
@@ -211,6 +247,25 @@ object GlOffscreenRenderer {
             GLES20.glDisableVertexAttribArray(tHandles.aPosition)
             GLES20.glDisableVertexAttribArray(tHandles.aTexCoord)
 
+            // PASS 1.5: Multi-pass GPU Masking Pipeline (full-resolution vector masks + Guided Filter)
+            var gradedForPass2TexId = textures[3]
+            if (params.masks.any { it.enabled && it.hasAdjustments }) {
+                val mp = GlMaskPipeline(isEs3 = isEs3)
+                maskPipeline = mp
+                if (mp.initialize()) {
+                    val res = mp.processMasks(
+                        inputPhotoTexId = textures[3],
+                        masks = params.masks,
+                        activeMaskId = null,
+                        captureOverlay = false,
+                        fboWidth = outW,
+                        fboHeight = outH,
+                        quadBuffer = quadBuffer
+                    )
+                    gradedForPass2TexId = res.gradedPhotoTexId
+                }
+            }
+
             // PASS 2: Spatial Detail (Step 6) + Finishing -> Pbuffer (default FBO 0)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, outW, outH)
@@ -221,6 +276,7 @@ object GlOffscreenRenderer {
             GLES20.glUniform1i(sHandles.uGradedTex, 0)
             GLES20.glUniform1i(sHandles.uLutTex, 1)
             GLES20.glUniform1i(sHandles.uRawTex, 2)
+            GLES20.glUniform1i(sHandles.uMaskOverlayTex, 3)
 
             quadBuffer.position(0)
             GLES20.glEnableVertexAttribArray(sHandles.aPosition)
@@ -230,11 +286,13 @@ object GlOffscreenRenderer {
             GLES20.glVertexAttribPointer(sHandles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, quadBuffer)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3])
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, gradedForPass2TexId)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[1])
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0])
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[4])
 
             GlGradingShaders.bindSpatialFinishUniforms(
                 handles = sHandles,
@@ -247,7 +305,8 @@ object GlOffscreenRenderer {
                 imageHeight = source.height,
                 isOriginal = false,
                 splitRatio = -1f,
-                applyCrop = true
+                applyCrop = true,
+                showMaskOverlay = false
             )
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glDisableVertexAttribArray(sHandles.aPosition)
@@ -263,6 +322,7 @@ object GlOffscreenRenderer {
             return outBitmap
         } finally {
             try {
+                maskPipeline?.release()
                 if (toneProgram != 0) GLES20.glDeleteProgram(toneProgram)
                 if (spatialProgram != 0) GLES20.glDeleteProgram(spatialProgram)
                 if (textures.any { it != 0 }) GLES20.glDeleteTextures(textures.size, textures, 0)

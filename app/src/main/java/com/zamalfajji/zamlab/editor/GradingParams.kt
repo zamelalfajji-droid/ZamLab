@@ -407,10 +407,63 @@ enum class VignetteStyle(val label: String, val shaderIndex: Int) {
 
 enum class MaskType(val label: String, val shaderType: Int) {
     RADIAL("Radial", 0),
-    LINEAR("Linear", 1)
+    LINEAR("Linear", 1),
+    BRUSH("Brush", 2),
+    LUMINANCE_RANGE("Luminance Range", 3),
+    COLOR_RANGE("Color Range", 4)
 }
 
+enum class MaskBooleanOp(val label: String, val symbol: String, val shaderOp: Int) {
+    ADD("Add", "+", 0),
+    SUBTRACT("Subtract", "−", 1),
+    INTERSECT("Intersect", "∩", 2)
+}
+
+@Immutable
+data class MaskBrushStroke(
+    val id: String,
+    val points: List<Pair<Float, Float>> = emptyList(),
+    val radius: Float = 0.06f,      // Normalized UV radius
+    val hardness: Float = 0.50f,    // 0.0 (soft) .. 1.0 (hard)
+    val flow: Float = 1.0f          // 0.0 .. 1.0
+)
+
+@Immutable
+data class MaskSubMask(
+    val id: String,
+    val name: String,
+    val type: MaskType,
+    val op: MaskBooleanOp = MaskBooleanOp.ADD,
+    val enabled: Boolean = true,
+    // Radial gradient geometry in normalized output view UV [0..1]
+    val centerX: Float = 0.5f,
+    val centerY: Float = 0.5f,
+    val radiusX: Float = 0.28f,
+    val radiusY: Float = 0.28f,
+    val rotationDeg: Float = 0f,
+    val feather: Float = 0.50f,
+    // Linear gradient geometry in normalized output view UV [0..1]
+    val startX: Float = 0.5f,
+    val startY: Float = 0.16f,
+    val endX: Float = 0.5f,
+    val endY: Float = 0.62f,
+    // Vector Brush strokes in normalized output view UV [0..1]
+    val strokes: List<MaskBrushStroke> = emptyList(),
+    // Luminance Range (Rec. 709)
+    val lumMin: Float = 0.50f,
+    val lumMax: Float = 1.0f,
+    val lumFalloff: Float = 0.12f,
+    // Color Range (CIELAB)
+    val targetR: Float = 0.5f,
+    val targetG: Float = 0.5f,
+    val targetB: Float = 0.5f,
+    val colorTolerance: Float = 24f,
+    val colorSmoothness: Float = 0.35f,
+    val colorSampled: Boolean = false
+)
+
 const val MAX_LOCAL_MASKS = 4
+const val MAX_SUB_MASKS_PER_LAYER = 8
 
 @Immutable
 data class LocalMask(
@@ -433,16 +486,55 @@ data class LocalMask(
     // Independent local adjustments
     val exposure: Float = 0f,       // -2.0 .. +2.0 EV
     val contrast: Float = 0f,       // -100 .. +100
-    val warmth: Float = 0f,         // -100 .. +100
+    val warmth: Float = 0f,         // -100 .. +100 (legacy alias for temperature)
     val saturation: Float = 0f,     // -100 .. +100
-    val sharpness: Float = 0f       // 0 .. +100
+    val sharpness: Float = 0f,      // 0 .. +100
+    // Extended local mask controls & boolean sub-mask stack
+    val rotationDeg: Float = 0f,    // -180 .. +180 degrees
+    val edgeSnap: Float = 0f,       // 0 .. 100 (Guided Image Filter edge-aware feathering)
+    val subMasks: List<MaskSubMask> = emptyList(),
+    val highlights: Float = 0f,     // -100 .. +100
+    val shadows: Float = 0f,        // -100 .. +100
+    val temperature: Float = 0f,    // -100 .. +100
+    val tint: Float = 0f,           // -100 .. +100
+    val clarity: Float = 0f         // -100 .. +100
 ) {
+    val effectiveTemperature: Float
+        get() = if (abs(temperature) > 0.001f) temperature else warmth
+
     val hasAdjustments: Boolean
         get() = abs(exposure) > 0.001f ||
             abs(contrast) > 0.01f ||
-            abs(warmth) > 0.01f ||
+            abs(highlights) > 0.01f ||
+            abs(shadows) > 0.01f ||
+            abs(effectiveTemperature) > 0.01f ||
+            abs(tint) > 0.01f ||
             abs(saturation) > 0.01f ||
-            sharpness > 0.01f
+            sharpness > 0.01f ||
+            abs(clarity) > 0.01f
+
+    fun resolvedSubMasks(): List<MaskSubMask> {
+        if (subMasks.isNotEmpty()) return subMasks
+        return listOf(
+            MaskSubMask(
+                id = "${id}_root",
+                name = name,
+                type = type,
+                op = MaskBooleanOp.ADD,
+                enabled = enabled,
+                centerX = centerX,
+                centerY = centerY,
+                radiusX = radiusX,
+                radiusY = radiusY,
+                rotationDeg = rotationDeg,
+                feather = feather,
+                startX = startX,
+                startY = startY,
+                endX = endX,
+                endY = endY
+            )
+        )
+    }
 }
 
 /**
@@ -478,6 +570,22 @@ fun evaluateLocalMaskWeight(mask: LocalMask, u: Float, v: Float, aspect: Float):
         w = 1f - w
     }
     return w.coerceIn(0f, 1f)
+}
+
+enum class DenoisePreset(
+    val label: String,
+    val luminance: Float,
+    val detail: Float,
+    val contrast: Float,
+    val color: Float,
+    val smoothness: Float,
+    val useAiModel: Boolean = false
+) {
+    OFF("Off", 0f, 50f, 0f, 0f, 50f, false),
+    SUBTLE("Subtle", 18f, 62f, 6f, 25f, 50f, false),
+    NATURAL("Natural", 36f, 55f, 15f, 25f, 50f, false),
+    HIGH_ISO_NIGHT("High ISO / Night", 68f, 42f, 26f, 58f, 68f, false),
+    AI_CLEAN("AI Clean", 52f, 68f, 22f, 40f, 62f, true)
 }
 
 @Immutable
@@ -540,6 +648,7 @@ data class GradingParams(
     val colorNoiseReduction: Float = 0f,           // 0 .. 100
     val colorNoiseReductionDetail: Float = 50f,    // 0 .. 100
     val colorNoiseReductionSmoothness: Float = 50f,// 0 .. 100
+    val denoiseAiClean: Boolean = false,
 
     // Optics
     val lensDistortion: Float = 0f,       // -100 .. +100
@@ -609,8 +718,11 @@ data class GradingParams(
             chromaticAberration != 0f ||
             anamorphicStreak > 0f
 
+    val hasDenoiseEdits: Boolean
+        get() = noiseReduction > 0f || colorNoiseReduction > 0f || denoiseAiClean
+
     val hasDetailEdits: Boolean
-        get() = sharpening > 0f || noiseReduction > 0f || colorNoiseReduction > 0f
+        get() = sharpening > 0f || hasDenoiseEdits
 
     val hasOpticsEdits: Boolean
         get() = lensDistortion != 0f
@@ -696,8 +808,27 @@ data class GradingParams(
         noiseReductionContrast = 0f,
         colorNoiseReduction = 0f,
         colorNoiseReductionDetail = 50f,
-        colorNoiseReductionSmoothness = 50f
+        colorNoiseReductionSmoothness = 50f,
+        denoiseAiClean = false
     )
+
+    fun applyDenoisePreset(preset: DenoisePreset): GradingParams = copy(
+        noiseReduction = preset.luminance,
+        noiseReductionDetail = preset.detail,
+        noiseReductionContrast = preset.contrast,
+        colorNoiseReduction = preset.color,
+        colorNoiseReductionSmoothness = preset.smoothness,
+        denoiseAiClean = preset.useAiModel
+    )
+
+    fun activeDenoisePreset(): DenoisePreset? = DenoisePreset.entries.firstOrNull { preset ->
+        abs(noiseReduction - preset.luminance) <= 0.5f &&
+            abs(noiseReductionDetail - preset.detail) <= 0.5f &&
+            abs(noiseReductionContrast - preset.contrast) <= 0.5f &&
+            abs(colorNoiseReduction - preset.color) <= 0.5f &&
+            abs(colorNoiseReductionSmoothness - preset.smoothness) <= 0.5f &&
+            denoiseAiClean == preset.useAiModel
+    }
 
     fun resetOptics(): GradingParams = copy(
         lensDistortion = 0f

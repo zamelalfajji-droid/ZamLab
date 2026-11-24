@@ -2004,7 +2004,7 @@ private fun ClassicPrecisionSliderRow(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
                 .doubleTapToReset(onDoubleTapReset = onReset)
-                .padding(vertical = 1.dp),
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -2018,16 +2018,17 @@ private fun ClassicPrecisionSliderRow(
                 Icon(
                     imageVector = tool.icon,
                     contentDescription = null,
-                    tint = if (isModified) StudioActiveOffWhite else StudioTextSecondary,
+                    tint = if (isModified) StudioCinemaAmber else StudioActiveOffWhite.copy(alpha = 0.78f),
                     modifier = Modifier.size(13.dp)
                 )
                 Text(
                     text = tool.label,
                     style = MaterialTheme.typography.labelMedium.copy(
                         fontSize = 12.sp,
-                        fontWeight = if (isModified) FontWeight.SemiBold else FontWeight.Medium
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.2.sp
                     ),
-                    color = if (isModified) StudioActiveOffWhite else StudioTextSecondary,
+                    color = if (isModified) StudioActiveOffWhite else StudioActiveOffWhite.copy(alpha = 0.88f),
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis,
@@ -2036,15 +2037,15 @@ private fun ClassicPrecisionSliderRow(
                 if (isModified) {
                     Box(
                         modifier = Modifier
-                            .size(4.5.dp)
+                            .size(5.dp)
                             .clip(CircleShape)
-                            .background(StudioLuxuryGold)
+                            .background(StudioCinemaAmber)
                     )
                 }
             }
 
             Surface(
-                shape = RoundedCornerShape(6.dp),
+                shape = RoundedCornerShape(8.dp),
                 color = if (isModified) {
                     StudioAmberPillFill
                 } else {
@@ -2053,8 +2054,8 @@ private fun ClassicPrecisionSliderRow(
                 modifier = Modifier
                     .border(
                         width = 1.dp,
-                        color = if (isModified) StudioCinemaAmber.copy(alpha = 0.65f) else StudioHairline,
-                        shape = RoundedCornerShape(6.dp)
+                        color = if (isModified) StudioCinemaAmber.copy(alpha = 0.72f) else StudioHairline,
+                        shape = RoundedCornerShape(8.dp)
                     )
                     .testTag("all_${tool.testTag}_value")
             ) {
@@ -2062,13 +2063,13 @@ private fun ClassicPrecisionSliderRow(
                     text = formatted,
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
+                        fontWeight = FontWeight.Bold,
                         fontFeatureSettings = "tnum"
                     ),
                     color = if (isModified) StudioCoolWhite else StudioMutedSlate,
                     maxLines = 1,
                     softWrap = false,
-                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                 )
             }
         }
@@ -2077,7 +2078,7 @@ private fun ClassicPrecisionSliderRow(
             value = value,
             valueRange = tool.valueRange,
             step = tool.step,
-            accentColor = if (isModified) StudioCinemaAmber else StudioMutedSlate,
+            accentColor = StudioCinemaAmber,
             gradientColors = gradientForTool(tool),
             compact = true,
             testTag = "all_${tool.testTag}",

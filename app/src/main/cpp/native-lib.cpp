@@ -15,7 +15,7 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_zamalfajji_zamlab_nativebridge_NativeBridge_getEngineVersion(
         JNIEnv* env,
         jobject /* this */) {
-    std::string info = "ZamLab Native C++ Engine (16-bit TIFF + Fast Heal + Histogram)";
+    std::string info = "Z-Effect Native C++ Engine (16-bit TIFF + Fast Heal + Histogram)";
     return env->NewStringUTF(info.c_str());
 }
 

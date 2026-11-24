@@ -81,7 +81,7 @@ enum class ExportFormat(
         extension = "jpg",
         supportsQuality = true,
         defaultSaveLabel = "Export to Gallery",
-        defaultFolderDescription = "Pictures/ZamLab",
+        defaultFolderDescription = "Pictures/Z-Effect",
         isDownloadsDestination = false
     ),
     PNG(
@@ -91,7 +91,7 @@ enum class ExportFormat(
         extension = "png",
         supportsQuality = false,
         defaultSaveLabel = "Export to Gallery",
-        defaultFolderDescription = "Pictures/ZamLab",
+        defaultFolderDescription = "Pictures/Z-Effect",
         isDownloadsDestination = false
     ),
     WEBP(
@@ -101,7 +101,7 @@ enum class ExportFormat(
         extension = "webp",
         supportsQuality = true,
         defaultSaveLabel = "Export to Gallery",
-        defaultFolderDescription = "Pictures/ZamLab",
+        defaultFolderDescription = "Pictures/Z-Effect",
         isDownloadsDestination = false
     ),
     TIFF(
@@ -111,7 +111,7 @@ enum class ExportFormat(
         extension = "tiff",
         supportsQuality = false,
         defaultSaveLabel = "Export to Downloads",
-        defaultFolderDescription = "Downloads/ZamLab",
+        defaultFolderDescription = "Downloads/Z-Effect",
         isDownloadsDestination = true
     ),
 
@@ -122,7 +122,7 @@ enum class ExportFormat(
         extension = "pdf",
         supportsQuality = false,
         defaultSaveLabel = "Export to Downloads",
-        defaultFolderDescription = "Downloads/ZamLab",
+        defaultFolderDescription = "Downloads/Z-Effect",
         isDownloadsDestination = true
     );
 
@@ -1113,13 +1113,13 @@ object ImageIoHelper {
 
     fun generateExportFilename(format: ExportFormat): String {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        return "ZamLab_$stamp.${format.extension}"
+        return "Z-Effect_$stamp.${format.extension}"
     }
 
     /**
      * Immediately writes the rendered bitmap to public device storage via [MediaStore]:
-     * - JPG, PNG, WebP -> `Pictures/ZamLab` via [MediaStore.Images.Media.EXTERNAL_CONTENT_URI]
-     * - PDF, 16-bit TIFF -> `Downloads/ZamLab` via [MediaStore.Downloads.EXTERNAL_CONTENT_URI] (API 29+)
+     * - JPG, PNG, WebP -> `Pictures/Z-Effect` via [MediaStore.Images.Media.EXTERNAL_CONTENT_URI]
+     * - PDF, 16-bit TIFF -> `Downloads/Z-Effect` via [MediaStore.Downloads.EXTERNAL_CONTENT_URI] (API 29+)
      *
      * Sets `IS_PENDING = 1` during encoding and publishes with `IS_PENDING = 0` upon completion,
      * returning the newly created public `content://` [Uri] inside [ExportSaveResult].
@@ -1139,13 +1139,13 @@ object ImageIoHelper {
                 } else {
                     MediaStore.Files.getContentUri("external")
                 }
-                Triple(collection, "${Environment.DIRECTORY_DOWNLOADS}/ZamLab", "Downloads/ZamLab")
+                Triple(collection, "${Environment.DIRECTORY_DOWNLOADS}/Z-Effect", "Downloads/Z-Effect")
             }
             ExportFormat.JPG, ExportFormat.PNG, ExportFormat.WEBP -> {
                 Triple(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    "${Environment.DIRECTORY_PICTURES}/ZamLab",
-                    "Pictures/ZamLab"
+                    "${Environment.DIRECTORY_PICTURES}/Z-Effect",
+                    "Pictures/Z-Effect"
                 )
             }
         }

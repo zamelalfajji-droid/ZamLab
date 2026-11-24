@@ -14,10 +14,10 @@ import org.junit.Test
 class XmpNativePresetUnitTest {
 
     @Test
-    fun studioTabEnumHasExactlySixNonAiTabs() {
+    fun studioTabEnumHasExpectedTabOrderWithUpscaleAndDenoise() {
         val names = StudioTab.entries.map { it.name }
         assertEquals(
-            listOf("ADJUST", "ALL", "LUTS", "CROP", "HEAL", "MASK"),
+            listOf("ADJUST", "ALL", "UPSCALE", "DENOISE", "LUTS", "CROP", "HEAL", "MASK"),
             names
         )
         assertFalse(names.contains("AI"))

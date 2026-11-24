@@ -47,6 +47,7 @@ object OfflineHealEngine {
 
     const val DEFAULT_FEATHER = 0.50f
     const val DEFAULT_OPACITY = 1.0f
+    const val SPOT_HEAL_FALLBACK_FEATHER_PX = LocalInpaintingEngine.FALLBACK_BOUNDARY_FEATHER_PX
 
     fun brushSizePxToRadiusNorm(sizePx: Float): Float {
         return (sizePx.coerceIn(MIN_BRUSH_SIZE_PX, MAX_BRUSH_SIZE_PX) / 1000f)
@@ -66,7 +67,12 @@ object OfflineHealEngine {
         }
         return when (stroke.mode) {
             HealMode.SPOT_HEAL -> {
-                LocalInpaintingEngine.inpaint(sourceBitmap, listOf(stroke), context)
+                LocalInpaintingEngine.inpaint(
+                    sourceBitmap = sourceBitmap,
+                    strokes = listOf(stroke),
+                    context = context,
+                    fallbackBoundaryFeatherPx = SPOT_HEAL_FALLBACK_FEATHER_PX
+                )
             }
 
             HealMode.CLONE_STAMP -> applyCloneStamp(sourceBitmap, stroke)

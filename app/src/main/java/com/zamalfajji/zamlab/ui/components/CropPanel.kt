@@ -73,21 +73,29 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zamalfajji.zamlab.R
+import com.zamalfajji.zamlab.editor.CompositionGridMode
 import com.zamalfajji.zamlab.editor.CropAspectPreset
 import com.zamalfajji.zamlab.editor.CropGeometryParams
 import com.zamalfajji.zamlab.editor.CropOverlayMode
+import com.zamalfajji.zamlab.editor.SpiralOrientation
+import com.zamalfajji.zamlab.editor.toCompositionGridMode
 import com.zamalfajji.zamlab.ui.theme.StudioActiveOffWhite
 import com.zamalfajji.zamlab.ui.theme.StudioAmber
+import com.zamalfajji.zamlab.ui.theme.StudioAmberPillFill
 import com.zamalfajji.zamlab.ui.theme.StudioBorder
 import com.zamalfajji.zamlab.ui.theme.StudioBorderSubtle
+import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCyan
 import com.zamalfajji.zamlab.ui.theme.StudioGlassHairline
 import com.zamalfajji.zamlab.ui.theme.StudioGlassSurface
+import com.zamalfajji.zamlab.ui.theme.StudioGraphite
+import com.zamalfajji.zamlab.ui.theme.StudioHairline
 import com.zamalfajji.zamlab.ui.theme.StudioObsidian
 import com.zamalfajji.zamlab.ui.theme.StudioSurface
 import com.zamalfajji.zamlab.ui.theme.StudioSurfaceElevated
@@ -103,7 +111,11 @@ import kotlin.math.roundToInt
 fun CropPanel(
     crop: CropGeometryParams,
     overlayMode: CropOverlayMode,
+    compositionGridMode: CompositionGridMode = overlayMode.toCompositionGridMode(),
+    spiralOrientation: SpiralOrientation = SpiralOrientation.BOTTOM_RIGHT,
     onOverlayModeChange: (CropOverlayMode) -> Unit,
+    onSelectCompositionGrid: (CompositionGridMode) -> Unit = { onOverlayModeChange(it.toCropOverlayMode()) },
+    onFlipSpiralOrientation: () -> Unit = {},
     onAspectPresetSelect: (CropAspectPreset) -> Unit,
     onToggleAspectLock: () -> Unit,
     onSwapAspect: () -> Unit,
@@ -213,10 +225,12 @@ fun CropPanel(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Composition Overlay selector bar
-            CropOverlaySelectorBar(
-                selectedMode = overlayMode,
-                onSelectMode = onOverlayModeChange
+            // Unified Composition Grid & Cinema Safe-Zone selector bar (with 4-corner Spiral flip)
+            CropCompositionGridBar(
+                selectedMode = compositionGridMode,
+                spiralOrientation = spiralOrientation,
+                onSelectMode = onSelectCompositionGrid,
+                onFlipSpiral = onFlipSpiralOrientation
             )
             // 1. CROP & ORIENTATION SUB-HEADER
             CropAccordionSection(
@@ -529,7 +543,7 @@ private fun CropOverlaySelectorBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF12151C))
+            .background(StudioGraphite)
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 10.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1002,7 +1016,10 @@ private fun CropPrecisionSlider(
     onValueChangeFinished: () -> Unit,
     onReset: () -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1014,7 +1031,7 @@ private fun CropPrecisionSlider(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .weight(1f)
                     .padding(horizontal = 2.dp)
@@ -1023,28 +1040,48 @@ private fun CropPrecisionSlider(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = if (isModified) accentColor else StudioTextSecondary,
-                    modifier = Modifier.size(15.dp)
+                    tint = if (isModified) StudioCinemaAmber else StudioTextPrimary.copy(alpha = 0.78f),
+                    modifier = Modifier.size(14.dp)
                 )
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontWeight = FontWeight.SemiBold
+                    ),
+                    color = if (isModified) StudioTextPrimary else StudioTextPrimary.copy(alpha = 0.88f),
                     maxLines = 1,
                     softWrap = false,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (isModified) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(StudioCinemaAmber)
+                    )
+                }
             }
 
             Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = if (isModified) accentColor.copy(alpha = 0.14f) else StudioSurfaceHighest,
-                modifier = Modifier.testTag("${testTag}_value")
+                shape = RoundedCornerShape(8.dp),
+                color = if (isModified) StudioAmberPillFill else StudioGraphite,
+                modifier = Modifier
+                    .border(
+                        width = 1.dp,
+                        color = if (isModified) StudioCinemaAmber.copy(alpha = 0.72f) else StudioHairline,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .testTag("${testTag}_value")
             ) {
                 Text(
                     text = formattedValue,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isModified) accentColor else StudioTextSecondary,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = if (isModified) StudioTextPrimary else StudioTextSecondary,
                     maxLines = 1,
                     softWrap = false,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -1056,6 +1093,7 @@ private fun CropPrecisionSlider(
             valueRange = valueRange,
             step = step,
             accentColor = accentColor,
+            compact = true,
             testTag = testTag,
             onValueChange = onValueChange,
             onValueChangeFinished = onValueChangeFinished,

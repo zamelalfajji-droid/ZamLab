@@ -311,9 +311,9 @@ fun ExportBottomSheet(
                     )
                 } else {
                     val formatNote = when (selectedFormat) {
-                        ExportFormat.PNG -> "Lossless full-resolution 8-bit RGBA PNG saved to Pictures/ZamLab."
-                        ExportFormat.TIFF -> "Uncompressed 16-bit RGB TIFF encoded by the native C++ engine and saved to Downloads/ZamLab."
-                        ExportFormat.PDF -> "Full-bleed, margin-free print PDF matching exact photo dimensions saved to Downloads/ZamLab."
+                        ExportFormat.PNG -> "Lossless full-resolution 8-bit RGBA PNG saved to Pictures/Z-Effect."
+                        ExportFormat.TIFF -> "Uncompressed 16-bit RGB TIFF encoded by the native C++ engine and saved to Downloads/Z-Effect."
+                        ExportFormat.PDF -> "Full-bleed, margin-free print PDF matching exact photo dimensions saved to Downloads/Z-Effect."
                         else -> ""
                     }
                     Text(

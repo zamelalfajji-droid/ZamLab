@@ -39,7 +39,9 @@ class GlRenderState(
     val splitRatio: Float,
     val applyCrop: Boolean,
     val showHighlightClipping: Boolean = false,
-    val showShadowClipping: Boolean = false
+    val showShadowClipping: Boolean = false,
+    val activeMaskId: String? = null,
+    val showMaskOverlay: Boolean = false
 ) {
     fun matches(other: GlRenderState?): Boolean {
         if (other == null) return false
@@ -51,7 +53,9 @@ class GlRenderState(
             splitRatio == other.splitRatio &&
             applyCrop == other.applyCrop &&
             showHighlightClipping == other.showHighlightClipping &&
-            showShadowClipping == other.showShadowClipping
+            showShadowClipping == other.showShadowClipping &&
+            activeMaskId == other.activeMaskId &&
+            showMaskOverlay == other.showMaskOverlay
     }
 }
 
@@ -151,12 +155,15 @@ class GlPhotoRenderController(
     private var spatialFinishProgram = 0
     private var toneHandles: GlGradingShaders.ToneColorUniformHandles? = null
     private var spatialHandles: GlGradingShaders.SpatialFinishUniformHandles? = null
+    private var maskPipeline: GlMaskPipeline? = null
+    private var isEs3Context = false
 
     private var imageTexId = 0
     private var lutTexId = 0
     private var curveTexId = 0
     private var pass1FboId = 0
     private var pass1TexId = 0
+    private var dummyMaskTexId = 0
     private var fboWidth = 0
     private var fboHeight = 0
 
@@ -213,7 +220,9 @@ class GlPhotoRenderController(
         splitRatio: Float = -1f,
         applyCrop: Boolean = true,
         showHighlightClipping: Boolean = false,
-        showShadowClipping: Boolean = false
+        showShadowClipping: Boolean = false,
+        activeMaskId: String? = null,
+        showMaskOverlay: Boolean = false
     ) {
         if (released) return
         val nextState = GlRenderState(
@@ -224,7 +233,9 @@ class GlPhotoRenderController(
             splitRatio = splitRatio,
             applyCrop = applyCrop,
             showHighlightClipping = showHighlightClipping,
-            showShadowClipping = showShadowClipping
+            showShadowClipping = showShadowClipping,
+            activeMaskId = activeMaskId,
+            showMaskOverlay = showMaskOverlay
         )
         if (dirtyGate.submit(nextState)) {
             val handler = glHandler
@@ -321,35 +332,72 @@ class GlPhotoRenderController(
                 throw IllegalStateException("eglInitialize failed")
             }
 
-            val attribList = intArrayOf(
+            // Prefer OpenGL ES 3.0 (#version 300 es / WebGL2 parity) with automatic ES 2.0 fallback
+            val eglEs3Bit = 0x0040 // EGL_OPENGL_ES3_BIT_KHR
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val numConfigs = IntArray(1)
+            var chosenConfig: EGLConfig? = null
+            var chosenContext: EGLContext? = null
+            var es3 = false
+
+            val attribListEs3 = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
                 EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_RENDERABLE_TYPE, eglEs3Bit,
                 EGL14.EGL_NONE
             )
-            val configs = arrayOfNulls<EGLConfig>(1)
-            val numConfigs = IntArray(1)
-            if (!EGL14.eglChooseConfig(display, attribList, 0, configs, 0, 1, numConfigs, 0)) {
-                throw IllegalStateException("eglChooseConfig failed")
+            if (EGL14.eglChooseConfig(display, attribListEs3, 0, configs, 0, 1, numConfigs, 0) &&
+                numConfigs[0] > 0 && configs[0] != null
+            ) {
+                val ctx3 = EGL14.eglCreateContext(
+                    display,
+                    configs[0],
+                    EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE),
+                    0
+                )
+                if (ctx3 != null && ctx3 != EGL14.EGL_NO_CONTEXT) {
+                    chosenConfig = configs[0]
+                    chosenContext = ctx3
+                    es3 = true
+                }
             }
-            val config = configs[0] ?: throw IllegalStateException("No EGLConfig found")
-            eglConfig = config
 
-            val ctxAttribs = intArrayOf(
-                EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
-                EGL14.EGL_NONE
-            )
-            val context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, ctxAttribs, 0)
-            if (context == null || context == EGL14.EGL_NO_CONTEXT) {
-                throw IllegalStateException("eglCreateContext failed")
+            if (chosenConfig == null || chosenContext == null) {
+                val attribListEs2 = intArrayOf(
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_NONE
+                )
+                if (!EGL14.eglChooseConfig(display, attribListEs2, 0, configs, 0, 1, numConfigs, 0)) {
+                    throw IllegalStateException("eglChooseConfig failed")
+                }
+                chosenConfig = configs[0] ?: throw IllegalStateException("No EGLConfig found")
+                chosenContext = EGL14.eglCreateContext(
+                    display,
+                    chosenConfig,
+                    EGL14.EGL_NO_CONTEXT,
+                    intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
+                    0
+                )
+                if (chosenContext == null || chosenContext == EGL14.EGL_NO_CONTEXT) {
+                    throw IllegalStateException("eglCreateContext failed")
+                }
+                es3 = false
             }
-            eglContext = context
+
+            eglConfig = chosenConfig
+            eglContext = chosenContext
+            isEs3Context = es3
 
             val windowSurface = EGL14.eglCreateWindowSurface(
                 display,
-                config,
+                chosenConfig,
                 surface,
                 intArrayOf(EGL14.EGL_NONE),
                 0
@@ -359,7 +407,7 @@ class GlPhotoRenderController(
             }
             eglSurface = windowSurface
 
-            if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, context)) {
+            if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, chosenContext)) {
                 throw IllegalStateException("eglMakeCurrent failed")
             }
             EGL14.eglSwapInterval(display, 0)
@@ -371,15 +419,22 @@ class GlPhotoRenderController(
             toneHandles = tHandles
             spatialHandles = sHandles
 
+            maskPipeline = GlMaskPipeline(isEs3 = es3).apply {
+                if (!initialize()) {
+                    Log.w(TAG, "GlMaskPipeline initialization degraded; masks will skip GPU pass")
+                }
+            }
+
             fboQuadBuffer = GlGradingShaders.createQuadBuffer(readbackFlipY = true)
             screenQuadBuffer = GlGradingShaders.createQuadBuffer(readbackFlipY = false)
 
-            val textures = IntArray(4)
-            GLES20.glGenTextures(4, textures, 0)
+            val textures = IntArray(5)
+            GLES20.glGenTextures(5, textures, 0)
             imageTexId = textures[0]
             lutTexId = textures[1]
             curveTexId = textures[2]
             pass1TexId = textures[3]
+            dummyMaskTexId = textures[4]
 
             val fbos = IntArray(1)
             GLES20.glGenFramebuffers(1, fbos, 0)
@@ -396,10 +451,11 @@ class GlPhotoRenderController(
             GlGradingShaders.uploadTexture(curveTexId, curveBmp)
             curveTextureAllocated = true
 
-            // Initialize LUT sampler with a valid 1x1 texture so every GLES20 sampler unit is texture-complete
-            val dummyLut = createBitmap(1, 1)
-            GlGradingShaders.uploadTexture(lutTexId, dummyLut)
-            dummyLut.recycle()
+            // Initialize LUT & mask overlay samplers with valid 1x1 textures so every sampler unit is complete
+            val dummyTex = createBitmap(1, 1)
+            GlGradingShaders.uploadTexture(lutTexId, dummyTex)
+            GlGradingShaders.uploadTexture(dummyMaskTexId, dummyTex)
+            dummyTex.recycle()
 
             // Bind constant sampler units once per program
             GLES20.glUseProgram(toneColorProgram)
@@ -410,6 +466,7 @@ class GlPhotoRenderController(
             GLES20.glUniform1i(sHandles.uGradedTex, 0)
             GLES20.glUniform1i(sHandles.uLutTex, 1)
             GLES20.glUniform1i(sHandles.uRawTex, 2)
+            GLES20.glUniform1i(sHandles.uMaskOverlayTex, 3)
 
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, viewportW, viewportH)
@@ -584,7 +641,33 @@ class GlPhotoRenderController(
             }
 
             // =========================================================================
-            // PASS 2: Spatial Detail (Step 6) + Finishing + Compare -> Screen Surface
+            // PASS 1.5: Multi-pass GPU Masking Pipeline (Boolean Sub-Masks, Vector Brush,
+            // Luminance/Color Range, Guided Image Filter, 8 Local Adjustments, Rubylith Alpha)
+            // =========================================================================
+            var gradedForPass2TexId = pass1TexId
+            var overlayMaskTexId = dummyMaskTexId
+            var showRubylith = false
+            if (!state.isOriginal && state.params.masks.isNotEmpty()) {
+                val maskRes = maskPipeline?.processMasks(
+                    inputPhotoTexId = pass1TexId,
+                    masks = state.params.masks,
+                    activeMaskId = state.activeMaskId,
+                    captureOverlay = state.showMaskOverlay,
+                    fboWidth = fboWidth,
+                    fboHeight = fboHeight,
+                    quadBuffer = fboQuad
+                )
+                if (maskRes != null) {
+                    gradedForPass2TexId = maskRes.gradedPhotoTexId
+                    if (maskRes.hasOverlayMask && maskRes.overlayMaskTexId != 0) {
+                        overlayMaskTexId = maskRes.overlayMaskTexId
+                        showRubylith = state.showMaskOverlay
+                    }
+                }
+            }
+
+            // =========================================================================
+            // PASS 2: Spatial Detail (Step 6) + Finishing + Compare + Rubylith -> Screen
             // =========================================================================
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, viewportW, viewportH)
@@ -601,11 +684,13 @@ class GlPhotoRenderController(
             GLES20.glVertexAttribPointer(sHandles.aTexCoord, 2, GLES20.GL_FLOAT, false, 16, screenQuad)
 
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, pass1TexId)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, gradedForPass2TexId)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTexId)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTexId)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayMaskTexId)
 
             GlGradingShaders.bindSpatialFinishUniforms(
                 handles = sHandles,
@@ -620,7 +705,8 @@ class GlPhotoRenderController(
                 splitRatio = state.splitRatio,
                 applyCrop = state.applyCrop,
                 showHighlightClipping = state.showHighlightClipping,
-                showShadowClipping = state.showShadowClipping
+                showShadowClipping = state.showShadowClipping,
+                showMaskOverlay = showRubylith
             )
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -661,14 +747,17 @@ class GlPhotoRenderController(
                 GLES20.glDeleteProgram(spatialFinishProgram)
                 spatialFinishProgram = 0
             }
+            maskPipeline?.release()
+            maskPipeline = null
             toneHandles = null
             spatialHandles = null
-            val texs = intArrayOf(imageTexId, lutTexId, curveTexId, pass1TexId)
+            val texs = intArrayOf(imageTexId, lutTexId, curveTexId, pass1TexId, dummyMaskTexId)
             GLES20.glDeleteTextures(texs.size, texs, 0)
             imageTexId = 0
             lutTexId = 0
             curveTexId = 0
             pass1TexId = 0
+            dummyMaskTexId = 0
             if (pass1FboId != 0) {
                 GLES20.glDeleteFramebuffers(1, intArrayOf(pass1FboId), 0)
                 pass1FboId = 0

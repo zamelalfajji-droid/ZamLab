@@ -4,7 +4,6 @@ import android.os.SystemClock
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -60,25 +59,16 @@ import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zamalfajji.zamlab.R
-import com.zamalfajji.zamlab.ui.theme.StudioActiveOffWhite
 import com.zamalfajji.zamlab.ui.theme.StudioAmberPillFill
-import com.zamalfajji.zamlab.ui.theme.StudioBackground
 import com.zamalfajji.zamlab.ui.theme.StudioCinemaAmber
 import com.zamalfajji.zamlab.ui.theme.StudioCoolWhite
-import com.zamalfajji.zamlab.ui.theme.StudioGlassHairline
-import com.zamalfajji.zamlab.ui.theme.StudioGlassSurface
 import com.zamalfajji.zamlab.ui.theme.StudioGraphite
 import com.zamalfajji.zamlab.ui.theme.StudioHairline
-import com.zamalfajji.zamlab.ui.theme.StudioLuxuryGold
 import com.zamalfajji.zamlab.ui.theme.StudioMutedSlate
-import com.zamalfajji.zamlab.ui.theme.StudioSurfaceHighest
 import com.zamalfajji.zamlab.ui.theme.StudioTextMuted
-import com.zamalfajji.zamlab.ui.theme.StudioTextPrimary
-import com.zamalfajji.zamlab.ui.theme.StudioTextSecondary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -173,15 +163,69 @@ object SliderStepMath {
     }
 }
 
+data class RulerTickSpec(
+    val tickCount: Int,
+    val majorEvery: Int,
+    val midEvery: Int,
+    val zeroFraction: Float?
+)
+
+/**
+ * Pure tick-mark layout and haptic detent math for Z-Effect's unified OLED precision ruler dials.
+ */
+object RulerTickMath {
+    const val DEFAULT_TICK_COUNT: Int = 41
+    const val DEFAULT_MAJOR_EVERY: Int = 5
+    const val MIN_HAPTIC_INTERVAL_MS: Long = 28L
+
+    fun tickSpecForRange(
+        valueRange: ClosedFloatingPointRange<Float>,
+        compact: Boolean = false
+    ): RulerTickSpec {
+        val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1e-4f)
+        val isBipolar = valueRange.start < 0f && valueRange.endInclusive > 0f
+        val zeroFrac = if (isBipolar) (-valueRange.start / span).coerceIn(0f, 1f) else null
+        val count = if (compact) 33 else DEFAULT_TICK_COUNT
+        val majorEvery = if (compact) 4 else DEFAULT_MAJOR_EVERY
+        return RulerTickSpec(
+            tickCount = count,
+            majorEvery = majorEvery,
+            midEvery = (majorEvery / 2).coerceAtLeast(1),
+            zeroFraction = zeroFrac
+        )
+    }
+
+    /**
+     * Returns true when scrubbing from [prevValue] to [nextValue] crosses a tactile ruler tick
+     * detent or snaps across zero, respecting [minIntervalMs] throttling so haptics feel crisp.
+     */
+    fun shouldEmitScrubHaptic(
+        prevValue: Float,
+        nextValue: Float,
+        valueRange: ClosedFloatingPointRange<Float>,
+        lastHapticTimeMs: Long,
+        nowMs: Long,
+        detentCount: Int = 40,
+        minIntervalMs: Long = MIN_HAPTIC_INTERVAL_MS
+    ): Boolean {
+        if (prevValue == nextValue) return false
+        val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1e-4f)
+        val isBipolar = valueRange.start < 0f && valueRange.endInclusive > 0f
+        if (isBipolar) {
+            val crossedZero = (prevValue < 0f && nextValue >= 0f) ||
+                (prevValue > 0f && nextValue <= 0f) ||
+                (abs(prevValue) > 1e-4f && abs(nextValue) <= 1e-4f)
+            if (crossedZero) return true
+        }
+        if (nowMs - lastHapticTimeMs < minIntervalMs) return false
+        val prevBucket = (((prevValue - valueRange.start) / span) * detentCount).roundToInt()
+        val nextBucket = (((nextValue - valueRange.start) / span) * detentCount).roundToInt()
+        return prevBucket != nextBucket
+    }
+}
+
 /**
  * Reliable universal double-tap-to-reset modifier for slider labels, numeric value pills, and readouts.
- *
- * Ergonomic guarantees:
- * - Never consumes pointer-down or drag events, so parent verticalScroll / LazyColumn / LazyRow
- *   scrolling works with zero friction.
- * - Uses [rememberUpdatedState] with a stable `pointerInput(Unit)` key so recompositions during
- *   value updates never cancel an in-progress double-tap.
- * - Triggers subtle [HapticFeedbackType.TextHandleMove] feedback when resetting.
  */
 @Composable
 internal fun Modifier.doubleTapToReset(
@@ -258,11 +302,6 @@ internal fun Modifier.doubleTapToReset(
 /**
  * Zero-latency single-tap selection paired with instant double-tap-to-reset for tool tiles,
  * HSL color swatches, and curve channel pills inside scrollable strips.
- *
- * - Single tap fires immediately on finger release with zero 300ms delay.
- * - Double-tap keeps the item selected, triggers [HapticFeedbackType.TextHandleMove], and resets
- *   that specific parameter.
- * - Never consumes pointer-down or drag events so horizontal/vertical scrolling stays effortless.
  */
 @Composable
 internal fun Modifier.tapAndDoubleTapReset(
@@ -351,16 +390,15 @@ internal fun Modifier.tapAndDoubleTapReset(
 }
 
 /**
- * Wide, tactile Frosted Glass scrolling tick-mark ruler slider for ZamLab's Adjust Focus Dock.
+ * Wide, tactile OLED scrolling tick-mark ruler dial for Z-Effect's Adjust Focus Dock.
  *
  * Features:
- * - Crisp monospace value pill centered directly above the fixed center needle (e.g., `+0.35 EV` or `+18`).
- * - Vertical ruler tick marks that smoothly scroll/scrub under a fixed off-white center needle,
- *   with a subtle warm-gold accent dot & active track glow when modified.
- * - Calibrated damped horizontal drag (`0.55x`, `0.05` step for Exposure `-2..+2`, `1` step for `-100..+100`)
- *   emitting live updates on every move.
- * - Smooth animated double-tap anywhere on the ruler, label, or live numeric value pill to reset
- *   the parameter to its default with light haptic feedback and a single clean undo state.
+ * - Bold white parameter label on left + tabular monospace value pill centered directly above
+ *   the fixed glowing amber-gold (#F5A623) center needle (e.g., `+0.45 EV`, `+15`, `50`).
+ * - Major & minor vertical ruler ticks scrolling under the fixed center needle inside an elevated
+ *   #121214 dark-charcoal pill tray with subtle 1dp #242428 hairline border.
+ * - Tactile haptic tick feedback while scrubbing across detents and zero anchor.
+ * - Smooth animated double-tap reset anywhere on the ruler, label, or readout pill.
  */
 @Composable
 internal fun RulerPrecisionSlider(
@@ -401,7 +439,6 @@ internal fun RulerPrecisionSlider(
     val isBipolar = valueRange.start < 0f && valueRange.endInclusive > 0f
     val zeroAnchor = if (isBipolar) 0f else valueRange.start
 
-    // Cancel any in-flight reset animation or deferred single tap if the active tool changes
     LaunchedEffect(testTag) {
         pendingSingleTapJob?.cancel()
         pendingSingleTapJob = null
@@ -444,7 +481,6 @@ internal fun RulerPrecisionSlider(
         resetAnimJob = scope.launch {
             isAnimatingReset = true
             try {
-                // Capture ONE clean pre-reset undo snapshot before animating smoothly to default
                 currentOnChange(start)
                 val anim = Animatable(start)
                 var lastEmitted = start
@@ -485,7 +521,7 @@ internal fun RulerPrecisionSlider(
         label = "ruler_pill_border"
     )
     val trayBorderColor by animateColorAsState(
-        targetValue = if (isActivelyDragging) StudioCinemaAmber.copy(alpha = 0.65f) else StudioHairline,
+        targetValue = if (isActivelyDragging) StudioCinemaAmber.copy(alpha = 0.72f) else StudioHairline,
         animationSpec = tween(durationMillis = 140),
         label = "ruler_tray_border"
     )
@@ -497,7 +533,7 @@ internal fun RulerPrecisionSlider(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        // Header row: Tool label (left), crisp centered monospace value pill above needle, reset hint (right)
+        // Header row: Bold white parameter label (left), crisp tabular monospace value pill (center), reset hint (right)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -523,16 +559,16 @@ internal fun RulerPrecisionSlider(
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
-                        tint = if (isModified || isActivelyDragging) StudioCoolWhite else StudioMutedSlate,
+                        tint = if (isModified || isActivelyDragging) StudioCinemaAmber else StudioCoolWhite.copy(alpha = 0.80f),
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
                         text = label,
                         style = MaterialTheme.typography.labelLarge.copy(
-                            fontWeight = FontWeight.Medium,
+                            fontWeight = FontWeight.SemiBold,
                             letterSpacing = 0.2.sp
                         ),
-                        color = if (isModified || isActivelyDragging) StudioCoolWhite else StudioMutedSlate,
+                        color = if (isModified || isActivelyDragging) StudioCoolWhite else StudioCoolWhite.copy(alpha = 0.88f),
                         maxLines = 1,
                         softWrap = false,
                         overflow = TextOverflow.Ellipsis
@@ -540,7 +576,7 @@ internal fun RulerPrecisionSlider(
                 }
             }
 
-            // Crisp monospace value pill centered directly above the fixed needle — double-tap smoothly resets
+            // Crisp tabular monospace value pill centered directly above the glowing amber needle
             Surface(
                 shape = RoundedCornerShape(50),
                 color = pillBgColor,
@@ -571,7 +607,7 @@ internal fun RulerPrecisionSlider(
                         text = formattedValue,
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             fontFeatureSettings = "tnum"
                         ),
@@ -599,7 +635,7 @@ internal fun RulerPrecisionSlider(
             }
         }
 
-        // Wide Elevated Dark Graphite scrolling tick-mark ruler under a fixed Cinema Amber center needle
+        // Wide Elevated Dark-Charcoal (#121214) scrolling tick-mark ruler with glowing Amber-Gold needle
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
@@ -622,6 +658,7 @@ internal fun RulerPrecisionSlider(
                 .pointerInput(valueRange, step, sensitivity) {
                     var lastTapUpTimeMs = 0L
                     var lastTapPos = Offset.Zero
+                    var lastHapticMs = 0L
                     val touchSlop = viewConfig.touchSlop
                     val dragStartSlop = (touchSlop * 0.32f).coerceAtLeast(3.5f)
                     val doubleTapWindowMs = maxOf(viewConfig.doubleTapTimeoutMillis, 360L)
@@ -679,6 +716,18 @@ internal fun RulerPrecisionSlider(
                                             step = step,
                                             sensitivity = sensitivity
                                         )
+                                        val nowMs = SystemClock.uptimeMillis()
+                                        if (RulerTickMath.shouldEmitScrubHaptic(
+                                                prevValue = lastEmitted,
+                                                nextValue = initialStep,
+                                                valueRange = valueRange,
+                                                lastHapticTimeMs = lastHapticMs,
+                                                nowMs = nowMs
+                                            )
+                                        ) {
+                                            lastHapticMs = nowMs
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
                                         lastEmitted = initialStep
                                         currentOnChange(initialStep)
                                     }
@@ -694,6 +743,18 @@ internal fun RulerPrecisionSlider(
                                         sensitivity = sensitivity
                                     )
                                     if (nextVal != lastEmitted) {
+                                        val nowMs = SystemClock.uptimeMillis()
+                                        if (RulerTickMath.shouldEmitScrubHaptic(
+                                                prevValue = lastEmitted,
+                                                nextValue = nextVal,
+                                                valueRange = valueRange,
+                                                lastHapticTimeMs = lastHapticMs,
+                                                nowMs = nowMs
+                                            )
+                                        ) {
+                                            lastHapticMs = nowMs
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
                                         lastEmitted = nextVal
                                         currentOnChange(nextVal)
                                     }
@@ -709,7 +770,6 @@ internal fun RulerPrecisionSlider(
                             } else {
                                 lastTapUpTimeMs = SystemClock.uptimeMillis()
                                 lastTapPos = downPos
-                                // Defer single-tap nudge briefly so a double-tap never jumps value or pollutes undo
                                 val centerOffsetPx = downPos.x - (size.width * 0.5f)
                                 val nudged = SliderStepMath.computeDampedDragValue(
                                     startValue = startVal,
@@ -742,15 +802,13 @@ internal fun RulerPrecisionSlider(
                 val centerX = w * 0.5f
                 val cy = h * 0.5f
 
-                // Scale ticks so scrubbing across the ruler moves ticks 1:1 with the damped drag ratio
                 val usableW = (w - 24.dp.toPx()).coerceAtLeast(1f)
                 val pxPerUnit = usableW / (span * sensitivity).coerceAtLeast(1e-4f)
 
-                // Choose crisp visual tick spacing in domain units (so ticks stay clean & uncluttered)
                 val minorTickUnit = when {
-                    span <= 4.05f -> 0.05f // Exposure: every 0.05 EV; major every 0.50 EV (10 steps)
+                    span <= 4.05f -> 0.05f
                     span <= 105f -> 2f
-                    else -> 2.5f // -100..+100: 80 crisp ticks across full scale; major every 25 units
+                    else -> 2.5f
                 }
                 val majorEvery = when {
                     span <= 4.05f -> 10
@@ -766,7 +824,6 @@ internal fun RulerPrecisionSlider(
                 val minIdx = ceil((minVisibleVal - zeroAnchor) / minorTickUnit).toInt()
                 val maxIdx = floor((maxVisibleVal - zeroAnchor) / minorTickUnit).toInt()
 
-                // Optional subtle color spectrum hairline along bottom edge for Temp/Tint/Vibrance/Saturation
                 if (gradientColors != null && gradientColors.size >= 2) {
                     val lineH = 2.dp.toPx()
                     drawRoundRect(
@@ -778,11 +835,10 @@ internal fun RulerPrecisionSlider(
                         topLeft = Offset(16.dp.toPx(), h - 5.dp.toPx()),
                         size = Size((w - 32.dp.toPx()).coerceAtLeast(1f), lineH),
                         cornerRadius = CornerRadius(lineH * 0.5f, lineH * 0.5f),
-                        alpha = 0.65f
+                        alpha = 0.68f
                     )
                 }
 
-                // Active span bar connecting scrolled 0-anchor to the fixed center needle
                 val zeroX = centerX + (zeroAnchor - value) * pxPerUnit
                 if (abs(value - zeroAnchor) > step * 0.25f) {
                     val clampedZeroX = zeroX.coerceIn(0f, w)
@@ -790,14 +846,13 @@ internal fun RulerPrecisionSlider(
                     val barEnd = maxOf(clampedZeroX, centerX)
                     val barH = 2.5.dp.toPx()
                     drawRoundRect(
-                        color = StudioCinemaAmber.copy(alpha = 0.36f),
+                        color = StudioCinemaAmber.copy(alpha = 0.34f),
                         topLeft = Offset(barStart, cy - barH * 0.5f),
                         size = Size((barEnd - barStart).coerceAtLeast(1f), barH),
                         cornerRadius = CornerRadius(barH * 0.5f, barH * 0.5f)
                     )
                 }
 
-                // Draw scrolling vertical ruler ticks
                 val minorStroke = 1.15.dp.toPx()
                 val majorStroke = 1.65.dp.toPx()
                 val activeMin = minOf(zeroAnchor, value)
@@ -809,9 +864,8 @@ internal fun RulerPrecisionSlider(
                     val x = centerX + (tickVal - value) * pxPerUnit
                     if (x < -4f || x > w + 4f) continue
 
-                    // Edge attenuation so ticks fade cleanly into the graphite bezel edges
                     val distRatio = (abs(x - centerX) / (w * 0.5f)).coerceIn(0f, 1f)
-                    val edgeAlpha = (1f - distRatio * distRatio * 0.82f).coerceIn(0.12f, 1f)
+                    val edgeAlpha = (1f - distRatio * distRatio * 0.84f).coerceIn(0.10f, 1f)
 
                     val isZeroTick = idx == 0
                     val isMajor = idx % majorEvery == 0
@@ -821,16 +875,16 @@ internal fun RulerPrecisionSlider(
                         tickVal <= activeMax + 1e-4f
 
                     val halfTickH = when {
-                        isZeroTick -> 13.dp.toPx()
-                        isMajor -> 10.dp.toPx()
+                        isZeroTick -> 13.5.dp.toPx()
+                        isMajor -> 10.5.dp.toPx()
                         isMid -> 7.5.dp.toPx()
                         else -> 5.dp.toPx()
                     }
                     val baseColor = when {
                         isZeroTick && isModified -> StudioCinemaAmber
-                        isZeroTick -> StudioCoolWhite.copy(alpha = 0.78f)
-                        isInActiveSpan -> StudioCinemaAmber.copy(alpha = if (isMajor) 0.92f else 0.58f)
-                        isMajor -> StudioCoolWhite.copy(alpha = 0.34f)
+                        isZeroTick -> StudioCoolWhite.copy(alpha = 0.86f)
+                        isInActiveSpan -> StudioCinemaAmber.copy(alpha = if (isMajor) 0.94f else 0.58f)
+                        isMajor -> StudioCoolWhite.copy(alpha = 0.36f)
                         isMid -> StudioCoolWhite.copy(alpha = 0.22f)
                         else -> StudioMutedSlate.copy(alpha = 0.22f)
                     }
@@ -843,7 +897,7 @@ internal fun RulerPrecisionSlider(
                     )
                 }
 
-                // Subtle edge vignette fade left & right matching graphite tray
+                // OLED charcoal edge vignette fade
                 val fadeW = 28.dp.toPx()
                 drawRect(
                     brush = Brush.horizontalGradient(
@@ -864,13 +918,28 @@ internal fun RulerPrecisionSlider(
                     size = Size(fadeW, h)
                 )
 
-                // Fixed Warm Cinema Amber center needle / tick indicator
+                // Soft glowing Amber-Gold aura behind center needle
+                val glowRadius = if (isActivelyDragging) 20.dp.toPx() else 14.dp.toPx()
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            StudioCinemaAmber.copy(alpha = if (isActivelyDragging) 0.34f else 0.18f),
+                            Color.Transparent
+                        ),
+                        center = Offset(centerX, cy),
+                        radius = glowRadius
+                    ),
+                    radius = glowRadius,
+                    center = Offset(centerX, cy)
+                )
+
+                // Fixed Glowing Amber-Gold center needle
                 val needleHalfH = if (isActivelyDragging) 17.dp.toPx() else 15.dp.toPx()
                 val needleW = if (isActivelyDragging) 2.8.dp.toPx() else 2.2.dp.toPx()
                 drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.52f),
-                    topLeft = Offset(centerX - needleW * 0.5f - 1.dp.toPx(), cy - needleHalfH - 1.dp.toPx()),
-                    size = Size(needleW + 2.dp.toPx(), needleHalfH * 2f + 2.dp.toPx()),
+                    color = Color.Black.copy(alpha = 0.65f),
+                    topLeft = Offset(centerX - needleW * 0.5f - 1.2.dp.toPx(), cy - needleHalfH - 1.dp.toPx()),
+                    size = Size(needleW + 2.4.dp.toPx(), needleHalfH * 2f + 2.dp.toPx()),
                     cornerRadius = CornerRadius(needleW, needleW)
                 )
                 drawRoundRect(
@@ -881,7 +950,7 @@ internal fun RulerPrecisionSlider(
                 )
                 drawCircle(
                     color = StudioCinemaAmber,
-                    radius = if (isModified || isActivelyDragging) 2.5.dp.toPx() else 1.8.dp.toPx(),
+                    radius = if (isModified || isActivelyDragging) 2.6.dp.toPx() else 1.9.dp.toPx(),
                     center = Offset(centerX, cy - needleHalfH - 1.5.dp.toPx())
                 )
             }
@@ -890,14 +959,12 @@ internal fun RulerPrecisionSlider(
 }
 
 /**
- * Smooth, precision-damped darkroom slider track shared across all adjustment panels.
+ * Unified OLED Precision Ruler-Dial Track shared across ALL adjustment panels
+ * (AllParametersPanel, DenoisePanel, MaskPanel, LutPanel, CropPanel, HSL/Color Grading, HealPanel).
  *
- * Key ergonomic guarantees:
- * - Damped relative horizontal drag (no sudden thumb jump on touch-down, smooth fine stepping).
- * - Immediate real-time [onValueChange] emission on every drag delta (never deferred to release).
- * - Vertical gesture yield so scrolling inside accordion panels never accidentally moves a slider.
- * - Direct single-tap positioning (deferred cleanly when [onReset] is set so double-tap never jumps)
- *   and reliable double-tap reset with light haptic feedback ([HapticFeedbackType.TextHandleMove]).
+ * Renders an elevated dark-charcoal (#121214) horizontal tick-mark ruler with major & minor ticks,
+ * glowing amber-gold (#F5A623) value needle, active span illumination, haptic tick scrubbing feedback,
+ * damped relative horizontal drag, vertical-scroll yield, and reliable double-tap reset.
  */
 @Composable
 internal fun StudioPrecisionTrack(
@@ -905,7 +972,7 @@ internal fun StudioPrecisionTrack(
     valueRange: ClosedFloatingPointRange<Float>,
     step: Float = SliderStepMath.defaultStepForRange(valueRange),
     enabled: Boolean = true,
-    accentColor: Color,
+    accentColor: Color = StudioCinemaAmber,
     gradientColors: List<Color>? = null,
     compact: Boolean = false,
     sensitivity: Float = SliderStepMath.DEFAULT_DRAG_SENSITIVITY,
@@ -931,6 +998,9 @@ internal fun StudioPrecisionTrack(
     val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
     val isBipolar = valueRange.start < 0f && valueRange.endInclusive > 0f
     val zeroFraction = if (isBipolar) (-valueRange.start / span).coerceIn(0f, 1f) else 0f
+    val tickSpec = remember(valueRange, compact) {
+        RulerTickMath.tickSpecForRange(valueRange, compact = compact)
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -939,26 +1009,28 @@ internal fun StudioPrecisionTrack(
         }
     }
 
-    val targetThumbRadius: Dp = when {
-        compact && isActivelyDragging -> 8.5.dp
-        compact -> 7.dp
-        isActivelyDragging -> 10.dp
-        else -> 8.dp
-    }
-    val thumbRadiusDp by animateDpAsState(
-        targetValue = targetThumbRadius,
-        animationSpec = tween(durationMillis = 100),
-        label = "slider_thumb_radius"
+    val trayBorderColor by animateColorAsState(
+        targetValue = when {
+            !enabled -> StudioHairline.copy(alpha = 0.55f)
+            isActivelyDragging -> StudioCinemaAmber.copy(alpha = 0.78f)
+            else -> StudioHairline
+        },
+        animationSpec = tween(durationMillis = 120),
+        label = "precision_ruler_border"
     )
 
-    val trackHeightDp = if (compact) 34.dp else 40.dp
-    val padPx = with(density) { 11.dp.toPx() }
+    val trackHeightDp = if (compact) 36.dp else 42.dp
+    val padPx = with(density) { 12.dp.toPx() }
     val doubleTapSlopPx = with(density) { 48.dp.toPx() }
+    val trayShape = RoundedCornerShape(10.dp)
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .height(trackHeightDp)
+            .clip(trayShape)
+            .background(StudioGraphite.copy(alpha = if (enabled) 1f else 0.55f))
+            .border(1.dp, trayBorderColor, trayShape)
             .semantics {
                 progressBarRangeInfo = ProgressBarRangeInfo(
                     current = value.coerceIn(valueRange.start, valueRange.endInclusive),
@@ -977,6 +1049,7 @@ internal fun StudioPrecisionTrack(
                 if (!enabled) return@pointerInput
                 var lastTapUpTimeMs = 0L
                 var lastTapPos = Offset.Zero
+                var lastHapticMs = 0L
                 val touchSlop = viewConfig.touchSlop
                 val dragStartSlop = (touchSlop * 0.42f).coerceAtLeast(4f)
                 val doubleTapWindowMs = maxOf(viewConfig.doubleTapTimeoutMillis, 360L)
@@ -1027,7 +1100,6 @@ internal fun StudioPrecisionTrack(
                                 val dx = change.position.x - downPos.x
                                 val dy = change.position.y - downPos.y
                                 if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) {
-                                    // Yield cleanly to parent verticalScroll
                                     cancelledByVerticalScroll = true
                                     lastTapUpTimeMs = 0L
                                     break
@@ -1036,10 +1108,8 @@ internal fun StudioPrecisionTrack(
                                     dragging = true
                                     isActivelyDragging = true
                                     lastTapUpTimeMs = 0L
-                                    // Anchor at the drag start threshold so there is zero jump
                                     dragAnchorX = change.position.x
                                     change.consume()
-                                    // Signal drag start immediately so undo snapshot & live mode engage
                                     val initialStep = SliderStepMath.computeDampedDragValue(
                                         startValue = startVal,
                                         totalDeltaPx = dx * 0.35f,
@@ -1048,6 +1118,18 @@ internal fun StudioPrecisionTrack(
                                         step = step,
                                         sensitivity = sensitivity
                                     )
+                                    val nowMs = SystemClock.uptimeMillis()
+                                    if (RulerTickMath.shouldEmitScrubHaptic(
+                                            prevValue = lastEmitted,
+                                            nextValue = initialStep,
+                                            valueRange = valueRange,
+                                            lastHapticTimeMs = lastHapticMs,
+                                            nowMs = nowMs
+                                        )
+                                    ) {
+                                        lastHapticMs = nowMs
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
                                     lastEmitted = initialStep
                                     currentOnChange(initialStep)
                                 }
@@ -1063,6 +1145,18 @@ internal fun StudioPrecisionTrack(
                                     sensitivity = sensitivity
                                 )
                                 if (nextVal != lastEmitted) {
+                                    val nowMs = SystemClock.uptimeMillis()
+                                    if (RulerTickMath.shouldEmitScrubHaptic(
+                                            prevValue = lastEmitted,
+                                            nextValue = nextVal,
+                                            valueRange = valueRange,
+                                            lastHapticTimeMs = lastHapticMs,
+                                            nowMs = nowMs
+                                        )
+                                    ) {
+                                        lastHapticMs = nowMs
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
                                     lastEmitted = nextVal
                                     currentOnChange(nextVal)
                                 }
@@ -1089,7 +1183,6 @@ internal fun StudioPrecisionTrack(
                                 if (activeReset != null) {
                                     lastTapUpTimeMs = SystemClock.uptimeMillis()
                                     lastTapPos = downPos
-                                    // Defer single-tap jump briefly so double-tap resets cleanly with 1 undo entry
                                     pendingSingleTapJob = scope.launch {
                                         delay(singleTapDelayMs)
                                         currentOnChange(tappedVal)
@@ -1113,96 +1206,140 @@ internal fun StudioPrecisionTrack(
                 .fillMaxWidth()
                 .height(trackHeightDp)
         ) {
-            val pad = 11.dp.toPx()
-            val trackW = (size.width - pad * 2f).coerceAtLeast(1f)
-            val trackH = (if (compact) 4.5.dp else 5.5.dp).toPx()
-            val cy = size.height * 0.5f
-            val corner = CornerRadius(trackH * 0.5f, trackH * 0.5f)
+            val w = size.width
+            val h = size.height
+            val pad = 12.dp.toPx()
+            val trackW = (w - pad * 2f).coerceAtLeast(1f)
+            val cy = h * 0.5f
 
-            val trackAlpha = if (enabled) 1f else 0.42f
-            val activeTint = if (enabled) accentColor else StudioTextMuted.copy(alpha = 0.45f)
+            val trackAlpha = if (enabled) 1f else 0.40f
+            val needleColor = if (enabled) StudioCinemaAmber else StudioTextMuted.copy(alpha = 0.5f)
+            val spanAccent = if (enabled) {
+                if (accentColor == StudioMutedSlate) StudioCinemaAmber else accentColor
+            } else {
+                StudioTextMuted.copy(alpha = 0.40f)
+            }
 
+            // Optional color spectrum hairline along bottom edge (Temp, Tint, Saturation, HSL)
             if (gradientColors != null && gradientColors.size >= 2) {
+                val railH = 2.2.dp.toPx()
                 drawRoundRect(
                     brush = Brush.horizontalGradient(
-                        colors = if (enabled) gradientColors else gradientColors.map { it.copy(alpha = 0.4f) },
+                        colors = if (enabled) gradientColors else gradientColors.map { it.copy(alpha = 0.35f) },
                         startX = pad,
                         endX = pad + trackW
                     ),
-                    topLeft = Offset(pad, cy - trackH * 0.5f),
-                    size = Size(trackW, trackH),
-                    cornerRadius = corner
+                    topLeft = Offset(pad, h - railH - 2.dp.toPx()),
+                    size = Size(trackW, railH),
+                    cornerRadius = CornerRadius(railH * 0.5f, railH * 0.5f),
+                    alpha = 0.78f
                 )
-            } else {
-                // Base inactive track
+            }
+
+            // Subtle active span bar connecting anchor (0 for bipolar, start for unipolar) to needle
+            val activeMinFrac = if (isBipolar) minOf(zeroFraction, fraction) else 0f
+            val activeMaxFrac = if (isBipolar) maxOf(zeroFraction, fraction) else fraction
+            val spanStartX = pad + activeMinFrac * trackW
+            val spanEndX = pad + activeMaxFrac * trackW
+            val spanW = (spanEndX - spanStartX).coerceAtLeast(0f)
+            if (spanW > 1f) {
+                val barH = 2.dp.toPx()
                 drawRoundRect(
-                    color = StudioSurfaceHighest.copy(alpha = if (enabled) 1f else 0.55f),
-                    topLeft = Offset(pad, cy - trackH * 0.5f),
-                    size = Size(trackW, trackH),
-                    cornerRadius = corner
+                    color = spanAccent.copy(alpha = 0.34f * trackAlpha),
+                    topLeft = Offset(spanStartX, cy - barH * 0.5f),
+                    size = Size(spanW, barH),
+                    cornerRadius = CornerRadius(barH * 0.5f, barH * 0.5f)
                 )
-
-                // Active filled portion (from center zero for bipolar sliders, from left for unipolar)
-                val startX = if (isBipolar) {
-                    pad + minOf(zeroFraction, fraction) * trackW
-                } else {
-                    pad
-                }
-                val endX = if (isBipolar) {
-                    pad + maxOf(zeroFraction, fraction) * trackW
-                } else {
-                    pad + fraction * trackW
-                }
-                val fillW = (endX - startX).coerceAtLeast(0f)
-                if (fillW > 0.5f) {
-                    drawRoundRect(
-                        color = activeTint,
-                        topLeft = Offset(startX, cy - trackH * 0.5f),
-                        size = Size(fillW, trackH),
-                        cornerRadius = corner
-                    )
-                }
             }
 
-            // Center zero tick mark for bipolar sliders
-            if (isBipolar) {
-                val zx = pad + zeroFraction * trackW
+            // Draw crisp major & minor horizontal ruler tick marks
+            val tickCount = tickSpec.tickCount
+            val lastIdx = (tickCount - 1).coerceAtLeast(1)
+            val minorStroke = 1.0.dp.toPx()
+            val majorStroke = 1.45.dp.toPx()
+            val minorHalfH = (if (compact) 4.2.dp else 5.2.dp).toPx()
+            val midHalfH = (if (compact) 6.2.dp else 7.4.dp).toPx()
+            val majorHalfH = (if (compact) 8.4.dp else 9.8.dp).toPx()
+            val zeroHalfH = (if (compact) 10.2.dp else 11.8.dp).toPx()
+
+            for (i in 0 until tickCount) {
+                val tFrac = i.toFloat() / lastIdx.toFloat()
+                val x = pad + tFrac * trackW
+                val isZeroTick = isBipolar && abs(tFrac - zeroFraction) < (0.5f / lastIdx.toFloat())
+                val isMajor = i % tickSpec.majorEvery == 0
+                val isMid = !isMajor && i % tickSpec.midEvery == 0
+                val inActiveSpan = spanW > 1f &&
+                    tFrac >= activeMinFrac - 0.004f &&
+                    tFrac <= activeMaxFrac + 0.004f
+
+                val halfH = when {
+                    isZeroTick -> zeroHalfH
+                    isMajor -> majorHalfH
+                    isMid -> midHalfH
+                    else -> minorHalfH
+                }
+                val tickColor = when {
+                    isZeroTick && spanW > 1f -> spanAccent.copy(alpha = 0.95f * trackAlpha)
+                    isZeroTick -> StudioCoolWhite.copy(alpha = 0.80f * trackAlpha)
+                    inActiveSpan -> spanAccent.copy(alpha = (if (isMajor) 0.92f else 0.56f) * trackAlpha)
+                    isMajor -> StudioCoolWhite.copy(alpha = 0.34f * trackAlpha)
+                    isMid -> StudioCoolWhite.copy(alpha = 0.22f * trackAlpha)
+                    else -> StudioMutedSlate.copy(alpha = 0.22f * trackAlpha)
+                }
+
                 drawLine(
-                    color = if (gradientColors != null) {
-                        StudioBackground.copy(alpha = 0.85f * trackAlpha)
-                    } else {
-                        Color.White.copy(alpha = 0.35f * trackAlpha)
-                    },
-                    start = Offset(zx, cy - trackH * 0.95f),
-                    end = Offset(zx, cy + trackH * 0.95f),
-                    strokeWidth = 1.5.dp.toPx()
+                    color = tickColor,
+                    start = Offset(x, cy - halfH),
+                    end = Offset(x, cy + halfH),
+                    strokeWidth = if (isMajor || isZeroTick) majorStroke else minorStroke,
+                    cap = StrokeCap.Round
                 )
             }
 
-            // Precision thumb indicator
-            val thumbX = pad + fraction * trackW
-            val thumbR = thumbRadiusDp.toPx()
-            if (isActivelyDragging && enabled) {
+            // Glowing Amber-Gold value needle positioned at current value
+            val needleX = pad + fraction * trackW
+            val needleHalfH = (if (compact) {
+                if (isActivelyDragging) 12.5.dp else 10.8.dp
+            } else {
+                if (isActivelyDragging) 14.5.dp else 12.5.dp
+            }).toPx()
+            val needleW = (if (isActivelyDragging) 2.8.dp else 2.2.dp).toPx()
+
+            if (enabled) {
+                val glowRadius = (if (isActivelyDragging) 15.dp else 10.dp).toPx()
                 drawCircle(
-                    color = accentColor.copy(alpha = 0.24f),
-                    radius = thumbR + 5.dp.toPx(),
-                    center = Offset(thumbX, cy)
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            needleColor.copy(alpha = if (isActivelyDragging) 0.38f else 0.18f),
+                            Color.Transparent
+                        ),
+                        center = Offset(needleX, cy),
+                        radius = glowRadius
+                    ),
+                    radius = glowRadius,
+                    center = Offset(needleX, cy)
                 )
             }
-            drawCircle(
-                color = Color.Black.copy(alpha = 0.42f * trackAlpha),
-                radius = thumbR + 1.5.dp.toPx(),
-                center = Offset(thumbX, cy)
+
+            // Dark cutout halo so the amber needle stays razor-sharp against ticks
+            drawRoundRect(
+                color = Color.Black.copy(alpha = 0.72f * trackAlpha),
+                topLeft = Offset(needleX - needleW * 0.5f - 1.2.dp.toPx(), cy - needleHalfH - 1.dp.toPx()),
+                size = Size(needleW + 2.4.dp.toPx(), needleHalfH * 2f + 2.dp.toPx()),
+                cornerRadius = CornerRadius(needleW, needleW)
             )
-            drawCircle(
-                color = Color.White.copy(alpha = if (enabled) 0.96f else 0.55f),
-                radius = thumbR,
-                center = Offset(thumbX, cy)
+            // Warm Amber-Gold vertical needle
+            drawRoundRect(
+                color = needleColor,
+                topLeft = Offset(needleX - needleW * 0.5f, cy - needleHalfH),
+                size = Size(needleW, needleHalfH * 2f),
+                cornerRadius = CornerRadius(needleW, needleW)
             )
+            // Luminous top crown dot
             drawCircle(
-                color = activeTint,
-                radius = (thumbR - 2.3.dp.toPx()).coerceAtLeast(2f),
-                center = Offset(thumbX, cy)
+                color = needleColor,
+                radius = (if (isActivelyDragging) 2.4.dp else 1.8.dp).toPx(),
+                center = Offset(needleX, cy - needleHalfH - 1.2.dp.toPx())
             )
         }
     }

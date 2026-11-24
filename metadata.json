@@ -1,5 +1,5 @@
 {
-  "name": "ZamLab",
+  "name": "Z-Effect",
   "description": "100% offline dark-mode photo editor with custom 3D .cube LUT grading, tonal sliders, Spot Heal / Clone Stamp / Patch Smooth retouching, Crop & Rotate, and full-resolution export.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

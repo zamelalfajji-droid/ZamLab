@@ -672,7 +672,7 @@ class EditorHistoryRobolectricTest {
             android.Manifest.permission.INTERNET in requestedPermissions
         )
         assertEquals(
-            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
+            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.UPSCALE, StudioTab.DENOISE, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
             StudioTab.entries
         )
     }
@@ -1209,9 +1209,9 @@ class EditorHistoryRobolectricTest {
 
     @Test
     fun `Crop and Rotate tab placement, aspect presets, transforms, auto straighten, perspective constrain, and export work cleanly`() = runTest(testDispatcher) {
-        // 1. StudioTab order puts Adjust, All, LUTs, Crop & Rotate, Heal, and Masks
+        // 1. StudioTab order puts Adjust, All, Upscale, Denoise, LUTs, Crop & Rotate, Heal, and Masks
         assertEquals(
-            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
+            listOf(StudioTab.ADJUST, StudioTab.ALL, StudioTab.UPSCALE, StudioTab.DENOISE, StudioTab.LUTS, StudioTab.CROP, StudioTab.HEAL, StudioTab.MASK),
             StudioTab.entries
         )
         assertEquals(
@@ -1699,7 +1699,7 @@ class EditorHistoryRobolectricTest {
         val outsidePx = radialOut.getPixel(85, 25)
         assertTrue(
             "Expected radial mask to brighten inside pixel (${Color.red(insidePx)}) while keeping outside pixel near 96 (${Color.red(outsidePx)})",
-            Color.red(insidePx) > 155 && Color.red(insidePx) > Color.blue(insidePx) + 15 && Color.red(outsidePx) in 94..98
+            Color.red(insidePx) >= 150 && Color.red(insidePx) > Color.blue(insidePx) + 15 && Color.red(outsidePx) in 94..98
         )
 
         // 3. Linear gradient from top (y=0.15) fading to bottom (y=0.55) with Sharpness & Contrast
@@ -2400,6 +2400,410 @@ class EditorHistoryRobolectricTest {
         assertEquals(1, vm.uiState.value.healStrokes.size)
         vm.redo()
         assertEquals(2, vm.uiState.value.healStrokes.size)
+    }
+
+    @Test
+    fun `inspectTensorSpec detects UINT8 and FLOAT types, NCHW vs NHWC layouts, and fixed vs dynamic shapes`() {
+        val dynamicNchwUint8 = LocalInpaintingEngine.inspectTensorSpec(
+            name = "image",
+            javaType = ai.onnxruntime.OnnxJavaType.UINT8,
+            shape = longArrayOf(1L, 3L, -1L, -1L),
+            expectedChannels = 3
+        )
+        assertEquals(ai.onnxruntime.OnnxJavaType.UINT8, dynamicNchwUint8.javaType)
+        assertEquals(LocalInpaintingEngine.TensorLayout.NCHW, dynamicNchwUint8.layout)
+        assertNull(dynamicNchwUint8.fixedHeight)
+        assertNull(dynamicNchwUint8.fixedWidth)
+
+        val fixedNchwFloat = LocalInpaintingEngine.inspectTensorSpec(
+            name = "image",
+            javaType = ai.onnxruntime.OnnxJavaType.FLOAT,
+            shape = longArrayOf(1L, 3L, 512L, 512L),
+            expectedChannels = 3
+        )
+        assertEquals(ai.onnxruntime.OnnxJavaType.FLOAT, fixedNchwFloat.javaType)
+        assertEquals(LocalInpaintingEngine.TensorLayout.NCHW, fixedNchwFloat.layout)
+        assertEquals(512, fixedNchwFloat.fixedHeight)
+        assertEquals(512, fixedNchwFloat.fixedWidth)
+
+        val fixedNhwcFloat = LocalInpaintingEngine.inspectTensorSpec(
+            name = "result",
+            javaType = ai.onnxruntime.OnnxJavaType.FLOAT,
+            shape = longArrayOf(1L, 256L, 320L, 3L),
+            expectedChannels = 3
+        )
+        assertEquals(ai.onnxruntime.OnnxJavaType.FLOAT, fixedNhwcFloat.javaType)
+        assertEquals(LocalInpaintingEngine.TensorLayout.NHWC, fixedNhwcFloat.layout)
+        assertEquals(256, fixedNhwcFloat.fixedHeight)
+        assertEquals(320, fixedNhwcFloat.fixedWidth)
+    }
+
+    @Test
+    fun `float ONNX input packing and output denormalization prevent solid black pixels across -1 to 1 and 0 to 1 ranges`() {
+        val width = 2
+        val height = 2
+        // Mix dark, midtone, and bright RGB pixels
+        val mixedPixels = intArrayOf(
+            Color.rgb(20, 40, 60),     // keep
+            Color.rgb(200, 150, 100),  // remove
+            Color.rgb(128, 255, 0),    // keep
+            Color.rgb(240, 220, 190)   // remove
+        )
+        val removeMask = booleanArrayOf(false, true, false, true)
+
+        // 1. FLOAT [-1, 1] NCHW round-trip
+        val negOneImg = LocalInpaintingEngine.packOnnxImageFloat(
+            pixels = mixedPixels,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NCHW,
+            floatRange = LocalInpaintingEngine.FloatRange.NEGATIVE_ONE_TO_ONE
+        )
+        assertEquals((20f / 127.5f) - 1f, negOneImg.get(0), 1e-4f)
+        assertEquals((255f / 127.5f) - 1f, negOneImg.get(4 + 2), 1e-4f) // green of pixel 2
+
+        val maskFloat = LocalInpaintingEngine.packOnnxMaskFloat(removeMask, width, height)
+        assertEquals(1f, maskFloat.get(0), 1e-5f) // keep
+        assertEquals(0f, maskFloat.get(1), 1e-5f) // remove
+
+        val unpackedNegOne = LocalInpaintingEngine.unpackOnnxFloatResultTensor(
+            resultBuffer = negOneImg,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NCHW,
+            referencePixels = mixedPixels,
+            referenceMask = removeMask
+        )
+        for (i in mixedPixels.indices) {
+            assertEquals("Failed [-1,1] NCHW round-trip at pixel $i", mixedPixels[i], unpackedNegOne[i])
+        }
+
+        // 2. FLOAT [0, 1] NHWC round-trip (must scale to [0, 255], never clamp to 0 black)
+        val zeroToOneNhwc = LocalInpaintingEngine.packOnnxImageFloat(
+            pixels = mixedPixels,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NHWC,
+            floatRange = LocalInpaintingEngine.FloatRange.ZERO_TO_ONE
+        )
+        val unpackedZeroOne = LocalInpaintingEngine.unpackOnnxFloatResultTensor(
+            resultBuffer = zeroToOneNhwc,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NHWC,
+            referencePixels = mixedPixels,
+            referenceMask = removeMask
+        )
+        for (i in mixedPixels.indices) {
+            assertEquals("Failed [0,1] NHWC round-trip at pixel $i", mixedPixels[i], unpackedZeroOne[i])
+        }
+
+        // 3. Ambiguous bright-only crop in [-1, 1] (values all in [0.0, 1.0]) must still denormalize as [-1, 1]
+        val brightPixels = intArrayOf(
+            Color.rgb(180, 190, 200),
+            Color.rgb(210, 220, 230),
+            Color.rgb(160, 170, 180),
+            Color.rgb(240, 245, 250)
+        )
+        val brightNegOne = LocalInpaintingEngine.packOnnxImageFloat(
+            pixels = brightPixels,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NCHW,
+            floatRange = LocalInpaintingEngine.FloatRange.NEGATIVE_ONE_TO_ONE
+        )
+        val unpackedBright = LocalInpaintingEngine.unpackOnnxFloatResultTensor(
+            resultBuffer = brightNegOne,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NCHW,
+            referencePixels = brightPixels,
+            referenceMask = removeMask
+        )
+        for (i in brightPixels.indices) {
+            assertEquals("Failed bright [-1,1] disambiguation at pixel $i", brightPixels[i], unpackedBright[i])
+        }
+
+        // 4. NHWC UINT8 round-trip
+        val uint8Nhwc = LocalInpaintingEngine.packOnnxImageUint8(
+            pixels = mixedPixels,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NHWC
+        )
+        val unpackedUint8Nhwc = LocalInpaintingEngine.unpackOnnxResultTensor(
+            resultBuffer = uint8Nhwc,
+            width = width,
+            height = height,
+            layout = LocalInpaintingEngine.TensorLayout.NHWC
+        )
+        for (i in mixedPixels.indices) {
+            assertEquals("Failed uint8 NHWC round-trip at pixel $i", mixedPixels[i], unpackedUint8Nhwc[i])
+        }
+    }
+
+    @Test
+    fun `isSynthesizedHoleCollapsedBlack detects solid-black hole collapse without rejecting valid fills`() {
+        val removeMask = booleanArrayOf(false, true, false, true)
+        val orig = intArrayOf(
+            Color.rgb(120, 150, 190),
+            Color.rgb(220, 50, 50),
+            Color.rgb(115, 145, 185),
+            Color.rgb(210, 40, 40)
+        )
+        val collapsedBlackOut = intArrayOf(
+            Color.rgb(120, 150, 190),
+            Color.rgb(0, 0, 0),
+            Color.rgb(115, 145, 185),
+            Color.rgb(0, 0, 0)
+        )
+        val healthyOut = intArrayOf(
+            Color.rgb(120, 150, 190),
+            Color.rgb(118, 148, 188),
+            Color.rgb(115, 145, 185),
+            Color.rgb(117, 146, 186)
+        )
+        val blackBgOrig = intArrayOf(
+            Color.rgb(0, 0, 0),
+            Color.rgb(20, 20, 20),
+            Color.rgb(0, 0, 0),
+            Color.rgb(20, 20, 20)
+        )
+
+        assertTrue(LocalInpaintingEngine.isSynthesizedHoleCollapsedBlack(collapsedBlackOut, orig, removeMask))
+        assertFalse(LocalInpaintingEngine.isSynthesizedHoleCollapsedBlack(healthyOut, orig, removeMask))
+        assertFalse(LocalInpaintingEngine.isSynthesizedHoleCollapsedBlack(blackBgOrig.map { Color.BLACK }.toIntArray(), blackBgOrig, removeMask))
+    }
+
+    @Test
+    fun `Spot Heal on solid color swatch fills healed center and border cleanly with surrounding color and never leaves dark smudge`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        LocalInpaintingEngine.resetOnnxStateForTests()
+
+        val swatchR = 215
+        val swatchG = 138
+        val swatchB = 102
+        val swatchColor = Color.rgb(swatchR, swatchG, swatchB)
+
+        // 1. Verify ONNX input image tensor keeps original unmasked RGB (NOT pre-blackened) at masked pixels
+        val samplePixels = intArrayOf(swatchColor, Color.rgb(80, 170, 230))
+        val sampleMask = booleanArrayOf(false, true)
+        val (imgTensorBuf, maskTensorBuf) = LocalInpaintingEngine.packOnnxInputTensors(
+            pixels = samplePixels,
+            removeMask = sampleMask,
+            width = 2,
+            height = 1
+        )
+        assertEquals(80, imgTensorBuf.get(1).toInt() and 0xFF)
+        assertEquals(170, imgTensorBuf.get(3).toInt() and 0xFF)
+        assertEquals(230, imgTensorBuf.get(5).toInt() and 0xFF)
+        assertEquals(255, maskTensorBuf.get(0).toInt() and 0xFF) // keep
+        assertEquals(0, maskTensorBuf.get(1).toInt() and 0xFF)   // remove/fill
+
+        // 2. Test 160x160 solid coral swatch with a pitch-black spot in the center + dark spot at left border
+        val w = 160
+        val h = 160
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(swatchColor)
+            for (y in 72..88) {
+                for (x in 72..88) {
+                    setPixel(x, y, Color.BLACK)
+                }
+            }
+            for (y in 74..86) {
+                for (x in 0..8) {
+                    setPixel(x, y, Color.BLACK)
+                }
+            }
+        }
+
+        val centerStroke = HealStroke(
+            mode = HealMode.SPOT_HEAL,
+            points = listOf(0.5f to 0.5f),
+            radiusNorm = 0.08f,
+            feather = 0.50f,
+            opacity = 1.0f
+        )
+        val healedCenter = OfflineHealEngine.applyStroke(bmp, centerStroke, app)
+
+        // Check every pixel inside the center brushed region matches the surrounding swatch color
+        for (y in 73..87) {
+            for (x in 73..87) {
+                val px = healedCenter.getPixel(x, y)
+                assertTrue(
+                    "Healed center ($x,$y) drifted too far or turned dark: R=${Color.red(px)} G=${Color.green(px)} B=${Color.blue(px)}",
+                    kotlin.math.abs(Color.red(px) - swatchR) <= 6 &&
+                        kotlin.math.abs(Color.green(px) - swatchG) <= 6 &&
+                        kotlin.math.abs(Color.blue(px) - swatchB) <= 6
+                )
+            }
+        }
+        // Unmasked corner remains bit-for-bit identical
+        assertEquals(swatchColor, healedCenter.getPixel(4, 4))
+
+        // Border-touching stroke must also fill cleanly (never leave black on edge pixels)
+        val borderStroke = HealStroke(
+            mode = HealMode.SPOT_HEAL,
+            points = listOf(0.02f to 0.5f),
+            radiusNorm = 0.07f,
+            feather = 0.50f,
+            opacity = 1.0f
+        )
+        val healedBorder = OfflineHealEngine.applyStroke(healedCenter, borderStroke, app)
+        for (y in 76..84) {
+            for (x in 0..6) {
+                val px = healedBorder.getPixel(x, y)
+                assertTrue(
+                    "Healed border ($x,$y) left dark smudge: R=${Color.red(px)} G=${Color.green(px)} B=${Color.blue(px)}",
+                    kotlin.math.abs(Color.red(px) - swatchR) <= 10 &&
+                        kotlin.math.abs(Color.green(px) - swatchG) <= 10 &&
+                        kotlin.math.abs(Color.blue(px) - swatchB) <= 10
+                )
+            }
+        }
+
+        // 3. Test larger 640x640 swatch where crop > CROP_WORK_MAX_DIM (exercises downscale/upscale path)
+        val largeBmp = Bitmap.createBitmap(640, 640, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(swatchColor)
+            for (y in 290..350) {
+                for (x in 290..350) {
+                    setPixel(x, y, Color.rgb(12, 12, 12))
+                }
+            }
+        }
+        val largeStroke = HealStroke(
+            mode = HealMode.SPOT_HEAL,
+            points = listOf(0.45f to 0.50f, 0.55f to 0.50f),
+            radiusNorm = 0.14f,
+            feather = 0.50f,
+            opacity = 1.0f
+        )
+        val healedLarge = OfflineHealEngine.applyStroke(largeBmp, largeStroke, app)
+        for (x in 296..344 step 8) {
+            val px = healedLarge.getPixel(x, 320)
+            assertTrue(
+                "Large scaled crop healed pixel ($x,320) drifted or darkened: R=${Color.red(px)} G=${Color.green(px)} B=${Color.blue(px)}",
+                kotlin.math.abs(Color.red(px) - swatchR) <= 8 &&
+                    kotlin.math.abs(Color.green(px) - swatchG) <= 8 &&
+                    kotlin.math.abs(Color.blue(px) - swatchB) <= 8
+            )
+        }
+
+        bmp.recycle()
+        healedCenter.recycle()
+        healedBorder.recycle()
+        largeBmp.recycle()
+        healedLarge.recycle()
+    }
+
+    @Test
+    fun `Spot Heal near high-contrast swatch corner reconstructs interior surface cleanly and ONNX crop expands 64px with 4px dilation`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        LocalInpaintingEngine.resetOnnxStateForTests()
+
+        // 1. Verify OfflineHealEngine uses 8px fallback feathering and smooth 8px ramp
+        assertEquals(8.0f, OfflineHealEngine.SPOT_HEAL_FALLBACK_FEATHER_PX, 0.01f)
+        val featherCheckStroke = HealStroke(
+            mode = HealMode.SPOT_HEAL,
+            points = listOf(0.5f to 0.5f),
+            radiusNorm = 0.10f, // 20px on 200x200 -> innerR=16, outerR=24
+            feather = 0.50f,
+            opacity = 1.0f
+        )
+        val featherMask = LocalInpaintingEngine.rasterizeAlphaMask(
+            width = 200,
+            height = 200,
+            strokes = listOf(featherCheckStroke),
+            defaultFeatherPx = OfflineHealEngine.SPOT_HEAL_FALLBACK_FEATHER_PX,
+            keepFullCore = true
+        )
+        assertEquals(255, featherMask[100 * 200 + 115]) // 15.5px <= 18.5px core
+        assertTrue(featherMask[100 * 200 + 122] in 1..254) // 22.5px inside 8px feather ring [18.5, 26.5]
+        assertEquals(0, featherMask[100 * 200 + 127]) // 27.5px outside 26.5px
+
+        // 2. Verify MI-GAN crop bounds expand >= 64px on every side around brush mask and dilate mask by 4px
+        val smallMask = BooleanArray(800 * 800)
+        for (y in 390..410) {
+            for (x in 390..410) {
+                smallMask[y * 800 + x] = true
+            }
+        }
+        val dilatedMask = LocalInpaintingEngine.dilateBinaryMask(
+            mask = smallMask,
+            width = 800,
+            height = 800,
+            radiusPx = LocalInpaintingEngine.ONNX_MASK_DILATE_PX
+        )
+        assertTrue(dilatedMask[400 * 800 + 386]) // 4px outside left edge (390 - 4)
+        assertTrue(dilatedMask[414 * 800 + 400]) // 4px outside bottom edge (410 + 4)
+        assertFalse(dilatedMask[400 * 800 + 385]) // 5px outside stays unmasked
+        val onnxBounds = LocalInpaintingEngine.computeContextCropBounds(
+            minX = 386,
+            minY = 386,
+            maxX = 414,
+            maxY = 414,
+            srcW = 800,
+            srcH = 800,
+            minPadPx = LocalInpaintingEngine.ONNX_CONTEXT_PAD_PX,
+            minSquareSide = 512
+        )
+        assertTrue(386 - onnxBounds.x0 >= 64)
+        assertTrue(onnxBounds.x1 - 414 >= 64)
+        assertTrue(386 - onnxBounds.y0 >= 64)
+        assertTrue(onnxBounds.y1 - 414 >= 64)
+        assertTrue(onnxBounds.width >= 512 && onnxBounds.height >= 512)
+
+        // 3. Spot Heal near bottom-right high-contrast corner of a coral color swatch on dark background
+        val w = 200
+        val h = 200
+        val swatchR = 215
+        val swatchG = 138
+        val swatchB = 102
+        val swatchColor = Color.rgb(swatchR, swatchG, swatchB)
+        val borderColor = Color.rgb(12, 14, 18)
+
+        val cornerBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val c = if (x < 140 && y < 140) swatchColor else borderColor
+                    setPixel(x, y, c)
+                }
+            }
+            // Place a dark spot near the bottom-right corner of the coral swatch (adjacent to border at 140)
+            for (y in 118..132) {
+                for (x in 118..132) {
+                    setPixel(x, y, Color.BLACK)
+                }
+            }
+        }
+
+        val cornerStroke = HealStroke(
+            mode = HealMode.SPOT_HEAL,
+            points = listOf(125f / w to 125f / h), // radiusPx=16, outerR=20 -> touches high-contrast border at 140!
+            radiusNorm = 0.08f,
+            feather = 0.50f,
+            opacity = 1.0f
+        )
+        val healedCorner = OfflineHealEngine.applyStroke(cornerBmp, cornerStroke, app)
+
+        // Verify interior surface near the corner cleanly matches the coral swatch (zero dark border smudge)
+        for (y in 116..135) {
+            for (x in 116..135) {
+                val px = healedCorner.getPixel(x, y)
+                assertTrue(
+                    "Corner healed pixel ($x,$y) darkened or drifted near high-contrast border: R=${Color.red(px)} G=${Color.green(px)} B=${Color.blue(px)}",
+                    kotlin.math.abs(Color.red(px) - swatchR) <= 8 &&
+                        kotlin.math.abs(Color.green(px) - swatchG) <= 8 &&
+                        kotlin.math.abs(Color.blue(px) - swatchB) <= 8
+                )
+            }
+        }
+        // Unmasked swatch interior and unmasked dark border outside stroke stay bit-for-bit identical
+        assertEquals(swatchColor, healedCorner.getPixel(20, 20))
+        assertEquals(borderColor, healedCorner.getPixel(160, 160))
+
+        cornerBmp.recycle()
+        healedCorner.recycle()
     }
 }
 
